@@ -80,19 +80,24 @@ class ReminderChecker:
 
     def _loop(self):
         while True:
-            time.sleep(15)
             self._check()
+            time.sleep(15)
 
     def _check(self):
         now = datetime.datetime.now()
         cutoff = now - datetime.timedelta(days=7)
+        to_fire = []
         with _REMINDER_LOCK:
             reminders = _load_reminders()
             changed = False
             survivors = []
             for r in reminders:
-                fire_at = datetime.datetime.fromisoformat(r["fire_at"])
-                if r["fired"]:
+                try:
+                    fire_at = datetime.datetime.fromisoformat(r["fire_at"])
+                except (ValueError, KeyError, TypeError):
+                    changed = True  # drop malformed entry
+                    continue
+                if r.get("fired"):
                     # Prune fired reminders older than 7 days
                     if fire_at >= cutoff:
                         survivors.append(r)
@@ -100,23 +105,41 @@ class ReminderChecker:
                         changed = True
                     continue
                 if now >= fire_at:
-                    self._fire(r["message"])
+                    to_fire.append(r["message"])
                     r["fired"] = True
                     changed = True
                 survivors.append(r)
             if changed:
                 _save_reminders(survivors)
+        # Fire notifications outside the lock to avoid blocking set/list/cancel
+        for msg in to_fire:
+            self._fire(msg)
 
     @staticmethod
     def _fire(message: str):
-        script = f'display notification {json.dumps(message)} with title "SysControl Reminder"'
+        script = (
+            f'display notification {json.dumps(message)} '
+            f'with title "SysControl Reminder" sound name "default"'
+        )
+        log_path = pathlib.Path.home() / ".syscontrol" / "reminder_log.txt"
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, timeout=5,
+                capture_output=True, text=True, timeout=5,
             )
-        except Exception:
-            pass  # Silently absorb — notification may be blocked by macOS privacy settings
+            if proc.returncode != 0:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a") as f:
+                    ts = datetime.datetime.now().isoformat(timespec="seconds")
+                    f.write(f"[{ts}] osascript failed (rc={proc.returncode}): {proc.stderr.strip()}\n")
+        except Exception as exc:
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a") as f:
+                    ts = datetime.datetime.now().isoformat(timespec="seconds")
+                    f.write(f"[{ts}] _fire exception: {exc}\n")
+            except Exception:
+                pass
 
 
 # ── MCP helpers ──────────────────────────────────────────────────────────────
@@ -251,12 +274,13 @@ def _use_case_analysis(use_case: str, cpu_pct: float, ram_pct: float) -> dict:
 
 def _fig_to_b64(fig) -> str:
     """Serialize a matplotlib figure to a base64 PNG string and close it."""
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", dpi=110)
-    buf.seek(0)
-    encoded = base64.b64encode(buf.read()).decode()
-    plt.close(fig)
-    return encoded
+    try:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=110)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode()
+    finally:
+        plt.close(fig)
 
 
 def _safe(fn):
@@ -278,9 +302,10 @@ def make_error(id_, code: int, message: str) -> dict:
 
 def get_cpu_usage() -> dict:
     per_core = psutil.cpu_percent(interval=0.5, percpu=True)
+    total = round(sum(per_core) / len(per_core), 1) if per_core else 0.0
     freq = psutil.cpu_freq()
     return {
-        "total_percent": psutil.cpu_percent(interval=0.5),
+        "total_percent": total,
         "per_core_percent": per_core,
         "core_count_logical": psutil.cpu_count(logical=True),
         "core_count_physical": psutil.cpu_count(logical=False),
@@ -348,12 +373,12 @@ def get_disk_usage() -> dict:
             })
         except (PermissionError, OSError):
             continue
-    io = psutil.disk_io_counters()
+    disk_io = psutil.disk_io_counters()
     return {
         "partitions": partitions,
         "io_counters": {
-            "read_mb": round(io.read_bytes / 1e6, 2) if io else None,
-            "write_mb": round(io.write_bytes / 1e6, 2) if io else None,
+            "read_mb": round(disk_io.read_bytes / 1e6, 2) if disk_io else None,
+            "write_mb": round(disk_io.write_bytes / 1e6, 2) if disk_io else None,
         }
     }
 
@@ -490,17 +515,21 @@ def _gpu_with_chart():
     w = 0.25
 
     fig, ax = plt.subplots(figsize=(7, 3.5))
-    ax.bar([i - w for i in x], [g["load_percent"]   for g in gpus], width=w, label="Load %",  color="#3498db")
-    ax.bar([i      for i in x], [g["memory_percent"] for g in gpus], width=w, label="VRAM %",  color="#9b59b6")
-    ax.bar([i + w  for i in x], [g.get("temperature_c") or 0  for g in gpus], width=w, label="Temp °C", color="#e74c3c")
-    ax.set_xticks(x)
-    ax.set_xticklabels([g["name"] for g in gpus], fontsize=8)
-    ax.set_ylim(0, 110)
-    ax.set_ylabel("% / °C")
-    ax.set_title("GPU Metrics")
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    return data, _fig_to_b64(fig)
+    try:
+        ax.bar([i - w for i in x], [g.get("load_percent") or 0 for g in gpus], width=w, label="Load %",  color="#3498db")
+        ax.bar([i      for i in x], [g.get("memory_percent") or 0 for g in gpus], width=w, label="VRAM %",  color="#9b59b6")
+        ax.bar([i + w  for i in x], [g.get("temperature_c") or 0  for g in gpus], width=w, label="Temp °C", color="#e74c3c")
+        ax.set_xticks(x)
+        ax.set_xticklabels([g["name"] for g in gpus], fontsize=8)
+        ax.set_ylim(0, 110)
+        ax.set_ylabel("% / °C")
+        ax.set_title("GPU Metrics")
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        return data, _fig_to_b64(fig)
+    except Exception:
+        plt.close(fig)
+        return data
 
 
 def get_hardware_profile(use_case: str = "") -> dict:
@@ -685,8 +714,12 @@ def get_system_alerts() -> dict:
 
 
 def get_network_connections() -> dict:
+    try:
+        raw_connections = psutil.net_connections(kind="inet")
+    except psutil.AccessDenied:
+        return {"error": "Access denied. Network connection listing may require elevated privileges.", "connections": [], "total": 0}
     connections = []
-    for conn in psutil.net_connections(kind="inet"):
+    for conn in raw_connections:
         try:
             proc_name = psutil.Process(conn.pid).name() if conn.pid else None
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -801,6 +834,7 @@ def get_process_details(pid: int) -> dict:
     try:
         p = psutil.Process(pid)
         with p.oneshot():
+            mem = p.memory_info()
             return {
                 "pid": pid,
                 "name": p.name(),
@@ -811,8 +845,8 @@ def get_process_details(pid: int) -> dict:
                 "created": datetime.datetime.fromtimestamp(p.create_time()).isoformat(),
                 "cpu_percent": p.cpu_percent(interval=0.2),
                 "memory": {
-                    "rss_mb": round(p.memory_info().rss / 1e6, 2),
-                    "vms_mb": round(p.memory_info().vms / 1e6, 2),
+                    "rss_mb": round(mem.rss / 1e6, 2),
+                    "vms_mb": round(mem.vms / 1e6, 2),
                     "percent": round(p.memory_percent(), 2),
                 },
                 "threads": p.num_threads(),
@@ -820,6 +854,8 @@ def get_process_details(pid: int) -> dict:
             }
     except psutil.NoSuchProcess:
         return {"error": f"No process with PID {pid}"}
+    except psutil.AccessDenied:
+        return {"error": f"Access denied reading process details for PID {pid}"}
 
 
 def search_process(name: str) -> dict:
@@ -1220,7 +1256,7 @@ def get_weather(location: str = "", units: str = "imperial") -> dict:
             },
             "clothing_suggestions": clothing,
         }
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, socket.timeout, OSError) as e:
         return {"error": f"Network error: {str(e)}. Check your internet connection."}
     except (KeyError, ValueError, json.JSONDecodeError) as e:
         return {"error": f"Failed to parse weather data: {str(e)}"}
@@ -1364,14 +1400,14 @@ def _detect_carrier(tn: str) -> str:
         return "usps"
     if re.match(r"^[A-Z]{2}\d{9}[A-Z]{2}$", tn):
         return "usps"
-    if re.match(r"^\d{20,22}$", tn):
-        return "usps"
     if re.match(r"^\d{12}$", tn):
         return "fedex"
     if re.match(r"^\d{15}$", tn):
         return "fedex"
     if re.match(r"^\d{22}$", tn):
         return "fedex"
+    if re.match(r"^\d{20,21}$", tn):
+        return "usps"
     if re.match(r"^\d{10,11}$", tn):
         return "dhl"
     if re.match(r"^(JD|GM)\d{14,20}$", tn):
@@ -1468,7 +1504,7 @@ def track_package(tracking_number: str) -> dict:
             "history": history,
         }
 
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, socket.timeout, OSError) as e:
         return {"tracking_number": tracking_number, "error": f"Network error: {str(e)}"}
     except (json.JSONDecodeError, KeyError, ValueError) as e:
         return {"tracking_number": tracking_number, "error": f"Failed to parse tracking response: {str(e)}"}
@@ -1788,14 +1824,20 @@ def main():
         try:
             request = json.loads(line)
         except json.JSONDecodeError:
-            sys.stdout.write(json.dumps(make_error(None, -32700, "Parse error")) + "\n")
-            sys.stdout.flush()
+            try:
+                sys.stdout.write(json.dumps(make_error(None, -32700, "Parse error")) + "\n")
+                sys.stdout.flush()
+            except BrokenPipeError:
+                return
             continue
 
         response = handle_request(request)
         if response is not None:
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
+            try:
+                sys.stdout.write(json.dumps(response) + "\n")
+                sys.stdout.flush()
+            except BrokenPipeError:
+                return
 
 
 if __name__ == "__main__":
