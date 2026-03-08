@@ -1,34 +1,64 @@
-# Virtual environment
+# ── Python ────────────────────────────────────────────────────────────────────
 .venv/
-
-# Python bytecode
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
-# Distribution and build artifacts
+*.pdb
+*.egg-info/
 dist/
 build/
-*.egg-info/
+.eggs/
 
-# macOS metadata
+# uv
+# uv.lock is intentionally committed so keep it tracked.
+# Exclude uv's internal cache if it ever lands locally.
+.uv/
+
+# ── SysControl runtime data ───────────────────────────────────────────────────
+# Reminder storage and notification logs written by server.py at runtime.
+# These live in ~/.syscontrol/ but guard against them appearing in the repo too.
+reminders.json
+reminder_log.txt
+
+# Generated chart images (server.py renders these in-memory as base64,
+# but if anyone saves them locally they shouldn't be committed).
+*.png
+*.jpg
+
+# ── Secrets / credentials ─────────────────────────────────────────────────────
+.env
+.env.*
+*.key
+*.pem
+secrets.json
+
+# ── Claude Desktop config (may contain local paths / secrets) ─────────────────
+# The template claude_desktop_config.json IS committed; ignore personal overrides.
+claude_desktop_config.local.json
+
+# ── macOS metadata ────────────────────────────────────────────────────────────
 .DS_Store
 .AppleDouble
 .LSOverride
+Icon?
+._*
 
-# Environment variables
-.env
-.env.*
-
-# IDE and editor directories
+# ── IDE / editor ──────────────────────────────────────────────────────────────
 .idea/
 .vscode/
 *.swp
 *.swo
+*.sublime-project
+*.sublime-workspace
 
-# pytest cache
+# ── Testing & type-checking ───────────────────────────────────────────────────
 .pytest_cache/
-
-# mypy cache
 .mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
