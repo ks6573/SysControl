@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "system-monitor": {
-      "command": "Path-To-Your-UV",
-      "args": ["run", "Path-To-Your-Server"],
-      "env": {}
-    }
-  }
-}
