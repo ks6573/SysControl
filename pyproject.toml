@@ -1,7 +1,7 @@
 [project]
-name = "syscontrol-mcp"
-version = "0.1.0"
-description = "AI-powered system monitoring agent with MCP tool server"
+name = "syscontrol"
+version = "0.2.0"
+description = "All-In-One AI agent with MCP tool server; Ultron but slightly weaker "
 readme = "README.md"
 ***REMOVED***
 requires-python = ">=3.11"

@@ -1325,8 +1325,8 @@ wheels = [
 ]
 
 [[package]]
-name = "syscontrol-mcp"
-version = "0.1.0"
+name = "syscontrol"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
