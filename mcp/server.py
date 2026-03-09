@@ -2250,6 +2250,849 @@ def browser_get_page() -> dict:
         return {"error": f"Failed to read browser page: {e}", "browser": browser}
 
 
+# ── iMessage tools ───────────────────────────────────────────────────────────
+
+def send_imessage(recipient: str, message: str) -> dict:
+    """Send an iMessage or SMS via macOS Messages.app using AppleScript."""
+    denied = _permission_check("allow_messaging", "send_imessage")
+    if denied:
+        return denied
+    if platform.system() != "Darwin":
+        return {"error": "send_imessage requires macOS."}
+    if not recipient or not message:
+        return {"error": "recipient and message are required."}
+    # AppleScript: send to a buddy (phone number or email).
+    script = (
+        f'tell application "Messages"\n'
+        f'  set targetService to 1st service whose service type = iMessage\n'
+        f'  set targetBuddy to buddy {json.dumps(recipient)} of targetService\n'
+        f'  send {json.dumps(message)} to targetBuddy\n'
+        f'end tell'
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            # Fallback: try without specifying service (works for SMS relay too)
+            script2 = (
+                f'tell application "Messages"\n'
+                f'  send {json.dumps(message)} to buddy {json.dumps(recipient)}\n'
+                f'end tell'
+            )
+            proc2 = subprocess.run(
+                ["osascript", "-e", script2],
+                capture_output=True, text=True, timeout=15,
+            )
+            if proc2.returncode != 0:
+                return {
+                    "error": proc2.stderr.strip() or proc.stderr.strip(),
+                    "hint": (
+                        "Make sure Messages.app is signed in and you have granted "
+                        "Automation permission to Terminal/iTerm in System Settings → "
+                        "Privacy & Security → Automation."
+                    ),
+                }
+        return {"status": "sent", "recipient": recipient, "message": message}
+    except subprocess.TimeoutExpired:
+        return {"error": "AppleScript timed out sending iMessage."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_imessage_history(contact: str, limit: int = 20) -> dict:
+    """Return recent iMessage/SMS messages for a contact from chat.db."""
+    denied = _permission_check("allow_message_history", "get_imessage_history")
+    if denied:
+        return denied
+    if platform.system() != "Darwin":
+        return {"error": "get_imessage_history requires macOS."}
+    import sqlite3 as _sqlite3
+
+    db_path = pathlib.Path.home() / "Library" / "Messages" / "chat.db"
+    if not db_path.exists():
+        return {"error": f"chat.db not found at {db_path}. Full Disk Access may be required."}
+
+    limit = max(1, min(limit, 200))
+    contact_q = f"%{contact}%"
+
+    try:
+        # Use a copy-on-read approach: open read-only URI to avoid locking
+        conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = _sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                m.text,
+                m.is_from_me,
+                datetime(m.date / 1000000000 + strftime('%s','2001-01-01'), 'unixepoch', 'localtime') AS sent_at,
+                h.id AS handle
+            FROM message m
+            LEFT JOIN handle h ON m.handle_id = h.rowid
+            WHERE (h.id LIKE ? OR m.is_from_me = 1)
+              AND m.text IS NOT NULL AND m.text != ''
+            ORDER BY m.date DESC
+            LIMIT ?
+            """,
+            (contact_q, limit),
+        )
+        rows = cur.fetchall()
+        conn.close()
+
+        messages = [
+            {
+                "from": "me" if r["is_from_me"] else r["handle"],
+                "text": r["text"],
+                "sent_at": r["sent_at"],
+            }
+            for r in rows
+        ]
+        return {
+            "contact_filter": contact,
+            "count": len(messages),
+            "messages": list(reversed(messages)),  # chronological order
+        }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "hint": "Full Disk Access for Terminal is required in System Settings → Privacy & Security → Full Disk Access.",
+        }
+
+
+# ── Clipboard tools ───────────────────────────────────────────────────────────
+
+def get_clipboard() -> dict:
+    """Return the current contents of the system clipboard."""
+    if platform.system() != "Darwin":
+        return {"error": "get_clipboard is currently macOS only (uses pbpaste)."}
+    try:
+        result = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=5)
+        text = result.stdout
+        return {
+            "text": text,
+            "length": len(text),
+            "has_content": bool(text.strip()),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def set_clipboard(text: str) -> dict:
+    """Write text to the system clipboard."""
+    if platform.system() != "Darwin":
+        return {"error": "set_clipboard is currently macOS only (uses pbcopy)."}
+    try:
+        subprocess.run(
+            ["pbcopy"],
+            input=text, text=True, timeout=5, check=True,
+        )
+        return {"status": "ok", "length": len(text)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Screenshot tool ───────────────────────────────────────────────────────────
+
+def take_screenshot(path: str = "") -> tuple:
+    """
+    Capture the entire screen. Always returns a 2-tuple (metadata_dict, base64_png_string).
+    On error, returns ({"error": ...}, "").
+    Optionally saves the image to `path` if provided.
+    """
+    denied = _permission_check("allow_screenshot", "take_screenshot")
+    if denied:
+        return denied, ""
+    import tempfile as _tempfile
+
+    if platform.system() != "Darwin":
+        return {"error": "take_screenshot requires macOS (uses screencapture)."}, ""
+
+    with _tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        # -x = no sound, -C = capture cursor
+        proc = subprocess.run(
+            ["screencapture", "-x", tmp_path],
+            capture_output=True, timeout=10,
+        )
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode(errors="replace").strip()
+            return {"error": f"screencapture failed: {stderr or 'unknown error'}"}, ""
+
+        img_file = pathlib.Path(tmp_path)
+        if not img_file.exists() or img_file.stat().st_size == 0:
+            return {"error": "screencapture produced no output (screen may not be accessible)."}, ""
+
+        img_bytes = img_file.read_bytes()
+        img_b64 = base64.b64encode(img_bytes).decode()
+
+        saved_to = None
+        if path:
+            dest = pathlib.Path(path).expanduser()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(img_bytes)
+            saved_to = str(dest)
+
+        meta = {
+            "size_bytes": len(img_bytes),
+            "saved_to": saved_to,
+        }
+        return meta, img_b64
+    except subprocess.TimeoutExpired:
+        return {"error": "screencapture timed out."}, ""
+    except Exception as e:
+        return {"error": str(e)}, ""
+    finally:
+        try:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+# ── App control tools ─────────────────────────────────────────────────────────
+
+def open_app(name: str) -> dict:
+    """Open an application by name using macOS `open -a`."""
+    if platform.system() != "Darwin":
+        return {"error": "open_app requires macOS."}
+    if not name:
+        return {"error": "app name is required."}
+    try:
+        proc = subprocess.run(
+            ["open", "-a", name],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode != 0:
+            return {"error": proc.stderr.strip() or f"Could not open '{name}'."}
+        return {"status": "ok", "app": name}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def quit_app(name: str, force: bool = False) -> dict:
+    """Gracefully quit an application by name using AppleScript."""
+    if platform.system() != "Darwin":
+        return {"error": "quit_app requires macOS."}
+    if not name:
+        return {"error": "app name is required."}
+    try:
+        if force:
+            # Force-quit via kill
+            find_proc = subprocess.run(
+                ["pgrep", "-ix", name],
+                capture_output=True, text=True, timeout=5,
+            )
+            pids = find_proc.stdout.strip().splitlines()
+            if not pids:
+                return {"error": f"No process found matching '{name}'."}
+            for pid in pids:
+                subprocess.run(["kill", "-9", pid], timeout=5)
+            return {"status": "force-killed", "app": name, "pids": pids}
+        else:
+            script = f'tell application "{name}" to quit'
+            proc = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode != 0:
+                return {"error": proc.stderr.strip() or f"Could not quit '{name}'."}
+            return {"status": "quit", "app": name}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Volume tools ──────────────────────────────────────────────────────────────
+
+def get_volume() -> dict:
+    """Return the current output volume and mute state."""
+    if platform.system() != "Darwin":
+        return {"error": "get_volume requires macOS."}
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", "get volume settings"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode != 0:
+            return {"error": proc.stderr.strip()}
+        # Output format: "output volume:75, input volume:54, alert volume:100, output muted:false"
+        raw = proc.stdout.strip()
+        result = {}
+        for part in raw.split(","):
+            part = part.strip()
+            if ":" in part:
+                k, v = part.split(":", 1)
+                key = k.strip().replace(" ", "_")
+                val_str = v.strip()
+                if val_str.isdigit():
+                    result[key] = int(val_str)
+                elif val_str in ("true", "false"):
+                    result[key] = val_str == "true"
+                else:
+                    result[key] = val_str
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def set_volume(level: int) -> dict:
+    """Set the system output volume (0–100)."""
+    if platform.system() != "Darwin":
+        return {"error": "set_volume requires macOS."}
+    level = max(0, min(100, int(level)))
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", f"set volume output volume {level}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode != 0:
+            return {"error": proc.stderr.strip()}
+        return {"status": "ok", "output_volume": level}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Wi-Fi tool ────────────────────────────────────────────────────────────────
+
+_AIRPORT_PATH = (
+    "/System/Library/PrivateFrameworks/Apple80211.framework"
+    "/Versions/Current/Resources/airport"
+)
+
+def get_wifi_networks() -> dict:
+    """
+    Return information about nearby / available Wi-Fi networks.
+    Uses the `airport` CLI when available (macOS ≤13), otherwise falls back to
+    `system_profiler SPAirPortDataType` which works on macOS 14+.
+    """
+    if platform.system() != "Darwin":
+        return {"error": "get_wifi_networks requires macOS."}
+
+    # ── Try airport (macOS ≤13) ──────────────────────────────────────────────
+    airport = pathlib.Path(_AIRPORT_PATH)
+    if airport.exists():
+        try:
+            proc = subprocess.run(
+                [str(airport), "-s"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if proc.returncode == 0:
+                lines = proc.stdout.splitlines()
+                networks = []
+                for line in lines[1:]:
+                    if not line.strip():
+                        continue
+                    try:
+                        ssid = line[:33].strip()
+                        rest = line[33:].split()
+                        bssid = rest[0] if rest else ""
+                        rssi = int(rest[1]) if len(rest) > 1 else None
+                        channel = rest[2] if len(rest) > 2 else ""
+                        security = rest[6] if len(rest) > 6 else rest[-1] if rest else ""
+                        networks.append({"ssid": ssid, "bssid": bssid,
+                                         "rssi_dbm": rssi, "channel": channel,
+                                         "security": security})
+                    except (IndexError, ValueError):
+                        continue
+                networks.sort(key=lambda n: n.get("rssi_dbm") or -999, reverse=True)
+                return {"source": "airport", "networks": networks, "count": len(networks)}
+        except subprocess.TimeoutExpired:
+            return {"error": "Wi-Fi scan timed out (20s). Enable Wi-Fi and try again."}
+        except Exception:
+            pass  # fall through to system_profiler
+
+    # ── Fallback: system_profiler SPAirPortDataType (macOS 14+) ─────────────
+    try:
+        proc = subprocess.run(
+            ["system_profiler", "SPAirPortDataType", "-json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return {"error": proc.stderr.strip() or "system_profiler failed."}
+        data = json.loads(proc.stdout)
+        sp_wifi = data.get("SPAirPortDataType", [])
+        networks = []
+
+        def _parse_rssi(sig_noise_str: str) -> int | None:
+            """Parse '-56 dBm / -95 dBm' → -56."""
+            if not sig_noise_str:
+                return None
+            try:
+                return int(sig_noise_str.split()[0])
+            except (ValueError, IndexError):
+                return None
+
+        for entry in sp_wifi:
+            # interfaces is a list of dicts, each with _name = interface identifier
+            interfaces = entry.get("spairport_airport_interfaces", [])
+            for iface in interfaces:
+                # Current connected network — flat dict with _name as SSID
+                cur = iface.get("spairport_current_network_information", {})
+                if cur:
+                    networks.append({
+                        "ssid": cur.get("_name", ""),
+                        "phy_mode": cur.get("spairport_network_phymode", ""),
+                        "channel": str(cur.get("spairport_network_channel", "")),
+                        "security": cur.get("spairport_security_mode", ""),
+                        "rssi_dbm": _parse_rssi(cur.get("spairport_signal_noise", "")),
+                        "connected": True,
+                    })
+                # Other visible networks — list of dicts, each with _name as SSID
+                others = iface.get("spairport_airport_other_local_wireless_networks", [])
+                if isinstance(others, list):
+                    for net in others:
+                        sn = net.get("spairport_signal_noise", "")
+                        networks.append({
+                            "ssid": net.get("_name", ""),
+                            "phy_mode": net.get("spairport_network_phymode", ""),
+                            "channel": str(net.get("spairport_network_channel", "")),
+                            "security": net.get("spairport_security_mode", ""),
+                            "rssi_dbm": _parse_rssi(sn) if sn else None,
+                            "connected": False,
+                        })
+
+        return {"source": "system_profiler", "networks": networks, "count": len(networks)}
+    except subprocess.TimeoutExpired:
+        return {"error": "system_profiler timed out (30s)."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── File tools ────────────────────────────────────────────────────────────────
+
+_MAX_READ_CHARS = 32_000
+
+def read_file(path: str, max_chars: int = 16_000) -> dict:
+    """Read a text file and return its contents."""
+    denied = _permission_check("allow_file_read", "read_file")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    max_chars = max(1, min(max_chars, _MAX_READ_CHARS))
+    try:
+        p = pathlib.Path(path).expanduser().resolve()
+        if not p.exists():
+            return {"error": f"File not found: {p}"}
+        if not p.is_file():
+            return {"error": f"Not a file: {p}"}
+        size = p.stat().st_size
+        content = p.read_text(errors="replace")
+        truncated = len(content) > max_chars
+        return {
+            "path": str(p),
+            "size_bytes": size,
+            "chars_read": min(len(content), max_chars),
+            "truncated": truncated,
+            "content": content[:max_chars],
+        }
+    except PermissionError:
+        return {"error": f"Permission denied: {path}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def write_file(path: str, content: str, overwrite: bool = True) -> dict:
+    """Write text content to a file. Creates parent directories as needed."""
+    denied = _permission_check("allow_file_write", "write_file")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    try:
+        p = pathlib.Path(path).expanduser().resolve()
+        if p.exists() and not overwrite:
+            return {"error": f"File already exists: {p}. Pass overwrite=true to replace it."}
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+        return {
+            "status": "ok",
+            "path": str(p),
+            "bytes_written": len(content.encode()),
+        }
+    except PermissionError:
+        return {"error": f"Permission denied: {path}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Permission gate ────────────────────────────────────────────────────────────
+#
+# All sensitive tools are disabled until the user explicitly opts in via
+# ~/.syscontrol/config.json. This prevents the agent from accessing private
+# data or performing actions without the user's knowledge.
+#
+# Example config.json enabling all gates:
+#   {
+#     "allow_shell":           true,
+#     "allow_messaging":       true,
+#     "allow_message_history": true,
+#     "allow_screenshot":      true,
+#     "allow_file_read":       true,
+#     "allow_file_write":      true,
+#     "allow_calendar":        true,
+#     "allow_contacts":        true,
+#     "allow_accessibility":   true
+#   }
+
+_SYSCONTROL_CONFIG_FILE = _REMINDER_DIR / "config.json"
+
+
+def _load_config() -> dict:
+    """Load ~/.syscontrol/config.json, returning {} on any error."""
+    try:
+        if _SYSCONTROL_CONFIG_FILE.exists():
+            return json.loads(_SYSCONTROL_CONFIG_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _permission_check(flag: str, tool_name: str) -> dict | None:
+    """
+    Returns None if *flag* is enabled in config (tool may proceed).
+    Returns an error dict if the tool is disabled, describing how to enable it.
+    """
+    if _load_config().get(flag, False):
+        return None  # permitted
+    return {
+        "error": f"{tool_name} is disabled by default for security.",
+        "hint": (
+            f'To enable it, add "{flag}": true to ~/.syscontrol/config.json.\n'
+            f"Example: {{\"{ flag }\": true}}"
+        ),
+        "config_path": str(_SYSCONTROL_CONFIG_FILE),
+    }
+
+
+def _shell_allowed() -> bool:
+    """Legacy shim — kept for backwards compat; delegates to _permission_check."""
+    return _load_config().get("allow_shell", False)
+
+
+def run_shell_command(command: str, timeout: int = 30) -> dict:
+    """
+    Execute a shell command and return stdout, stderr, and exit code.
+    Requires ``allow_shell: true`` in ~/.syscontrol/config.json.
+    """
+    if not _shell_allowed():
+        return {
+            "error": "Shell command execution is disabled.",
+            "hint": (
+                'To enable it, add \\"allow_shell\\": true to ~/.syscontrol/config.json. '
+                "Example: {\"allow_shell\": true}"
+            ),
+        }
+    if not command:
+        return {"error": "command is required."}
+    timeout = max(1, min(timeout, 120))
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True, text=True,
+            timeout=timeout,
+        )
+        return {
+            "command": command,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout[:8000],
+            "stderr": proc.stderr[:2000],
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": f"Command timed out after {timeout}s.", "command": command}
+    except Exception as e:
+        return {"error": str(e), "command": command}
+
+
+# ── Calendar tool ─────────────────────────────────────────────────────────────
+
+def get_calendar_events(lookahead_days: int = 7) -> dict:
+    """Return upcoming calendar events from macOS Calendar.app via AppleScript."""
+    denied = _permission_check("allow_calendar", "get_calendar_events")
+    if denied:
+        return denied
+    if platform.system() != "Darwin":
+        return {"error": "get_calendar_events requires macOS."}
+    lookahead_days = max(1, min(lookahead_days, 90))
+    script = f"""
+set resultList to {{}}
+set startDate to current date
+set endDate to startDate + ({lookahead_days} * days)
+
+tell application "Calendar"
+    repeat with theCalendar in calendars
+        set calName to name of theCalendar
+        set theEvents to (every event of theCalendar whose start date >= startDate and start date <= endDate)
+        repeat with theEvent in theEvents
+            set evtSummary to summary of theEvent
+            set evtStart to start date of theEvent as string
+            set evtEnd to end date of theEvent as string
+            try
+                set evtLocation to location of theEvent
+            on error
+                set evtLocation to ""
+            end try
+            set end of resultList to (calName & "|" & evtSummary & "|" & evtStart & "|" & evtEnd & "|" & evtLocation)
+        end repeat
+    end repeat
+end tell
+
+set AppleScript's text item delimiters to "||"
+return resultList as string
+"""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=20,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.strip()
+            return {
+                "error": err or "Calendar access denied.",
+                "hint": "Grant Calendar access to Terminal in System Settings → Privacy & Security → Calendars.",
+            }
+        raw_output = proc.stdout.strip()
+        events = []
+        if raw_output:
+            for item in raw_output.split("||"):
+                item = item.strip()
+                if not item:
+                    continue
+                parts = item.split("|")
+                if len(parts) >= 4:
+                    events.append({
+                        "calendar": parts[0],
+                        "title": parts[1],
+                        "start": parts[2],
+                        "end": parts[3],
+                        "location": parts[4] if len(parts) > 4 else "",
+                    })
+        return {
+            "lookahead_days": lookahead_days,
+            "event_count": len(events),
+            "events": events,
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Calendar query timed out. Calendar.app may be unresponsive."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Contacts tool ─────────────────────────────────────────────────────────────
+
+def get_contact(name: str) -> dict:
+    """Search macOS Contacts.app for a person by name and return their details."""
+    denied = _permission_check("allow_contacts", "get_contact")
+    if denied:
+        return denied
+    if platform.system() != "Darwin":
+        return {"error": "get_contact requires macOS."}
+    if not name:
+        return {"error": "name is required."}
+    script = f"""
+set searchName to {json.dumps(name)}
+set resultList to {{}}
+
+tell application "Contacts"
+    set matchedPeople to every person whose name contains searchName
+    repeat with p in matchedPeople
+        set personName to name of p
+        -- phones
+        set phoneStr to ""
+        repeat with ph in phones of p
+            set phoneStr to phoneStr & value of ph & ";"
+        end repeat
+        -- emails
+        set emailStr to ""
+        repeat with em in emails of p
+            set emailStr to emailStr & value of em & ";"
+        end repeat
+        set end of resultList to (personName & "|" & phoneStr & "|" & emailStr)
+    end repeat
+end tell
+
+set AppleScript's text item delimiters to "||"
+return resultList as string
+"""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.strip()
+            return {
+                "error": err or "Contacts access denied.",
+                "hint": "Grant Contacts access to Terminal in System Settings → Privacy & Security → Contacts.",
+            }
+        raw_output = proc.stdout.strip()
+        contacts = []
+        if raw_output:
+            for item in raw_output.split("||"):
+                item = item.strip()
+                if not item:
+                    continue
+                parts = item.split("|")
+                person_name = parts[0] if parts else ""
+                phones = [p for p in (parts[1].split(";") if len(parts) > 1 else []) if p]
+                emails = [e for e in (parts[2].split(";") if len(parts) > 2 else []) if e]
+                contacts.append({
+                    "name": person_name,
+                    "phones": phones,
+                    "emails": emails,
+                })
+        return {
+            "query": name,
+            "count": len(contacts),
+            "contacts": contacts,
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Contacts query timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── macOS Shortcuts tool ──────────────────────────────────────────────────────
+
+def run_shortcut(name: str, input_text: str = "") -> dict:
+    """Run a macOS Shortcut by name (Shortcuts.app)."""
+    if platform.system() != "Darwin":
+        return {"error": "run_shortcut requires macOS."}
+    if not name:
+        return {"error": "name is required."}
+    cmd = ["shortcuts", "run", name]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=input_text or None, text=True,
+            capture_output=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            stderr = proc.stderr.strip()
+            return {
+                "error": stderr or f"Shortcut '{name}' failed or does not exist.",
+                "hint": "Check the shortcut name in Shortcuts.app — it's case-sensitive.",
+            }
+        return {
+            "status": "ok",
+            "shortcut": name,
+            "output": proc.stdout.strip() or None,
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": f"Shortcut '{name}' timed out after 60s."}
+    except FileNotFoundError:
+        return {"error": "shortcuts CLI not found. Requires macOS 12+."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Frontmost app tool ────────────────────────────────────────────────────────
+
+def get_frontmost_app() -> dict:
+    """Return the name of the application currently in focus."""
+    denied = _permission_check("allow_accessibility", "get_frontmost_app")
+    if denied:
+        return denied
+    if platform.system() != "Darwin":
+        return {"error": "get_frontmost_app requires macOS."}
+    script = 'tell application "System Events" to get name of first process whose frontmost is true'
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode != 0:
+            return {
+                "error": proc.stderr.strip(),
+                "hint": "Grant Terminal Accessibility access in System Settings → Privacy & Security → Accessibility.",
+            }
+        app_name = proc.stdout.strip()
+        return {"app": app_name}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Do Not Disturb / Focus tool ───────────────────────────────────────────────
+
+def toggle_do_not_disturb(enabled: bool) -> dict:
+    """
+    Enable or disable macOS Focus / Do Not Disturb.
+    Uses the macOS `shortcuts` CLI to run the built-in Focus shortcuts.
+    """
+    if platform.system() != "Darwin":
+        return {"error": "toggle_do_not_disturb requires macOS."}
+    # Attempt multiple known shortcut names for DnD/Focus
+    if enabled:
+        candidates = ["Turn On Do Not Disturb", "Enable Do Not Disturb", "Turn On Focus"]
+    else:
+        candidates = ["Turn Off Do Not Disturb", "Disable Do Not Disturb", "Turn Off Focus"]
+
+    last_err = None
+    for shortcut_name in candidates:
+        try:
+            proc = subprocess.run(
+                ["shortcuts", "run", shortcut_name],
+                capture_output=True, text=True, timeout=15,
+            )
+            if proc.returncode == 0:
+                return {"status": "ok", "dnd_enabled": enabled, "shortcut_used": shortcut_name}
+            last_err = proc.stderr.strip() or f"Shortcut '{shortcut_name}' not found."
+        except subprocess.TimeoutExpired:
+            last_err = f"Shortcut '{shortcut_name}' timed out."
+        except FileNotFoundError:
+            return {"error": "shortcuts CLI not found. Requires macOS 12+."}
+        except Exception as e:
+            last_err = str(e)
+
+    # Fallback: try direct osascript Focus toggle (macOS 12+)
+    try:
+        action = "on" if enabled else "off"
+        script = f'do shell script "shortcuts run \'Focus\'"'
+        proc2 = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc2.returncode == 0:
+            return {"status": "ok", "dnd_enabled": enabled}
+    except Exception:
+        pass
+
+    return {
+        "error": last_err or "Could not toggle Focus mode.",
+        "hint": (
+            "Create a Shortcut named 'Turn On Do Not Disturb' or 'Turn Off Do Not Disturb' "
+            "in Shortcuts.app, or check System Settings → Focus for the exact Focus name."
+        ),
+    }
+
+
+# ── Eject disk tool ───────────────────────────────────────────────────────────
+
+def eject_disk(mountpoint: str) -> dict:
+    """Unmount and eject a disk by its mountpoint (e.g. '/Volumes/MyDrive')."""
+    if platform.system() != "Darwin":
+        return {"error": "eject_disk requires macOS."}
+    if not mountpoint:
+        return {"error": "mountpoint is required."}
+    p = pathlib.Path(mountpoint)
+    if not p.exists():
+        return {"error": f"Mountpoint does not exist: {mountpoint}"}
+    try:
+        proc = subprocess.run(
+            ["diskutil", "eject", mountpoint],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            return {"error": proc.stderr.strip() or proc.stdout.strip()}
+        return {"status": "ejected", "mountpoint": mountpoint, "detail": proc.stdout.strip()}
+    except subprocess.TimeoutExpired:
+        return {"error": "diskutil timed out during eject."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
 TOOLS = {
@@ -2657,6 +3500,367 @@ TOOLS = {
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: browser_get_page(),
+    },
+    # ── iMessage ──────────────────────────────────────────────────────────────
+    "send_imessage": {
+        "description": (
+            "Send an iMessage or SMS via macOS Messages.app. "
+            "Accepts a phone number (e.g. '+14155551234') or Apple ID email. "
+            "Requires Messages.app to be signed in and Terminal Automation permission. "
+            "macOS only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "recipient": {
+                    "type": "string",
+                    "description": "Phone number (e.g. '+14155551234') or Apple ID email of the recipient.",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Text message content to send.",
+                },
+            },
+            "required": ["recipient", "message"],
+        },
+        "fn": lambda args: send_imessage(args["recipient"], args["message"]),
+    },
+    "get_imessage_history": {
+        "description": (
+            "Return recent iMessage/SMS messages matching a contact name, phone number, or email. "
+            "Reads from ~/Library/Messages/chat.db. "
+            "Requires Full Disk Access for Terminal in System Settings → Privacy & Security. "
+            "macOS only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "contact": {
+                    "type": "string",
+                    "description": "Name, phone, or email to filter messages (partial match).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max number of messages to return (default 20, max 200).",
+                    "default": 20,
+                },
+            },
+            "required": ["contact"],
+        },
+        "fn": lambda args: get_imessage_history(args["contact"], args.get("limit", 20)),
+    },
+    # ── Clipboard ─────────────────────────────────────────────────────────────
+    "get_clipboard": {
+        "description": (
+            "Return the current text content of the system clipboard. "
+            "macOS only (uses pbpaste)."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": lambda _: get_clipboard(),
+    },
+    "set_clipboard": {
+        "description": (
+            "Write text to the system clipboard. "
+            "macOS only (uses pbcopy). "
+            "Use to copy a result or command output so the user can paste it anywhere."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Text to place on the clipboard.",
+                },
+            },
+            "required": ["text"],
+        },
+        "fn": lambda args: set_clipboard(args["text"]),
+    },
+    # ── Screenshot ────────────────────────────────────────────────────────────
+    "take_screenshot": {
+        "description": (
+            "Capture a screenshot of the entire screen and return it as an inline image. "
+            "Optionally saves to a file path. "
+            "macOS only (uses screencapture -x, no shutter sound)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Optional file path to save the PNG (e.g. '~/Desktop/screenshot.png'). Leave empty to skip saving.",
+                    "default": "",
+                },
+            },
+            "required": [],
+        },
+        "fn": lambda args: take_screenshot(args.get("path", "")),
+    },
+    # ── App Control ───────────────────────────────────────────────────────────
+    "open_app": {
+        "description": (
+            "Open an application by name on macOS (uses 'open -a'). "
+            "Works with any installed app, e.g. 'Calculator', 'Safari', 'Spotify'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Application name as it appears in /Applications (e.g. 'Calculator', 'Spotify').",
+                },
+            },
+            "required": ["name"],
+        },
+        "fn": lambda args: open_app(args["name"]),
+    },
+    "quit_app": {
+        "description": (
+            "Quit an application gracefully by name using AppleScript ('tell app to quit'). "
+            "Pass force=true for immediate SIGKILL. macOS only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Application name to quit (e.g. 'Safari', 'Spotify').",
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "If true, force-kill the process immediately (SIGKILL). Default false.",
+                    "default": False,
+                },
+            },
+            "required": ["name"],
+        },
+        "fn": lambda args: quit_app(args["name"], args.get("force", False)),
+    },
+    # ── Volume ────────────────────────────────────────────────────────────────
+    "get_volume": {
+        "description": (
+            "Return the current macOS output volume level (0–100), input volume, alert volume, and mute state. "
+            "macOS only."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": lambda _: get_volume(),
+    },
+    "set_volume": {
+        "description": (
+            "Set the macOS system output volume to a level between 0 (mute) and 100 (maximum). "
+            "macOS only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "integer",
+                    "description": "Output volume level (0–100).",
+                    "minimum": 0,
+                    "maximum": 100,
+                },
+            },
+            "required": ["level"],
+        },
+        "fn": lambda args: set_volume(args["level"]),
+    },
+    # ── Wi-Fi ─────────────────────────────────────────────────────────────────
+    "get_wifi_networks": {
+        "description": (
+            "Scan for nearby Wi-Fi networks and return each network's SSID, BSSID, "
+            "signal strength (RSSI in dBm), channel, and security type. "
+            "Sorted strongest-first. macOS only (uses airport utility)."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": lambda _: get_wifi_networks(),
+    },
+    # ── File I/O ──────────────────────────────────────────────────────────────
+    "read_file": {
+        "description": (
+            "Read the text contents of a file at the given path. "
+            "Returns up to max_chars characters (default 16,000, max 32,000). "
+            "Useful for reading config files, logs, scripts, notes, etc."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute or home-relative path to the file (e.g. '~/.zshrc', '/etc/hosts').",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters to return (default 16000, max 32000).",
+                    "default": 16000,
+                },
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: read_file(args["path"], args.get("max_chars", 16000)),
+    },
+    "write_file": {
+        "description": (
+            "Write text content to a file at the given path. "
+            "Creates parent directories as needed. Overwrites by default. "
+            "Use for saving notes, configs, scripts, or any text output."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute or home-relative path where the file should be written.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Text content to write.",
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "If false, returns an error if the file already exists. Default true.",
+                    "default": True,
+                },
+            },
+            "required": ["path", "content"],
+        },
+        "fn": lambda args: write_file(args["path"], args["content"], args.get("overwrite", True)),
+    },
+    # ── Shell ─────────────────────────────────────────────────────────────────
+    "run_shell_command": {
+        "description": (
+            "Execute an arbitrary shell (bash) command and return stdout, stderr, and exit code. "
+            "DISABLED by default for safety. Enable by adding {\"allow_shell\": true} to ~/.syscontrol/config.json. "
+            "Timeout is 30s by default (max 120s). "
+            "Always confirm with the user before running destructive commands."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Bash command to run (e.g. 'ls -la ~/Desktop', 'git log -5').",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (1–120, default 30).",
+                    "default": 30,
+                },
+            },
+            "required": ["command"],
+        },
+        "fn": lambda args: run_shell_command(args["command"], args.get("timeout", 30)),
+    },
+    # ── Calendar & Contacts ───────────────────────────────────────────────────
+    "get_calendar_events": {
+        "description": (
+            "Return upcoming calendar events from macOS Calendar.app for the next N days. "
+            "Includes title, calendar name, start/end time, and location. "
+            "Requires Calendar access for Terminal in System Settings → Privacy & Security. "
+            "macOS only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "lookahead_days": {
+                    "type": "integer",
+                    "description": "Number of days ahead to look for events (1–90, default 7).",
+                    "default": 7,
+                },
+            },
+            "required": [],
+        },
+        "fn": lambda args: get_calendar_events(args.get("lookahead_days", 7)),
+    },
+    "get_contact": {
+        "description": (
+            "Search macOS Contacts.app for a person by name (partial match) "
+            "and return their phone numbers and email addresses. "
+            "Requires Contacts access for Terminal in System Settings → Privacy & Security. "
+            "macOS only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name to search for (e.g. 'John', 'Appleseed'). Case-insensitive partial match.",
+                },
+            },
+            "required": ["name"],
+        },
+        "fn": lambda args: get_contact(args["name"]),
+    },
+    # ── Shortcuts & System ────────────────────────────────────────────────────
+    "run_shortcut": {
+        "description": (
+            "Run a named macOS Shortcut from Shortcuts.app via the shortcuts CLI. "
+            "Shortcut name is case-sensitive. Optionally pass input_text as stdin. "
+            "Requires macOS 12+. "
+            "Use to trigger user-defined automations (e.g. 'Send Daily Report', 'Resize Images')."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact name of the Shortcut to run (case-sensitive).",
+                },
+                "input_text": {
+                    "type": "string",
+                    "description": "Optional text input to pass to the Shortcut via stdin.",
+                    "default": "",
+                },
+            },
+            "required": ["name"],
+        },
+        "fn": lambda args: run_shortcut(args["name"], args.get("input_text", "")),
+    },
+    "get_frontmost_app": {
+        "description": (
+            "Return the name of the macOS application currently in focus (frontmost window). "
+            "Requires Accessibility permission for Terminal in System Settings → Privacy & Security. "
+            "macOS only."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": lambda _: get_frontmost_app(),
+    },
+    "toggle_do_not_disturb": {
+        "description": (
+            "Enable or disable macOS Focus / Do Not Disturb mode. "
+            "Tries built-in Shortcut names: 'Turn On/Off Do Not Disturb' and 'Turn On/Off Focus'. "
+            "If those don't exist, returns an error with setup instructions. "
+            "macOS 12+ required."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "True to enable Do Not Disturb / Focus, false to disable.",
+                },
+            },
+            "required": ["enabled"],
+        },
+        "fn": lambda args: toggle_do_not_disturb(args["enabled"]),
+    },
+    # ── Disk ──────────────────────────────────────────────────────────────────
+    "eject_disk": {
+        "description": (
+            "Unmount and eject an external disk by its mountpoint (e.g. '/Volumes/MyDrive'). "
+            "Uses diskutil eject. macOS only. "
+            "Use get_disk_usage to find available mountpoints."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mountpoint": {
+                    "type": "string",
+                    "description": "Disk mountpoint path (e.g. '/Volumes/BackupDrive').",
+                },
+            },
+            "required": ["mountpoint"],
+        },
+        "fn": lambda args: eject_disk(args["mountpoint"]),
     },
 }
 

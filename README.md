@@ -1,6 +1,6 @@
 # SyscontrolMCP
 
-An AI-powered system monitoring agent built on the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Gives a local or cloud LLM real-time access to **36 system tools** — CPU, RAM, GPU, disk, network, processes, Docker, Time Machine, browser control, weather, package tracking, and more — then delivers context-aware optimization advice, upgrade recommendations, and workload-specific guidance.
+An AI-powered system monitoring agent built on the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Gives a local or cloud LLM real-time access to **55 system tools** — CPU, RAM, GPU, disk, network, processes, Docker, Time Machine, browser control, weather, package tracking, iMessage, clipboard, screenshots, calendar, contacts, app control, Wi-Fi, file I/O, and more — then delivers context-aware optimization advice, upgrade recommendations, and workload-specific guidance.
 
 Three ways to use it:
 
@@ -323,6 +323,80 @@ Supported workloads: Lightroom / photo editing, video editing (Premiere, DaVinci
 | `get_docker_status` | Running containers with live CPU%, memory usage, image, status, and ports. Returns a clear error if Docker is not running. |
 | `get_time_machine_status` | macOS Time Machine: last backup time and age, current phase and progress if running, and destination drive. |
 | `track_package` | Track a UPS, USPS, FedEx, or DHL shipment by tracking number. Auto-detects carrier. |
+
+### Messaging
+
+| Tool | Description |
+|---|---|
+| `send_imessage` | Send an iMessage or SMS via Messages.app. Accepts phone number or Apple ID. macOS only. |
+| `get_imessage_history` | Read recent iMessage/SMS history for a contact from `~/Library/Messages/chat.db`. Requires Full Disk Access. macOS only. |
+
+### Clipboard
+
+| Tool | Description |
+|---|---|
+| `get_clipboard` | Return the current text content of the system clipboard (pbpaste). macOS only. |
+| `set_clipboard` | Write text to the clipboard (pbcopy). macOS only. |
+
+### Screen
+
+| Tool | Description |
+|---|---|
+| `take_screenshot` | Capture the entire screen and return it as an inline image. Optionally saves to a file path. Silent (no shutter sound). macOS only. |
+
+### App Control
+
+| Tool | Description |
+|---|---|
+| `open_app` | Open any installed application by name using `open -a`. macOS only. |
+| `quit_app` | Gracefully quit an app via AppleScript. Pass `force=true` for immediate SIGKILL. macOS only. |
+
+### Audio
+
+| Tool | Description |
+|---|---|
+| `get_volume` | Return the current output volume, input volume, alert volume, and mute state. macOS only. |
+| `set_volume` | Set the system output volume (0–100). macOS only. |
+
+### Wi-Fi
+
+| Tool | Description |
+|---|---|
+| `get_wifi_networks` | Scan and list nearby Wi-Fi networks with SSID, channel, security, and signal strength. Uses `airport` on macOS ≤13, `system_profiler` on macOS 14+. |
+
+### File I/O
+
+| Tool | Description |
+|---|---|
+| `read_file` | Read a text file and return its contents (up to 32,000 chars). Useful for configs, logs, scripts. |
+| `write_file` | Write text content to any path, creating parent directories as needed. |
+
+### Shell
+
+| Tool | Description |
+|---|---|
+| `run_shell_command` | Execute an arbitrary bash command and return stdout/stderr. **Disabled by default.** Enable by adding `{"allow_shell": true}` to `~/.syscontrol/config.json`. |
+
+### Calendar & Contacts
+
+| Tool | Description |
+|---|---|
+| `get_calendar_events` | Return upcoming events from macOS Calendar.app for the next N days. Requires Calendar access for Terminal. macOS only. |
+| `get_contact` | Search Contacts.app by name and return phone numbers and emails. Requires Contacts access for Terminal. macOS only. |
+
+### Shortcuts & System
+
+| Tool | Description |
+|---|---|
+| `run_shortcut` | Run a named Shortcut from Shortcuts.app via the `shortcuts` CLI. macOS 12+ required. |
+| `get_frontmost_app` | Return the name of the currently focused application. Requires Accessibility permission. macOS only. |
+| `toggle_do_not_disturb` | Enable or disable Focus / Do Not Disturb. Tries built-in shortcut names; returns setup instructions if not found. macOS 12+. |
+
+### Disk
+
+| Tool | Description |
+|---|---|
+| `eject_disk` | Unmount and eject an external disk by mountpoint (e.g. `/Volumes/MyDrive`). Uses `diskutil eject`. macOS only. |
 
 ---
 
