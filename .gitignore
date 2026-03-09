@@ -32,6 +32,9 @@ reminder_log.txt
 *.key
 *.pem
 secrets.json
+# Remote bridge config contains bot tokens — never commit it.
+# Copy remote_config.example.json to ~/.syscontrol/remote_config.json instead.
+remote_config.json
 
 # ── Claude Desktop config (may contain local paths / secrets) ─────────────────
 # The template claude_desktop_config.json IS committed; ignore personal overrides.

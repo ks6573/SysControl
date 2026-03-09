@@ -24,6 +24,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 
 import matplotlib
 matplotlib.use("Agg")
@@ -47,12 +49,14 @@ except ImportError:
 # ── Reminder storage ──────────────────────────────────────────────────────────
 
 _REMINDER_LOCK = threading.Lock()
-_REMINDER_FILE = pathlib.Path.home() / ".syscontrol" / "reminders.json"
+_REMINDER_DIR  = pathlib.Path.home() / ".syscontrol"
+_REMINDER_FILE = _REMINDER_DIR / "reminders.json"
+# Create the config directory once at server startup, not on every read/write.
+_REMINDER_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _load_reminders() -> list:
     """Load reminders from disk. Creates file if missing. Must be called under _REMINDER_LOCK."""
-    _REMINDER_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not _REMINDER_FILE.exists():
         return []
     try:
@@ -63,7 +67,6 @@ def _load_reminders() -> list:
 
 def _save_reminders(reminders: list) -> None:
     """Write reminders to disk. Must be called under _REMINDER_LOCK."""
-    _REMINDER_FILE.parent.mkdir(parents=True, exist_ok=True)
     _REMINDER_FILE.write_text(json.dumps(reminders, indent=2))
 
 
@@ -1000,7 +1003,6 @@ def get_device_specs() -> dict:
 
 def get_full_snapshot() -> dict:
     """Aggregate snapshot of all metrics — all sources fetched in parallel."""
-    from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=6) as ex:
         f_cpu     = ex.submit(get_cpu_usage)
         f_ram     = ex.submit(get_ram_usage)
@@ -1525,6 +1527,12 @@ def track_package(tracking_number: str) -> dict:
 
         track  = shipment.get("track", {})
         w1     = track.get("w1", {})
+        if not isinstance(w1, dict):
+            return {
+                "tracking_number": tracking_number,
+                "detected_carrier": carrier,
+                "status": "Unexpected response structure from 17track — their internal API may have changed.",
+            }
         latest = w1.get("z0", {})
         history_raw = w1.get("z1", [])
 
@@ -1916,6 +1924,320 @@ def tail_system_logs(lines: int = 50, filter_str: str = "") -> dict:
     return {"error": f"tail_system_logs is not supported on {system}."}
 
 
+# ── Browser / Web tools ──────────────────────────────────────────────────────
+
+_BROWSER_PERMISSION_FILE = pathlib.Path.home() / ".syscontrol" / "browser_permission"
+
+# Browsers the AppleScript helpers know how to talk to, in preference order.
+# Arc, Brave, and Edge all use the Chrome AppleScript dictionary.
+_CHROMIUM_APPS = ["Arc", "Google Chrome", "Brave Browser", "Microsoft Edge", "Chromium"]
+_SAFARI_APP    = "Safari"
+
+
+def _browser_permission_granted() -> bool:
+    return _BROWSER_PERMISSION_FILE.exists()
+
+
+def _browser_permission_required() -> dict:
+    return {
+        "error": "browser_access_not_granted",
+        "message": (
+            "Browser access has not been granted yet. "
+            "Ask the user to confirm, then call grant_browser_access() to enable it."
+        ),
+    }
+
+
+def _running_browser() -> str | None:
+    """Return the name of the first recognised browser that is currently running."""
+    if platform.system() != "Darwin":
+        return None
+    for app in _CHROMIUM_APPS + [_SAFARI_APP]:
+        try:
+            r = subprocess.run(
+                ["osascript", "-e", f'tell application "System Events" to (name of processes) contains "{app}"'],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.stdout.strip().lower() == "true":
+                return app
+        except Exception:
+            continue
+    return None
+
+
+def _osa(script: str, timeout: int = 10) -> tuple[str, str, int]:
+    """Run an AppleScript snippet and return (stdout, stderr, returncode)."""
+    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout)
+    return r.stdout.strip(), r.stderr.strip(), r.returncode
+
+
+def _chromium_script(app: str, js_or_cmd: str) -> str:
+    """Wrap a Chrome-protocol AppleScript command for the given app."""
+    return f'tell application "{app}" to {js_or_cmd}'
+
+
+def _safari_script(cmd: str) -> str:
+    return f'tell application "Safari" to {cmd}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+def grant_browser_access() -> dict:
+    """
+    Writes the browser permission flag so that browser control tools can run.
+    ONLY call this after the user has explicitly said yes.
+    """
+    try:
+        _BROWSER_PERMISSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _BROWSER_PERMISSION_FILE.write_text("granted")
+        browser = _running_browser()
+        return {
+            "success": True,
+            "message": "Browser access granted.",
+            "detected_browser": browser or "none running — open a browser and try again",
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+def _strip_html(html: str, max_chars: int) -> str:
+    """Very fast HTML → plain-text: strip tags, collapse whitespace."""
+    # Remove <script> and <style> blocks entirely
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    # Remove all remaining tags
+    text = re.sub(r"<[^>]+>", " ", text)
+    # Decode common HTML entities
+    for entity, char in (("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+                          ("&quot;", '"'), ("&#39;", "'"), ("&nbsp;", " ")):
+        text = text.replace(entity, char)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]
+
+
+def web_fetch(url: str, max_chars: int = 8000) -> dict:
+    """
+    Fetch a web page and return plain-text content (no browser needed).
+    HTML tags are stripped. Does NOT require browser permission.
+    """
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    max_chars = max(500, min(max_chars, 32000))
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = r.read()
+            charset = "utf-8"
+            ctype = r.headers.get("Content-Type", "")
+            m = re.search(r"charset=([^\s;]+)", ctype)
+            if m:
+                charset = m.group(1)
+            html = raw.decode(charset, errors="replace")
+        text = _strip_html(html, max_chars)
+        return {
+            "url": url,
+            "status": r.status,   # type: ignore[possibly-undefined]
+            "content_length": len(text),
+            "text": text,
+            "truncated": len(text) == max_chars,
+        }
+    except urllib.error.HTTPError as e:
+        return {"url": url, "error": f"HTTP {e.code}: {e.reason}"}
+    except (urllib.error.URLError, socket.timeout, OSError) as e:
+        return {"url": url, "error": f"Network error: {e}"}
+
+
+def web_search(query: str, num_results: int = 5) -> dict:
+    """
+    Search DuckDuckGo and return the top results (title, URL, snippet).
+    No API key needed. Does NOT require browser permission.
+    """
+    num_results = max(1, min(num_results, 10))
+    encoded = urllib.parse.quote_plus(query)
+    url = f"https://html.duckduckgo.com/html/?q={encoded}"
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=12) as r:
+            html = r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return {"query": query, "error": f"Search request failed: {e}"}
+
+    # Parse DuckDuckGo HTML results — structure is stable enough for parsing
+    results = []
+    # Each result block: <a class="result__a" href="...">Title</a>
+    #                    <a class="result__snippet">Snippet</a>
+    title_pattern   = re.compile(r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
+    snippet_pattern = re.compile(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.DOTALL)
+
+    titles   = title_pattern.findall(html)
+    snippets = [re.sub(r"<[^>]+>", "", s).strip() for s in snippet_pattern.findall(html)]
+
+    for i, (href, title_raw) in enumerate(titles[:num_results]):
+        title = re.sub(r"<[^>]+>", "", title_raw).strip()
+        # DDG wraps URLs — extract the actual destination
+        m = re.search(r"uddg=([^&]+)", href)
+        real_url = urllib.parse.unquote(m.group(1)) if m else href
+        results.append({
+            "rank":    i + 1,
+            "title":   title,
+            "url":     real_url,
+            "snippet": snippets[i] if i < len(snippets) else "",
+        })
+
+    return {
+        "query":       query,
+        "result_count": len(results),
+        "results":     results,
+        **({
+            "warning": "No results parsed — DuckDuckGo HTML structure may have changed."
+        } if not results else {}),
+    }
+
+
+def browser_open_url(url: str) -> dict:
+    """Open a URL in the user's default browser. Requires browser permission."""
+    if not _browser_permission_granted():
+        return _browser_permission_required()
+    if not url.startswith(("http://", "https://", "file://")):
+        url = "https://" + url
+    if platform.system() == "Darwin":
+        try:
+            subprocess.run(["open", url], check=True, timeout=10)
+            return {"success": True, "url": url, "action": "opened in default browser"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    # Linux / Windows fallback
+    try:
+        webbrowser.open(url)
+        return {"success": True, "url": url, "action": "opened in default browser"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# Compiled once at module load — used by browser_navigate to validate URLs
+# before embedding them in AppleScript string literals.
+_SAFE_URL_RE = re.compile(r'^[\x20-\x7E]+$')
+
+
+def browser_navigate(url: str) -> dict:
+    """
+    Navigate the currently active browser tab to a URL via AppleScript (macOS).
+    Requires browser permission.
+    """
+    if not _browser_permission_granted():
+        return _browser_permission_required()
+    if platform.system() != "Darwin":
+        return browser_open_url(url)   # graceful fallback on non-macOS
+
+    # Normalise scheme
+    if not url.startswith(("http://", "https://", "file://")):
+        url = "https://" + url
+
+    # Reject URLs with characters that could break out of the AppleScript string
+    # literal. _SAFE_URL_RE is a module-level constant compiled once at import.
+    if not _SAFE_URL_RE.match(url):
+        return {"success": False, "error": "URL contains non-printable or non-ASCII characters."}
+    if any(c in url for c in ('"', "'", '`', '\\', '\r', '\n')):
+        return {"success": False, "error": "URL contains characters that are not safe for AppleScript."}
+
+    browser = _running_browser()
+    if not browser:
+        # No known browser running — just open the URL
+        return browser_open_url(url)
+
+    try:
+        if browser == _SAFARI_APP:
+            script = _safari_script(f'set URL of current tab of front window to "{url}"')
+        else:
+            script = _chromium_script(browser, f'set URL of active tab of front window to "{url}"')
+        stdout, stderr, rc = _osa(script)
+        if rc != 0 and stderr:
+            # Fallback: just open it
+            return browser_open_url(url)
+        return {"success": True, "url": url, "browser": browser, "action": "navigated"}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "AppleScript timed out — browser may be busy"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def browser_get_page() -> dict:
+    """
+    Return the URL, title, and visible text of the current active browser tab
+    via AppleScript (macOS only). Requires browser permission.
+    """
+    if not _browser_permission_granted():
+        return _browser_permission_required()
+    if platform.system() != "Darwin":
+        return {"error": "browser_get_page requires macOS (uses AppleScript)."}
+
+    browser = _running_browser()
+    if not browser:
+        return {
+            "error": "No supported browser is running.",
+            "supported": _CHROMIUM_APPS + [_SAFARI_APP],
+        }
+
+    try:
+        if browser == _SAFARI_APP:
+            url_out, _, rc1 = _osa(_safari_script("URL of current tab of front window"))
+            title_out, _, rc2 = _osa(_safari_script("name of current tab of front window"))
+            # Get visible text via JavaScript
+            js_script = _safari_script(
+                'do JavaScript "document.body ? document.body.innerText.substring(0,12000) : \'\'" '
+                'in current tab of front window'
+            )
+            text_out, _, _ = _osa(js_script)
+        else:
+            url_out,   _, rc1 = _osa(_chromium_script(browser, "URL of active tab of front window"))
+            title_out, _, rc2 = _osa(_chromium_script(browser, "title of active tab of front window"))
+            js_script = _chromium_script(
+                browser,
+                'execute active tab of front window javascript '
+                '"document.body ? document.body.innerText.substring(0,12000) : \'\'"'
+            )
+            text_out, _, _ = _osa(js_script)
+
+        if rc1 != 0 or rc2 != 0:
+            return {
+                "error": "Could not read browser tab — make sure a window is open and focused.",
+                "browser": browser,
+            }
+
+        # Strip excessive whitespace from innerText
+        clean_text = re.sub(r"\n{3,}", "\n\n", text_out).strip()
+
+        return {
+            "browser":  browser,
+            "url":      url_out,
+            "title":    title_out,
+            "text":     clean_text,
+            "text_length": len(clean_text),
+        }
+
+    except subprocess.TimeoutExpired:
+        return {"error": "AppleScript timed out — browser may be unresponsive.", "browser": browser}
+    except Exception as e:
+        return {"error": f"Failed to read browser page: {e}", "browser": browser}
+
+
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
 TOOLS = {
@@ -2235,6 +2557,94 @@ TOOLS = {
             "required": [],
         },
         "fn": lambda args: tail_system_logs(args.get("lines", 50), args.get("filter_str", "")),
+    },
+    # ── Browser / Web tools ──────────────────────────────────────────────────
+    "web_fetch": {
+        "description": (
+            "Fetch the plain-text content of any public web page. "
+            "HTML is stripped. No browser needed, no permission required. "
+            "Use this to read articles, docs, pricing pages, or any URL the user mentions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full URL to fetch (https:// assumed if omitted)."},
+                "max_chars": {
+                    "type": "integer", "default": 8000,
+                    "description": "Max characters of plain text to return (500–32000).",
+                },
+            },
+            "required": ["url"],
+        },
+        "fn": lambda args: web_fetch(args["url"], args.get("max_chars", 8000)),
+    },
+    "web_search": {
+        "description": (
+            "Search the web (DuckDuckGo) and return the top N results "
+            "(title, URL, snippet). No API key. No browser permission required. "
+            "Combine with web_fetch to read the full content of a result."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query string."},
+                "num_results": {
+                    "type": "integer", "default": 5,
+                    "description": "Number of results to return (1–10).",
+                },
+            },
+            "required": ["query"],
+        },
+        "fn": lambda args: web_search(args["query"], args.get("num_results", 5)),
+    },
+    "grant_browser_access": {
+        "description": (
+            "Grants the agent permission to control the user's browser. "
+            "ONLY call this tool after the user has explicitly said yes/granted/allow. "
+            "Writes a permission flag; subsequent browser_* calls will then work."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": lambda _: grant_browser_access(),
+    },
+    "browser_open_url": {
+        "description": (
+            "Open a URL in the user's default browser as a new tab/window. "
+            "Requires prior browser permission (grant_browser_access). "
+            "macOS: uses `open` command. Linux/Windows: uses webbrowser module."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to open (https:// assumed if omitted)."},
+            },
+            "required": ["url"],
+        },
+        "fn": lambda args: browser_open_url(args["url"]),
+    },
+    "browser_navigate": {
+        "description": (
+            "Navigate the currently active browser tab to a different URL via AppleScript. "
+            "macOS only (falls back to browser_open_url on other platforms). "
+            "Requires browser permission. Supports Arc, Chrome, Brave, Edge, Safari."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to navigate to."},
+            },
+            "required": ["url"],
+        },
+        "fn": lambda args: browser_navigate(args["url"]),
+    },
+    "browser_get_page": {
+        "description": (
+            "Return the URL, title, and visible text of the currently active browser tab "
+            "via AppleScript (macOS only). "
+            "Requires browser permission. Use this to read what the user is currently looking at, "
+            "summarise a page, or answer questions about its content."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": lambda _: browser_get_page(),
     },
 }
 
