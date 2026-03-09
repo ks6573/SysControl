@@ -48,6 +48,39 @@ uv sync
 uv run agent.py
 ```
 
+### Ending a Session
+
+Say goodbye naturally — the agent recognises a wide range of exit phrases and closes gracefully:
+
+```
+bye  goodbye  farewell  see ya  cya  later  take care  peace
+done  close  end  stop  adios  adieu  goodnight  ttyl  …
+```
+
+You can also press **Ctrl-C** at any time. Before the process exits, the agent will offer to save your session (see [Session Memory](#session-memory) below).
+
+### Session Memory
+
+SysControl can persist conversation context across sessions in `SysControl_Memory.md` (project root).
+
+**How it works:**
+
+- **On startup** — if `SysControl_Memory.md` exists the banner shows a notice and the file's contents are automatically injected into the system prompt, giving the agent awareness of past sessions.
+- **On exit** — after any goodbye phrase or Ctrl-C, you are prompted:
+
+  ```
+  Save session? [yes/no/md/txt]:
+  ```
+
+  - `yes` / `md` — appends the conversation as a formatted Markdown section
+  - `txt` — appends in plain text (no markdown syntax)
+  - `no` — discards the session; nothing is written
+
+- **Append-only** — new sessions are always appended beneath a timestamped `## Session — YYYY-MM-DD HH:MM` heading. Existing content is never overwritten.
+- The file is plain text — you can freely edit or delete entries at any time.
+
+> **Privacy notice:** SysControl stores only what you explicitly choose to save. No personal data is retained by the agent or the LLM. Ollama processes queries locally by default — see [ollama.com/tos](https://ollama.com/tos) for full details on cloud usage where applicable.
+
 ### CLI Flags
 
 ```
@@ -200,53 +233,9 @@ Enable only the permissions you need. Each disabled tool returns an error with t
 
 ## Remote Messaging Bridge
 
-`remote.py` exposes the full agent to **Telegram**, **WhatsApp**, and **Facebook Messenger** through a single webhook server. Control your Mac from your phone with no port-forwarding required.
+`remote.py` lets you control your Mac from **Telegram**, **WhatsApp**, or **Facebook Messenger** via a Cloudflare-tunnelled webhook — no port-forwarding required.
 
-### Setup
-
-```bash
-# 1. Install Cloudflare Tunnel (one-time)
-brew install cloudflared
-
-# 2. Create config
-uv run remote.py
-# Creates ~/.syscontrol/remote_config.json — fill in your tokens
-
-# 3. Start a tunnel (separate terminal)
-cloudflared tunnel --url http://127.0.0.1:8080
-
-# 4. Register Telegram webhook
-uv run remote.py --register-telegram https://xxxx.trycloudflare.com
-
-# 5. Start the bridge
-uv run remote.py
-```
-
-**`~/.syscontrol/remote_config.json` example:**
-
-```json
-{
-  "provider": "local",
-  "model": "qwen2.5",
-  "api_key": "ollama",
-  "base_url": "http://localhost:11434/v1",
-  "allowed_chat_ids": {
-    "telegram": [123456789]
-  },
-  "telegram": {
-    "enabled": true,
-    "token": "YOUR_BOT_TOKEN"
-  }
-}
-```
-
-`allowed_chat_ids` is enforced on every incoming message — unknown senders are rejected and their ID is logged.
-
-**Finding your Telegram chat_id:**
-1. Create a bot via [@BotFather](https://t.me/BotFather) and copy the token
-2. Send any message to your bot
-3. Visit `https://api.telegram.org/bot<TOKEN>/getUpdates`
-4. Copy the `"id"` value inside the `"chat"` object
+Full setup instructions, config reference, and security notes are in [agent/REMOTE_SETUP.md](agent/REMOTE_SETUP.md).
 
 ---
 
@@ -445,6 +434,8 @@ Create a Claude Desktop Project and paste the contents of `system_prompt.prompt`
 | **Permission gating** | Sensitive tools are off by default. Each gate is a single flag in `~/.syscontrol/config.json`. |
 | **Buffered streaming** | Token fragments are collected in a list and joined once, avoiding O(n²) string copies during long responses. |
 | **Graceful shutdown** | `MCPClient.close()` sends SIGTERM → waits 2s → SIGKILL, preventing zombie server processes. |
+| **Graceful exit phrases** | 25+ natural goodbye expressions (`bye`, `farewell`, `cya`, `goodnight`, …) all trigger a clean shutdown with an optional memory-save prompt. |
+| **Append-only session memory** | `SysControl_Memory.md` is never overwritten — each saved session is timestamped and appended. On startup the file is injected into the system prompt so the agent has full prior context. |
 | **Secure API key input** | `getpass.getpass()` — key never echoed or stored in shell history. |
 | **Remote session isolation** | Each `(platform, chat_id)` pair has its own thread-safe message history. |
 
@@ -473,12 +464,14 @@ SyscontrolMCP/
 ├── agent/
 │   ├── core.py                # MCPClient, MCPClientPool, shared helpers
 │   ├── cli.py                 # Streaming agentic REPL (local or cloud LLM)
-│   └── remote.py              # Telegram / WhatsApp / Messenger bridge
+│   ├── remote.py              # Telegram / WhatsApp / Messenger bridge
+│   └── REMOTE_SETUP.md        # Full remote bridge setup guide
 │
 ├── mcp/
 │   ├── server.py              # MCP server — 57 tools, JSON-RPC dispatcher
 │   └── prompt.json            # System prompt (paste into Claude Desktop Projects)
 │
+├── SysControl_Memory.md       # Auto-created on first save; append-only session log
 ├── claude_desktop_config.json # Ready-to-use Claude Desktop config (update paths)
 ├── pyproject.toml             # Project metadata and dependencies (uv)
 └── uv.lock                    # Pinned dependency versions
