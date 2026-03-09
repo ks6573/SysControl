@@ -1,4 +1,4 @@
-# SyscontrolMCP
+# SysControl
 
 An AI-powered system monitoring agent built on the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Gives a local or cloud LLM real-time access to **55 system tools** — CPU, RAM, GPU, disk, network, processes, Docker, Time Machine, browser control, weather, package tracking, iMessage, clipboard, screenshots, calendar, contacts, app control, Wi-Fi, file I/O, and more — then delivers context-aware optimization advice, upgrade recommendations, and workload-specific guidance.
 
