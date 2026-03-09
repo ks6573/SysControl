@@ -26,7 +26,7 @@ Three ways to run it:
 
 ```bash
 # 1. Clone
-git clone https://github.com/yourname/SyscontrolMCP.git
+git clone https://github.com/ks6573/SysControl.git
 cd SyscontrolMCP
 
 # 2. Install uv (skip if already installed)
