@@ -39,13 +39,20 @@ except ImportError:
     print("psutil not found. Install with: pip install psutil", file=sys.stderr)
     sys.exit(1)
 
-# Optional GPU support via pynvml (official NVIDIA Python bindings, nvidia-ml-py)
+# Optional GPU support (prefer pynvml; fall back to GPUtil for legacy lockfiles).
+GPU_BACKEND = None
 try:
     import pynvml
     pynvml.nvmlInit()
-    GPU_AVAILABLE = True
+    GPU_BACKEND = "pynvml"
 except Exception:
-    GPU_AVAILABLE = False
+    try:
+        import GPUtil
+        GPU_BACKEND = "gputil"
+    except Exception:
+        GPU_BACKEND = None
+
+GPU_AVAILABLE = GPU_BACKEND is not None
 
 
 # ── Reminder storage ──────────────────────────────────────────────────────────
@@ -364,37 +371,60 @@ def get_ram_usage() -> dict:
 
 def get_gpu_usage() -> dict:
     if not GPU_AVAILABLE:
-        return {"error": "pynvml not installed or no NVIDIA driver found. Run: pip install nvidia-ml-py"}
+        return {"error": "No supported GPU backend found. Install nvidia-ml-py (preferred) or gputil."}
+
+    if GPU_BACKEND == "pynvml":
+        try:
+            count = pynvml.nvmlDeviceGetCount()
+            if count == 0:
+                return {"error": "No GPUs detected"}
+            gpus = []
+            for i in range(count):
+                h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                util = pynvml.nvmlDeviceGetUtilizationRates(h)
+                mem  = pynvml.nvmlDeviceGetMemoryInfo(h)
+                try:
+                    temp = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
+                except pynvml.NVMLError:
+                    temp = None
+                name = pynvml.nvmlDeviceGetName(h)
+                if isinstance(name, bytes):
+                    name = name.decode()
+                mem_total_mb = mem.total / 1024 / 1024
+                mem_used_mb  = mem.used  / 1024 / 1024
+                gpus.append({
+                    "id": i,
+                    "name": name,
+                    "load_percent": util.gpu,
+                    "memory_used_mb": round(mem_used_mb, 1),
+                    "memory_total_mb": round(mem_total_mb, 1),
+                    "memory_percent": round(mem_used_mb / mem_total_mb * 100, 1) if mem_total_mb else None,
+                    "temperature_c": temp,
+                })
+            return {"gpus": gpus}
+        except pynvml.NVMLError as e:
+            return {"error": f"NVML error: {e}"}
+
     try:
-        count = pynvml.nvmlDeviceGetCount()
-        if count == 0:
+        gpus = GPUtil.getGPUs()
+        if not gpus:
             return {"error": "No GPUs detected"}
-        gpus = []
-        for i in range(count):
-            h = pynvml.nvmlDeviceGetHandleByIndex(i)
-            util = pynvml.nvmlDeviceGetUtilizationRates(h)
-            mem  = pynvml.nvmlDeviceGetMemoryInfo(h)
-            try:
-                temp = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
-            except pynvml.NVMLError:
-                temp = None
-            name = pynvml.nvmlDeviceGetName(h)
-            if isinstance(name, bytes):
-                name = name.decode()
-            mem_total_mb = mem.total / 1024 / 1024
-            mem_used_mb  = mem.used  / 1024 / 1024
-            gpus.append({
-                "id": i,
-                "name": name,
-                "load_percent": util.gpu,
-                "memory_used_mb": round(mem_used_mb, 1),
-                "memory_total_mb": round(mem_total_mb, 1),
-                "memory_percent": round(mem_used_mb / mem_total_mb * 100, 1) if mem_total_mb else None,
-                "temperature_c": temp,
-            })
-        return {"gpus": gpus}
-    except pynvml.NVMLError as e:
-        return {"error": f"NVML error: {e}"}
+        return {
+            "gpus": [
+                {
+                    "id": g.id,
+                    "name": g.name,
+                    "load_percent": round(g.load * 100, 1),
+                    "memory_used_mb": round(g.memoryUsed, 1),
+                    "memory_total_mb": round(g.memoryTotal, 1),
+                    "memory_percent": round(g.memoryUsed / g.memoryTotal * 100, 1) if g.memoryTotal else None,
+                    "temperature_c": g.temperature,
+                }
+                for g in gpus
+            ]
+        }
+    except Exception as e:
+        return {"error": f"GPUtil error: {e}"}
 
 
 def get_disk_usage() -> dict:
@@ -726,23 +756,34 @@ def get_system_alerts() -> dict:
 
     if GPU_AVAILABLE:
         try:
-            for i in range(pynvml.nvmlDeviceGetCount()):
-                h = pynvml.nvmlDeviceGetHandleByIndex(i)
-                util = pynvml.nvmlDeviceGetUtilizationRates(h)
-                name = pynvml.nvmlDeviceGetName(h)
-                if isinstance(name, bytes):
-                    name = name.decode()
-                load_pct = util.gpu
-                if load_pct >= 95:
-                    _alert("critical", f"gpu:{i}", f"GPU {name} load critically high at {load_pct}%", load_pct)
-                try:
-                    temp = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
-                    if temp >= 85:
-                        _alert("critical", f"gpu:{i}", f"GPU {name} temp critically high at {temp}°C", temp)
-                    elif temp >= 75:
-                        _alert("warning", f"gpu:{i}", f"GPU {name} temp elevated at {temp}°C", temp)
-                except pynvml.NVMLError:
-                    pass
+            if GPU_BACKEND == "pynvml":
+                for i in range(pynvml.nvmlDeviceGetCount()):
+                    h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    util = pynvml.nvmlDeviceGetUtilizationRates(h)
+                    name = pynvml.nvmlDeviceGetName(h)
+                    if isinstance(name, bytes):
+                        name = name.decode()
+                    load_pct = util.gpu
+                    if load_pct >= 95:
+                        _alert("critical", f"gpu:{i}", f"GPU {name} load critically high at {load_pct}%", load_pct)
+                    try:
+                        temp = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
+                        if temp >= 85:
+                            _alert("critical", f"gpu:{i}", f"GPU {name} temp critically high at {temp}°C", temp)
+                        elif temp >= 75:
+                            _alert("warning", f"gpu:{i}", f"GPU {name} temp elevated at {temp}°C", temp)
+                    except pynvml.NVMLError:
+                        pass
+            elif GPU_BACKEND == "gputil":
+                for g in GPUtil.getGPUs():
+                    load_pct = round(g.load * 100, 1) if g.load is not None else None
+                    if load_pct is not None and load_pct >= 95:
+                        _alert("critical", f"gpu:{g.id}", f"GPU {g.name} load critically high at {load_pct}%", load_pct)
+                    if g.temperature is not None:
+                        if g.temperature >= 85:
+                            _alert("critical", f"gpu:{g.id}", f"GPU {g.name} temp critically high at {g.temperature}°C", g.temperature)
+                        elif g.temperature >= 75:
+                            _alert("warning", f"gpu:{g.id}", f"GPU {g.name} temp elevated at {g.temperature}°C", g.temperature)
         except Exception:
             pass
 
@@ -1010,17 +1051,24 @@ def get_device_specs() -> dict:
     gpu_specs = []
     if GPU_AVAILABLE:
         try:
-            for i in range(pynvml.nvmlDeviceGetCount()):
-                h = pynvml.nvmlDeviceGetHandleByIndex(i)
-                name = pynvml.nvmlDeviceGetName(h)
-                if isinstance(name, bytes):
-                    name = name.decode()
-                mem = pynvml.nvmlDeviceGetMemoryInfo(h)
-                gpu_specs.append({
-                    "name": name,
-                    "vram_total_mb": round(mem.total / 1024 / 1024, 1),
-                })
-        except pynvml.NVMLError:
+            if GPU_BACKEND == "pynvml":
+                for i in range(pynvml.nvmlDeviceGetCount()):
+                    h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    name = pynvml.nvmlDeviceGetName(h)
+                    if isinstance(name, bytes):
+                        name = name.decode()
+                    mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+                    gpu_specs.append({
+                        "name": name,
+                        "vram_total_mb": round(mem.total / 1024 / 1024, 1),
+                    })
+            elif GPU_BACKEND == "gputil":
+                for g in GPUtil.getGPUs():
+                    gpu_specs.append({
+                        "name": g.name,
+                        "vram_total_mb": round(g.memoryTotal, 1),
+                    })
+        except Exception:
             pass
 
     return {

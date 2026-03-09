@@ -333,12 +333,6 @@ wheels = [
 ]
 
 [[package]]
-name = "gputil"
-version = "1.4.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ed/0e/5c61eedde9f6c87713e89d794f01e378cfd9565847d4576fa627d758c554/GPUtil-1.4.0.tar.gz", hash = "sha256:099e52c65e512cdfa8c8763fca67f5a5c2afb63469602d5dcb4d296b3661efb9", size = 5545, upload-time = "2018-12-18T09:12:13.63Z" }
-
-[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -869,6 +863,15 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-ml-py"
+version = "13.590.48"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/af/a0/f4fc18cf72f06821a9a665085435b901449986855519d5b3843532db35e9/nvidia_ml_py-13.590.48.tar.gz", hash = "sha256:8184d1be52914ac7f0991cd1c0d946c65dc88a840c754cd12c274b77b88760dd", size = 49732, upload-time = "2026-01-22T01:14:56.456Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fd/72/fb2af0d259a651affdce65fd6a495f0e07a685a0136baf585c5065204ee7/nvidia_ml_py-13.590.48-py3-none-any.whl", hash = "sha256:fd43d30ee9cd0b7940f5f9f9220b68d42722975e3992b6c21d14144c48760e43", size = 50680, upload-time = "2026-01-22T01:14:55.281Z" },
+]
+
+[[package]]
 name = "openai"
 version = "2.26.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1327,9 +1330,9 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
-    { name = "gputil" },
     { name = "httpx" },
     { name = "matplotlib" },
+    { name = "nvidia-ml-py" },
     { name = "openai" },
     { name = "psutil" },
     { name = "uvicorn", extra = ["standard"] },
@@ -1346,10 +1349,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.111.0" },
-    { name = "gputil", specifier = ">=1.4.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "matplotlib", specifier = ">=3.7.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
+    { name = "nvidia-ml-py", specifier = ">=12.0.0" },
     { name = "openai", specifier = ">=2.26.0" },
     { name = "psutil", specifier = ">=5.9.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
