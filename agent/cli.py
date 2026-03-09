@@ -126,13 +126,15 @@ def _append_memory(messages: list[dict], fmt: str = "md") -> None:
         separator += body.replace("**You:**", "You:").replace("**Assistant:**", "Assistant:")
         separator += "\n"
 
-    # Ensure the file has a header on first creation
-    if not MEMORY_FILE.exists() or MEMORY_FILE.stat().st_size == 0:
-        header = "# SysControl Memory\n\nThis file is appended automatically. Edit freely.\n"
-        MEMORY_FILE.write_text(header + separator, encoding="utf-8")
-    else:
-        with MEMORY_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(separator)
+    # Atomically create the file with a header the first time (open "x" is
+    # exclusive-create on POSIX — safe even with concurrent CLI sessions).
+    try:
+        with MEMORY_FILE.open("x", encoding="utf-8") as fh:
+            fh.write("# SysControl Memory\n\nThis file is appended automatically. Edit freely.\n")
+    except FileExistsError:
+        pass
+    with MEMORY_FILE.open("a", encoding="utf-8") as fh:
+        fh.write(separator)
 
     print(f"{GREEN}✓ Session appended to {MEMORY_FILE.name}{RESET}")
 
@@ -403,7 +405,7 @@ def main() -> None:
             )
 
         system_message = {"role": "system", "content": full_system}   # built once
-        ollama_client  = OpenAI(api_key=api_key, base_url=base_url)
+        ollama_client  = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
 
         print(f"\r{GREEN}✓{RESET} Connected — {len(tools)} tools available. {DIM}[{provider_label}  ·  {model}]{RESET}")
         print(f"{DIM}  Type your question, or 'exit' / 'bye' / 'goodbye' to quit.{RESET}\n")

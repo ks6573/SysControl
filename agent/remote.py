@@ -21,7 +21,7 @@ import json
 import logging
 import sys
 import threading
-import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -101,26 +101,31 @@ def load_config() -> dict:
 
 
 # ── Session management ────────────────────────────────────────────────────────
-# Each (platform, chat_id) pair gets its own message history list.
-# Access is protected by _session_lock.
+# Each (platform, chat_id) pair gets its own message history list and a lock
+# that serialises concurrent messages from the same conversation.
 
 _sessions: dict[tuple[str, str], list[dict]] = {}
-_session_lock = threading.Lock()
+_session_locks: dict[tuple[str, str], threading.Lock] = {}
+_registry_lock = threading.Lock()  # protects _sessions and _session_locks dicts
+
+# Bounded executor — prevents unbounded thread creation under load.
+_agent_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="agent")
 
 
-def get_session(platform: str, chat_id: str) -> list[dict]:
+def get_session(platform: str, chat_id: str) -> tuple[list[dict], threading.Lock]:
+    """Return (history_list, per_session_lock) for the given conversation."""
     key = (platform, chat_id)
-    with _session_lock:
+    with _registry_lock:
         if key not in _sessions:
             _sessions[key] = []
-        return _sessions[key]
+            _session_locks[key] = threading.Lock()
+        return _sessions[key], _session_locks[key]
 
 
 def trim_session(session: list[dict], max_msgs: int) -> None:
     """Trim *session* in-place to at most *max_msgs* recent messages."""
-    with _session_lock:
-        if len(session) > max_msgs:
-            del session[:len(session) - max_msgs]
+    if len(session) > max_msgs:
+        del session[:len(session) - max_msgs]
 
 
 # ── Outbound HTTP (sync — called from daemon threads) ─────────────────────────
@@ -276,6 +281,7 @@ async def _lifespan(application: FastAPI):
     _client   = OpenAI(
         api_key=_cfg.get("api_key", "ollama") or "ollama",
         base_url=_cfg.get("base_url", "http://localhost:11434/v1"),
+        timeout=120.0,
     )
 
     enabled = [p for p in ("telegram", "whatsapp", "messenger")
@@ -325,28 +331,30 @@ def _is_allowed(platform: str, chat_id: str) -> bool:
 
 def _dispatch(platform: str, chat_id: str, text: str,
               reply_fn: "callable[[str], None]") -> None:
-    """Validate, then fire a daemon thread that runs the agent and replies."""
+    """Validate, then submit a bounded-pool task that runs the agent and replies."""
     if not _is_allowed(platform, chat_id):
         reply_fn("⛔ Unauthorized.")
         return
 
     reply_fn("⏳ Working on it…")
 
-    session = get_session(platform, chat_id)
-    max_h   = _cfg.get("max_history", MAX_HISTORY)
+    session, session_lock = get_session(platform, chat_id)
+    max_h = _cfg.get("max_history", MAX_HISTORY)
 
     def _work():
-        try:
-            result = run_agent(
-                text, session, _pool, _tools, _sysmsg,
-                _cfg["model"], _client, max_h,
-            )
-            reply_fn(result)
-        except Exception as exc:
-            log.exception("Agent error on %s/%s", platform, chat_id)
-            reply_fn(f"❌ Error: {exc}")
+        # Per-session lock serialises concurrent messages from the same chat.
+        with session_lock:
+            try:
+                result = run_agent(
+                    text, session, _pool, _tools, _sysmsg,
+                    _cfg["model"], _client, max_h,
+                )
+                reply_fn(result)
+            except Exception as exc:
+                log.exception("Agent error on %s/%s", platform, chat_id)
+                reply_fn(f"❌ Error: {exc}")
 
-    threading.Thread(target=_work, daemon=True, name=f"agent-{platform}").start()
+    _agent_executor.submit(_work)
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -459,12 +467,9 @@ def _register_telegram(webhook_url: str) -> None:
     token = cfg.get("telegram", {}).get("token", "")
     if not token or token == "YOUR_BOT_TOKEN":
         sys.exit("❌  Set telegram.token in your config first.")
-    url = (
-        f"https://api.telegram.org/bot{token}/setWebhook"
-        f"?url={webhook_url}/webhook/telegram"
-    )
-    with urllib.request.urlopen(url, timeout=10) as r:
-        result = json.loads(r.read().decode())
+    url = f"https://api.telegram.org/bot{token}/setWebhook"
+    resp   = _http.get(url, params={"url": f"{webhook_url}/webhook/telegram"})
+    result = resp.json()
     if result.get("ok"):
         print(f"✅  Telegram webhook registered → {webhook_url}/webhook/telegram")
     else:
