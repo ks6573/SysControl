@@ -16,10 +16,12 @@ Pass --api-key to skip the prompt entirely (e.g. for scripted/CI use).
 """
 
 import argparse
+import datetime
 import getpass
 import json
 import sys
 import threading
+from pathlib import Path
 
 from openai import OpenAI
 
@@ -31,6 +33,109 @@ from agent.core import (
     _colorize, load_system_prompt, mcp_to_openai_tools, print_tool_call,
 )
 
+# ── Memory ────────────────────────────────────────────────────────────────────
+
+MEMORY_FILE = Path(__file__).parent.parent / "SysControl_Memory.md"
+
+# Phrases that signal the user wants to end the session
+EXIT_PHRASES = {
+    "exit", "quit", "bye", "goodbye", "good bye", "farewell",
+    "see ya", "see you", "cya", "later", "take care", "peace",
+    "done", "close", "end", "stop", ":q", "q", "adios", "adieu",
+    "ttyl", "ttfn", "night", "goodnight", "good night",
+}
+
+_PRIVACY_NOTICE = (
+    f"\n{DIM}╔══════════════════════════════════════════════════════════════╗\n"
+    f"║  Privacy Notice                                              ║\n"
+    f"║  SysControl stores only what you explicitly choose to save.  ║\n"
+    f"║  No personal data is retained by the agent or the LLM.      ║\n"
+    f"║  Ollama processes queries locally — see ollama.com/tos for   ║\n"
+    f"║  full details on cloud usage (if applicable).               ║\n"
+    f"╚══════════════════════════════════════════════════════════════╝{RESET}\n"
+)
+
+
+def load_memory() -> str | None:
+    """Return the contents of SysControl_Memory.md if it exists, else None."""
+    if MEMORY_FILE.exists():
+        text = MEMORY_FILE.read_text(encoding="utf-8").strip()
+        return text if text else None
+    return None
+
+
+def _format_conversation(messages: list[dict]) -> str:
+    """Render the message list as a human-readable markdown block."""
+    lines: list[str] = []
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content") or ""
+        if role == "system" or not content:
+            continue
+        if role == "user":
+            lines.append(f"**You:** {content}")
+        elif role == "assistant":
+            lines.append(f"**Assistant:** {content}")
+        # Skip tool messages — they're internal plumbing
+    return "\n\n".join(lines)
+
+
+def offer_memory_save(messages: list[dict]) -> None:
+    """
+    Ask the user whether to append this session to SysControl_Memory.md.
+    Called just before the agent exits.
+    """
+    # Only bother if there's actual conversation to save
+    has_content = any(
+        m.get("role") in ("user", "assistant") and m.get("content")
+        for m in messages
+    )
+    if not has_content:
+        return
+
+    print(_PRIVACY_NOTICE)
+    print(f"{BOLD}Would you like to save this session to memory for future reference?{RESET}")
+    print(f"{DIM}  Memory is appended to SysControl_Memory.md (never overwritten).{RESET}")
+    print(f"{DIM}  Type 'yes'/'no', or choose format: 'md' / 'txt'{RESET}")
+    print(f"{BOLD}Save session? [yes/no/md/txt]:{RESET} ", end="", flush=True)
+
+    try:
+        answer = input("").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    if answer in ("yes", "y", "md", "markdown"):
+        _append_memory(messages, fmt="md")
+    elif answer in ("txt", "text"):
+        _append_memory(messages, fmt="txt")
+    else:
+        print(f"{DIM}Session not saved.{RESET}")
+
+
+def _append_memory(messages: list[dict], fmt: str = "md") -> None:
+    """Append the current session to SysControl_Memory.md."""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    body = _format_conversation(messages)
+
+    if fmt == "md":
+        separator = f"\n\n---\n\n## Session — {timestamp}\n\n{body}\n"
+    else:
+        separator = f"\n\n{'='*60}\nSession — {timestamp}\n{'='*60}\n\n"
+        # Strip markdown bold markers for plain text
+        separator += body.replace("**You:**", "You:").replace("**Assistant:**", "Assistant:")
+        separator += "\n"
+
+    # Ensure the file has a header on first creation
+    if not MEMORY_FILE.exists() or MEMORY_FILE.stat().st_size == 0:
+        header = "# SysControl Memory\n\nThis file is appended automatically. Edit freely.\n"
+        MEMORY_FILE.write_text(header + separator, encoding="utf-8")
+    else:
+        with MEMORY_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(separator)
+
+    print(f"{GREEN}✓ Session appended to {MEMORY_FILE.name}{RESET}")
+
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 
@@ -39,6 +144,9 @@ def print_banner() -> None:
     print(f"│               SysControl Agent                      │")
     print(f"│     Your AI system monitoring assistant             │")
     print(f"└─────────────────────────────────────────────────────┘{RESET}")
+    memory = load_memory()
+    if memory:
+        print(f"{DIM}  Memory file found — previous context will be included.{RESET}")
 
 
 # ── Agentic Loop ──────────────────────────────────────────────────────────────
@@ -281,13 +389,24 @@ def main() -> None:
     pool = MCPClientPool(mcp_client)
 
     try:
-        mcp_tools      = mcp_client.list_tools()
-        tools          = mcp_to_openai_tools(mcp_tools)
-        system_message = {"role": "system", "content": system_prompt}   # built once
+        mcp_tools = mcp_client.list_tools()
+        tools     = mcp_to_openai_tools(mcp_tools)
+
+        # Inject saved memory into the system prompt so the agent has prior context
+        memory = load_memory()
+        full_system = system_prompt
+        if memory:
+            full_system = (
+                system_prompt
+                + "\n\n---\n\n# Saved Memory (from previous sessions)\n\n"
+                + memory
+            )
+
+        system_message = {"role": "system", "content": full_system}   # built once
         ollama_client  = OpenAI(api_key=api_key, base_url=base_url)
 
         print(f"\r{GREEN}✓{RESET} Connected — {len(tools)} tools available. {DIM}[{provider_label}  ·  {model}]{RESET}")
-        print(f"{DIM}  Type your question, or 'exit' to quit.{RESET}\n")
+        print(f"{DIM}  Type your question, or 'exit' / 'bye' / 'goodbye' to quit.{RESET}\n")
 
         messages: list[dict] = []
 
@@ -296,13 +415,15 @@ def main() -> None:
                 user_input = input(f"{BOLD}{BLUE}You:{RESET} ").strip()
             except (EOFError, KeyboardInterrupt):
                 print(f"\n{DIM}Goodbye!{RESET}")
+                offer_memory_save(messages)
                 break
 
             if not user_input:
                 continue
 
-            if user_input.lower() in {"exit", "quit", "bye", ":q"}:
+            if user_input.lower() in EXIT_PHRASES:
                 print(f"{DIM}Goodbye!{RESET}")
+                offer_memory_save(messages)
                 break
 
             messages.append({"role": "user", "content": user_input})
