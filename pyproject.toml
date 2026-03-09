@@ -24,7 +24,7 @@ classifiers = [
 
 dependencies = [
     "psutil>=5.9.0",
-    "gputil>=1.4.0",
+    "nvidia-ml-py>=12.0.0",
     "matplotlib>=3.7.0",
     "openai>=2.26.0",
     # Remote bridge (Telegram / WhatsApp / Messenger)

@@ -34,16 +34,17 @@ LOCAL_MODEL    = "qwen2.5"  # any model pulled via: ollama pull <model>
 LOCAL_BASE_URL = "http://localhost:11434/v1"
 LOCAL_API_KEY  = "ollama"   # Ollama doesn't require a real key
 
-# ANSI colours (degrade gracefully on non-colour terminals)
-RESET   = "\033[0m"
-BOLD    = "\033[1m"
-DIM     = "\033[2m"
-CYAN    = "\033[36m"
-GREEN   = "\033[32m"
-YELLOW  = "\033[33m"
-BLUE    = "\033[34m"
-WHITE   = "\033[97m"   # bright white — used for bold text
-MAGENTA = "\033[35m"   # used for inline code
+# ANSI colours — only emitted when stdout is a real terminal.
+_USE_COLOR = sys.stdout.isatty()
+RESET   = "\033[0m"  if _USE_COLOR else ""
+BOLD    = "\033[1m"  if _USE_COLOR else ""
+DIM     = "\033[2m"  if _USE_COLOR else ""
+CYAN    = "\033[36m" if _USE_COLOR else ""
+GREEN   = "\033[32m" if _USE_COLOR else ""
+YELLOW  = "\033[33m" if _USE_COLOR else ""
+BLUE    = "\033[34m" if _USE_COLOR else ""
+WHITE   = "\033[97m" if _USE_COLOR else ""   # bright white — used for bold text
+MAGENTA = "\033[35m" if _USE_COLOR else ""   # used for inline code
 
 # ── MCP Client ────────────────────────────────────────────────────────────────
 

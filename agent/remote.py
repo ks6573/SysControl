@@ -117,9 +117,7 @@ def get_session(platform: str, chat_id: str) -> list[dict]:
 
 
 def trim_session(session: list[dict], max_msgs: int) -> None:
-    """Keep the most recent max_msgs messages. Must be called with _session_lock held
-    OR operate on a per-session list that only one thread touches at a time.
-    Since multiple platform threads can share the same session, acquire the lock."""
+    """Trim *session* in-place to at most *max_msgs* recent messages."""
     with _session_lock:
         if len(session) > max_msgs:
             del session[:len(session) - max_msgs]
@@ -127,11 +125,12 @@ def trim_session(session: list[dict], max_msgs: int) -> None:
 
 # ── Outbound HTTP (sync — called from daemon threads) ─────────────────────────
 
+_http = httpx.Client(timeout=30)
+
+
 def _post(url: str, *, headers: dict | None = None, params: dict | None = None,
           payload: dict) -> httpx.Response:
-    with httpx.Client(timeout=30) as c:
-        return c.post(url, headers=headers or {}, params=params or {},
-                      json=payload)
+    return _http.post(url, headers=headers or {}, params=params or {}, json=payload)
 
 
 def _telegram_send(chat_id: int | str, text: str, token: str) -> None:
@@ -151,7 +150,7 @@ def _telegram_send(chat_id: int | str, text: str, token: str) -> None:
 
 def _whatsapp_send(phone: str, text: str, cfg: dict) -> None:
     _post(
-        f"https://graph.facebook.com/v18.0/{cfg['phone_number_id']}/messages",
+        f"https://graph.facebook.com/v21.0/{cfg['phone_number_id']}/messages",
         headers={"Authorization": f"Bearer {cfg['access_token']}"},
         payload={
             "messaging_product": "whatsapp",
@@ -164,7 +163,7 @@ def _whatsapp_send(phone: str, text: str, cfg: dict) -> None:
 
 def _messenger_send(psid: str, text: str, token: str) -> None:
     _post(
-        "https://graph.facebook.com/v18.0/me/messages",
+        "https://graph.facebook.com/v21.0/me/messages",
         params={"access_token": token},
         payload={
             "recipient": {"id": psid},

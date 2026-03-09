@@ -26,6 +26,7 @@ import urllib.request
 import uuid
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 import matplotlib
 matplotlib.use("Agg")
@@ -38,11 +39,12 @@ except ImportError:
     print("psutil not found. Install with: pip install psutil", file=sys.stderr)
     sys.exit(1)
 
-# Optional GPU support via GPUtil
+# Optional GPU support via pynvml (official NVIDIA Python bindings, nvidia-ml-py)
 try:
-    import GPUtil
+    import pynvml
+    pynvml.nvmlInit()
     GPU_AVAILABLE = True
-except ImportError:
+except Exception:
     GPU_AVAILABLE = False
 
 
@@ -362,24 +364,37 @@ def get_ram_usage() -> dict:
 
 def get_gpu_usage() -> dict:
     if not GPU_AVAILABLE:
-        return {"error": "GPUtil not installed. Run: pip install gputil"}
-    gpus = GPUtil.getGPUs()
-    if not gpus:
-        return {"error": "No GPUs detected"}
-    return {
-        "gpus": [
-            {
-                "id": g.id,
-                "name": g.name,
-                "load_percent": round(g.load * 100, 1),
-                "memory_used_mb": round(g.memoryUsed, 1),
-                "memory_total_mb": round(g.memoryTotal, 1),
-                "memory_percent": round(g.memoryUsed / g.memoryTotal * 100, 1) if g.memoryTotal else None,
-                "temperature_c": g.temperature,
-            }
-            for g in gpus
-        ]
-    }
+        return {"error": "pynvml not installed or no NVIDIA driver found. Run: pip install nvidia-ml-py"}
+    try:
+        count = pynvml.nvmlDeviceGetCount()
+        if count == 0:
+            return {"error": "No GPUs detected"}
+        gpus = []
+        for i in range(count):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            util = pynvml.nvmlDeviceGetUtilizationRates(h)
+            mem  = pynvml.nvmlDeviceGetMemoryInfo(h)
+            try:
+                temp = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
+            except pynvml.NVMLError:
+                temp = None
+            name = pynvml.nvmlDeviceGetName(h)
+            if isinstance(name, bytes):
+                name = name.decode()
+            mem_total_mb = mem.total / 1024 / 1024
+            mem_used_mb  = mem.used  / 1024 / 1024
+            gpus.append({
+                "id": i,
+                "name": name,
+                "load_percent": util.gpu,
+                "memory_used_mb": round(mem_used_mb, 1),
+                "memory_total_mb": round(mem_total_mb, 1),
+                "memory_percent": round(mem_used_mb / mem_total_mb * 100, 1) if mem_total_mb else None,
+                "temperature_c": temp,
+            })
+        return {"gpus": gpus}
+    except pynvml.NVMLError as e:
+        return {"error": f"NVML error: {e}"}
 
 
 def get_disk_usage() -> dict:
@@ -711,15 +726,23 @@ def get_system_alerts() -> dict:
 
     if GPU_AVAILABLE:
         try:
-            for g in GPUtil.getGPUs():
-                load_pct = round(g.load * 100, 1) if g.load is not None else None
-                if load_pct is not None and load_pct >= 95:
-                    _alert("critical", f"gpu:{g.id}", f"GPU {g.name} load critically high at {load_pct}%", load_pct)
-                if g.temperature is not None:
-                    if g.temperature >= 85:
-                        _alert("critical", f"gpu:{g.id}", f"GPU {g.name} temp critically high at {g.temperature}°C", g.temperature)
-                    elif g.temperature >= 75:
-                        _alert("warning", f"gpu:{g.id}", f"GPU {g.name} temp elevated at {g.temperature}°C", g.temperature)
+            for i in range(pynvml.nvmlDeviceGetCount()):
+                h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                util = pynvml.nvmlDeviceGetUtilizationRates(h)
+                name = pynvml.nvmlDeviceGetName(h)
+                if isinstance(name, bytes):
+                    name = name.decode()
+                load_pct = util.gpu
+                if load_pct >= 95:
+                    _alert("critical", f"gpu:{i}", f"GPU {name} load critically high at {load_pct}%", load_pct)
+                try:
+                    temp = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
+                    if temp >= 85:
+                        _alert("critical", f"gpu:{i}", f"GPU {name} temp critically high at {temp}°C", temp)
+                    elif temp >= 75:
+                        _alert("warning", f"gpu:{i}", f"GPU {name} temp elevated at {temp}°C", temp)
+                except pynvml.NVMLError:
+                    pass
         except Exception:
             pass
 
@@ -965,6 +988,7 @@ def kill_process(pid: int, force: bool = False) -> dict:
         }
 
 
+@lru_cache(maxsize=1)
 def get_device_specs() -> dict:
     """Return static hardware and OS specifications."""
     vm = psutil.virtual_memory()
@@ -985,11 +1009,19 @@ def get_device_specs() -> dict:
 
     gpu_specs = []
     if GPU_AVAILABLE:
-        for g in GPUtil.getGPUs():
-            gpu_specs.append({
-                "name": g.name,
-                "vram_total_mb": round(g.memoryTotal, 1),
-            })
+        try:
+            for i in range(pynvml.nvmlDeviceGetCount()):
+                h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                name = pynvml.nvmlDeviceGetName(h)
+                if isinstance(name, bytes):
+                    name = name.decode()
+                mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+                gpu_specs.append({
+                    "name": name,
+                    "vram_total_mb": round(mem.total / 1024 / 1024, 1),
+                })
+        except pynvml.NVMLError:
+            pass
 
     return {
         "os": {
@@ -1008,7 +1040,7 @@ def get_device_specs() -> dict:
         "ram": {
             "total_gb": round(vm.total / 1e9, 2),
         },
-        "gpus": gpu_specs or [{"error": "GPUtil not installed or no GPUs detected"}],
+        "gpus": gpu_specs or [{"error": "pynvml not available or no NVIDIA GPUs detected"}],
         "disks": disks,
     }
 
@@ -1036,6 +1068,12 @@ def get_full_snapshot() -> dict:
 
 # ── Agentic tool helpers ───────────────────────────────────────────────────────
 
+# Pre-compiled regex patterns for _parse_reminder_time (compiled once at module load).
+_RE_COMPOUND = re.compile(r"in\s+(\d+)\s+hours?\s+(?:and\s+)?(\d+)\s+minutes?")
+_RE_RELATIVE = re.compile(r"in\s+(\d+)\s+(\w+)")
+_RE_TOMORROW = re.compile(r"tomorrow\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?")
+_RE_AT_TIME  = re.compile(r"at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?")
+
 _RELATIVE_UNITS = {
     "second": 1, "seconds": 1,
     "minute": 60, "minutes": 60,
@@ -1051,19 +1089,19 @@ def _parse_reminder_time(s: str):
     now = datetime.datetime.now()
 
     # "in 2 hours 30 minutes" (compound)
-    m = re.match(r"in\s+(\d+)\s+hours?\s+(?:and\s+)?(\d+)\s+minutes?", s)
+    m = _RE_COMPOUND.match(s)
     if m:
         return now + datetime.timedelta(hours=int(m.group(1)), minutes=int(m.group(2)))
 
     # "in 2 hours" / "in 30 minutes" / "in 1 day"
-    m = re.match(r"in\s+(\d+)\s+(\w+)", s)
+    m = _RE_RELATIVE.match(s)
     if m:
         unit = _RELATIVE_UNITS.get(m.group(2))
         if unit:
             return now + datetime.timedelta(seconds=int(m.group(1)) * unit)
 
     # "tomorrow at 9:00 am" / "tomorrow at 3pm"
-    m = re.match(r"tomorrow\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", s)
+    m = _RE_TOMORROW.match(s)
     if m:
         hour, minute = int(m.group(1)), int(m.group(2) or 0)
         period = m.group(3)
@@ -1074,7 +1112,7 @@ def _parse_reminder_time(s: str):
         )
 
     # "at 9:00 am" / "at 14:30" / "at 3pm"
-    m = re.match(r"at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", s)
+    m = _RE_AT_TIME.match(s)
     if m:
         hour, minute = int(m.group(1)), int(m.group(2) or 0)
         period = m.group(3)
@@ -3107,7 +3145,7 @@ TOOLS = {
         "fn": lambda _: _ram_with_chart(),
     },
     "get_gpu_usage": {
-        "description": "Returns GPU load, VRAM usage, and temperature (requires gputil), with an inline grouped bar chart.",
+        "description": "Returns GPU load, VRAM usage, and temperature (requires nvidia-ml-py on NVIDIA hardware), with an inline grouped bar chart.",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: _gpu_with_chart(),
     },

@@ -239,7 +239,7 @@ Create a new Project in Claude Desktop and paste the value of `system_prompt.pro
 
 ---
 
-## Tools (36 total)
+## Tools (55 total)
 
 ### Live Metrics
 
@@ -421,7 +421,7 @@ Supported workloads: Lightroom / photo editing, video editing (Premiere, DaVinci
 ┌─────────────────────────────────────────────────────────────┐
 │                      mcp/server.py                          │
 │                                                             │
-│  36 tools  ─  psutil, matplotlib, subprocess, urllib        │
+│  55 tools  ─  psutil, matplotlib, subprocess, urllib        │
 │  ReminderChecker background thread (15s polling)            │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -466,7 +466,7 @@ SyscontrolMCP/
 │   └── remote.py              # Telegram / WhatsApp / Messenger bridge
 │
 ├── mcp/
-│   ├── server.py              # MCP server — 36 tools, JSON-RPC dispatcher
+│   ├── server.py              # MCP server — 55 tools, JSON-RPC dispatcher
 │   └── prompt.json            # System prompt (paste into Claude Desktop Projects)
 │
 ├── claude_desktop_config.json # Ready-to-use Claude Desktop config (update paths)
