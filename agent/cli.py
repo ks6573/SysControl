@@ -49,9 +49,9 @@ _PRIVACY_NOTICE = (
     f"\n{DIM}╔══════════════════════════════════════════════════════════════╗\n"
     f"║  Privacy Notice                                              ║\n"
     f"║  SysControl stores only what you explicitly choose to save.  ║\n"
-    f"║  No personal data is retained by the agent or the LLM.      ║\n"
+    f"║  No personal data is retained by the agent or the LLM.       ║\n"
     f"║  Ollama processes queries locally — see ollama.com/tos for   ║\n"
-    f"║  full details on cloud usage (if applicable).               ║\n"
+    f"║  full details on cloud usage (if applicable).                ║\n"
     f"╚══════════════════════════════════════════════════════════════╝{RESET}\n"
 )
 
@@ -394,13 +394,20 @@ def main() -> None:
         mcp_tools = mcp_client.list_tools()
         tools     = mcp_to_openai_tools(mcp_tools)
 
+        # Inject available tool names so the model can answer introspection questions
+        tool_names = [t["function"]["name"] for t in tools]
+        tool_list_block = (
+            "\n\n---\n\n# Available Tools\n\n"
+            "You have access to the following tools (call them by name):\n"
+            + "\n".join(f"- {n}" for n in tool_names)
+        )
+
         # Inject saved memory into the system prompt so the agent has prior context
         memory = load_memory()
-        full_system = system_prompt
+        full_system = system_prompt + tool_list_block
         if memory:
-            full_system = (
-                system_prompt
-                + "\n\n---\n\n# Saved Memory (from previous sessions)\n\n"
+            full_system += (
+                "\n\n---\n\n# Saved Memory (from previous sessions)\n\n"
                 + memory
             )
 
