@@ -30,7 +30,7 @@ POOL_SIZE   = 4   # max parallel MCP worker processes
 CLOUD_MODEL    = "gpt-oss:120b"
 CLOUD_BASE_URL = "https://ollama.com/v1"
 
-LOCAL_MODEL    = "qwen2.5"  # any model pulled via: ollama pull <model>
+LOCAL_MODEL    = "qwen3:30b"  # any model pulled via: ollama pull <model>
 LOCAL_BASE_URL = "http://localhost:11434/v1"
 LOCAL_API_KEY  = "ollama"   # Ollama doesn't require a real key
 
@@ -211,7 +211,7 @@ class MCPClientPool:
 @lru_cache(maxsize=1)
 def load_system_prompt() -> str:
     """Load and cache the system prompt — file is read once per process."""
-    data = json.loads(PROMPT_PATH.read_text())
+    data = json.loads(PROMPT_PATH.read_text(encoding="utf-8"))
     return data["system_prompt"]["prompt"]
 
 
