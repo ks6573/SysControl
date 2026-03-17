@@ -18,9 +18,11 @@ Pass --api-key to skip the prompt entirely (e.g. for scripted/CI use).
 import argparse
 import datetime
 import getpass
+import itertools
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 
 try:
@@ -177,6 +179,48 @@ class _MCPError(Exception):
     """Wraps errors from the MCP subprocess itself (crash or closed pipe)."""
 
 
+# ── Spinner ────────────────────────────────────────────────────────────────────
+
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+class _Spinner:
+    """Thread-backed terminal spinner — no-ops when stdout is not a TTY."""
+
+    def __init__(self) -> None:
+        self._message = ""
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._is_tty: bool = sys.stdout.isatty()
+
+    def start(self, message: str = "") -> None:
+        self.stop()   # stop any currently running spinner first
+        if not self._is_tty:
+            return
+        self._message = message
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread and self._thread.is_alive():
+            self._stop.set()
+            self._thread.join(timeout=0.5)
+        if self._is_tty:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+
+    def _run(self) -> None:
+        for frame in itertools.cycle(_SPINNER_FRAMES):
+            if self._stop.is_set():
+                break
+            sys.stdout.write(f"\r{DIM}{frame}  {self._message}{RESET}")
+            sys.stdout.flush()
+            time.sleep(0.08)
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+
+
 # ── History management ────────────────────────────────────────────────────────
 
 MAX_HISTORY_MESSAGES = 40  # ~20 user turns; keeps context well within model limits
@@ -224,7 +268,8 @@ def run_turn(
 ) -> None:
     """Run one user-turn: stream response, execute any tool calls, repeat."""
 
-    print(f"\n{BOLD}{GREEN}Assistant:{RESET} ", end="", flush=True)
+    start_time = time.monotonic()
+    spinner = _Spinner()
 
     while True:
         # Trim history to prevent context-window overflow on long sessions.
@@ -232,6 +277,7 @@ def run_turn(
 
         # ── Stream response ────────────────────────────────────────────────
         # system_message is prepended once; messages already contains history.
+        spinner.start("Thinking…")
         try:
             stream = ollama_client.chat.completions.create(
                 model=model,
@@ -241,20 +287,26 @@ def run_turn(
                 stream=True,
             )
         except openai.APITimeoutError as exc:
+            spinner.stop()
             raise _LLMError(f"LLM request timed out ({exc})") from exc
         except openai.APIConnectionError as exc:
+            spinner.stop()
             raise _LLMError(f"Cannot reach LLM endpoint: {exc}") from exc
         except openai.AuthenticationError as exc:
+            spinner.stop()
             raise _LLMError(f"Invalid API key: {exc}") from exc
         except openai.APIStatusError as exc:
+            spinner.stop()
             raise _LLMError(f"LLM API error {exc.status_code}: {exc.message}") from exc
         except openai.OpenAIError as exc:
+            spinner.stop()
             raise _LLMError(f"LLM error: {exc}") from exc
 
         # Use a fragment list to avoid O(n²) string copies during streaming.
         content_parts: list[str] = []
         tool_calls:    list[dict] = []  # {id, function: {name, arguments}}
         finish_reason: str | None = None
+        _first_content = True   # used to defer "Assistant: " header until first token
 
         # Line buffer: accumulate partial lines so colorization applies to
         # complete lines (markers rarely split across a line boundary).
@@ -268,6 +320,11 @@ def run_turn(
 
             # Stream text tokens — buffer by line, colorize on newline.
             if delta.content:
+                if _first_content:
+                    spinner.stop()
+                    sys.stdout.write(f"\n{BOLD}{GREEN}Assistant:{RESET} ")
+                    sys.stdout.flush()
+                    _first_content = False
                 content_parts.append(delta.content)
                 _pending += delta.content
                 while "\n" in _pending:
@@ -295,6 +352,11 @@ def run_turn(
             print(_colorize(_pending), end="", flush=True)
             _pending = ""
 
+        # Stop spinner in case the model produced only tool calls (no text).
+        if _first_content:
+            spinner.stop()
+            _first_content = False
+
         content = "".join(content_parts)
 
         # ── Handle finish reason ───────────────────────────────────────────
@@ -302,6 +364,8 @@ def run_turn(
         if finish_reason in ("stop", None) and not tool_calls:
             messages.append({"role": "assistant", "content": content})
             print()   # final newline
+            elapsed = time.monotonic() - start_time
+            print(f"{DIM}  thought for {elapsed:.1f}s{RESET}")
             break
 
         elif finish_reason == "tool_calls":
@@ -323,15 +387,18 @@ def run_turn(
             })
 
             # ── Execute tool calls in parallel ─────────────────────────────
-            for tc in tool_calls:
-                print_tool_call(tc["function"]["name"])
-
+            n = len(tool_calls)
+            label = tool_calls[0]["function"]["name"] + (f" +{n - 1} more" if n > 1 else "")
+            spinner.start(f"Running {label}…")
             try:
                 results = pool.call_tools_parallel(tool_calls)
             except RuntimeError as exc:
+                spinner.stop()
                 raise _MCPError(f"MCP server crashed or closed: {exc}") from exc
             except Exception as exc:
+                spinner.stop()
                 raise _ToolError(f"Tool execution failed: {exc}") from exc
+            spinner.stop()
 
             for tc_id, _name, result in results:
                 messages.append({
@@ -340,13 +407,14 @@ def run_turn(
                     "content":     result,
                 })
 
-            # Continue loop — Ollama will process tool results and respond
-            print(f"\n{BOLD}{GREEN}Assistant:{RESET} ", end="", flush=True)
+            # Continue loop — next iteration's spinner + first-content guard
+            # will handle the "Assistant: " header.
 
         else:
             # max_tokens, content_filter, etc.
             messages.append({"role": "assistant", "content": content})
-            print(f"\n{DIM}[stopped: {finish_reason}]{RESET}")
+            elapsed = time.monotonic() - start_time
+            print(f"\n{DIM}[stopped: {finish_reason}] thought for {elapsed:.1f}s{RESET}")
             break
 
 
