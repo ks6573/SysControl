@@ -19,7 +19,6 @@ import argparse
 import datetime
 import getpass
 import itertools
-import json
 import sys
 import threading
 import time

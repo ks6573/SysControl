@@ -7,6 +7,7 @@ Exposes tools for querying CPU, RAM, GPU, disk, network, and process info.
 import ast
 import base64
 import datetime
+import heapq
 import io
 import json
 import os
@@ -1057,7 +1058,7 @@ def get_device_specs() -> dict:
     if GPU_AVAILABLE:
         try:
             if GPU_BACKEND == "pynvml":
-                for i, h in enumerate(_get_nvml_handles()):
+                for h in _get_nvml_handles():
                     name = pynvml.nvmlDeviceGetName(h)
                     if isinstance(name, bytes):
                         name = name.decode()
@@ -1513,16 +1514,14 @@ def check_app_updates() -> dict:
             with lock:
                 results["errors"].append(f"softwareupdate error: {str(e)}")
 
-    # Run all three checks concurrently — brew alone can take 30–120s.
-    threads = [
-        threading.Thread(target=_brew,      daemon=True),
-        threading.Thread(target=_mas,       daemon=True),
-        threading.Thread(target=_sysupdate, daemon=True),
+    # Run all three checks concurrently via the shared executor.
+    futures = [
+        _METRICS_EXECUTOR.submit(_brew),
+        _METRICS_EXECUTOR.submit(_mas),
+        _METRICS_EXECUTOR.submit(_sysupdate),
     ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=130)   # brew timeout is 120s; add a small buffer
+    for f in futures:
+        f.result(timeout=130)   # brew timeout is 120s; add a small buffer
 
     total = (
         len(results["brew_formulae"]) + len(results["brew_casks"])
@@ -1693,8 +1692,7 @@ def find_large_files(path: str = "", n: int = 10) -> dict:
             except OSError:
                 continue
 
-    files.sort(reverse=True)
-    top = files[:n]
+    top = heapq.nlargest(n, files)
 
     return {
         "search_root": str(root),
@@ -1768,12 +1766,12 @@ def network_latency_check() -> dict:
             with lock:
                 results[label] = {"host": host, "reachable": False, "error": str(exc)}
 
-    threads = [threading.Thread(target=_ping, args=(lbl, h), daemon=True)
-               for lbl, h in targets.items()]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=20)
+    futures = [_METRICS_EXECUTOR.submit(_ping, lbl, h) for lbl, h in targets.items()]
+    for f in futures:
+        try:
+            f.result(timeout=20)
+        except Exception:
+            pass
 
     # Diagnosis
     gw = results.get("gateway",       {})
@@ -1945,15 +1943,16 @@ def get_time_machine_status() -> dict:
         except Exception:
             pass
 
-    threads = [
-        threading.Thread(target=_status, daemon=True),
-        threading.Thread(target=_latest, daemon=True),
-        threading.Thread(target=_dest,   daemon=True),
+    futures = [
+        _METRICS_EXECUTOR.submit(_status),
+        _METRICS_EXECUTOR.submit(_latest),
+        _METRICS_EXECUTOR.submit(_dest),
     ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=15)
+    for f in futures:
+        try:
+            f.result(timeout=15)
+        except Exception:
+            pass
 
     return result
 
@@ -2045,16 +2044,22 @@ def _running_browser() -> str | None:
     """Return the name of the first recognised browser that is currently running."""
     if not IS_MACOS:
         return None
-    for app in _CHROMIUM_APPS + [_SAFARI_APP]:
-        try:
-            r = subprocess.run(
-                ["osascript", "-e", f'tell application "System Events" to (name of processes) contains "{app}"'],
-                capture_output=True, text=True, timeout=5,
-            )
-            if r.stdout.strip().lower() == "true":
+    # Single AppleScript call to get all running process names, then match
+    # against known browsers — avoids spawning one subprocess per browser.
+    try:
+        r = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to get name of every process'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return None
+        running = {n.strip() for n in r.stdout.split(",")}
+        for app in _CHROMIUM_APPS + [_SAFARI_APP]:
+            if app in running:
                 return app
-        except Exception:
-            continue
+    except Exception:
+        pass
     return None
 
 
@@ -2093,18 +2098,19 @@ def grant_browser_access() -> dict:
         return {"success": False, "error": str(exc)}
 
 
+_RE_SCRIPT_STYLE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_RE_HTML_TAG      = re.compile(r"<[^>]+>")
+_RE_WHITESPACE    = re.compile(r"\s+")
+
+
 def _strip_html(html: str, max_chars: int) -> str:
     """Very fast HTML → plain-text: strip tags, collapse whitespace."""
-    # Remove <script> and <style> blocks entirely
-    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.DOTALL | re.IGNORECASE)
-    # Remove all remaining tags
-    text = re.sub(r"<[^>]+>", " ", text)
-    # Decode common HTML entities
+    text = _RE_SCRIPT_STYLE.sub(" ", html)
+    text = _RE_HTML_TAG.sub(" ", text)
     for entity, char in (("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
                           ("&quot;", '"'), ("&#39;", "'"), ("&nbsp;", " ")):
         text = text.replace(entity, char)
-    # Collapse whitespace
-    text = re.sub(r"\s+", " ", text).strip()
+    text = _RE_WHITESPACE.sub(" ", text).strip()
     return text[:max_chars]
 
 
@@ -2411,8 +2417,11 @@ def get_imessage_history(contact: str, limit: int = 20) -> dict:
                 datetime(m.date / 1000000000 + strftime('%s','2001-01-01'), 'unixepoch', 'localtime') AS sent_at,
                 h.id AS handle
             FROM message m
-            LEFT JOIN handle h ON m.handle_id = h.rowid
-            WHERE (h.id LIKE ? OR m.is_from_me = 1)
+            JOIN chat_message_join cmj ON cmj.message_id = m.rowid
+            JOIN chat c ON c.rowid = cmj.chat_id
+            JOIN chat_handle_join chj ON chj.chat_id = c.rowid
+            JOIN handle h ON h.rowid = chj.handle_id
+            WHERE h.id LIKE ?
               AND m.text IS NOT NULL AND m.text != ''
             ORDER BY m.date DESC
             LIMIT ?
@@ -2857,24 +2866,14 @@ def _permission_check(flag: str, tool_name: str) -> dict | None:
     }
 
 
-def _shell_allowed() -> bool:
-    """Legacy shim — kept for backwards compat; delegates to _permission_check."""
-    return _load_config().get("allow_shell", False)
-
-
 def run_shell_command(command: str, timeout: int = 30) -> dict:
     """
     Execute a shell command and return stdout, stderr, and exit code.
     Requires ``allow_shell: true`` in ~/.syscontrol/config.json.
     """
-    if not _shell_allowed():
-        return {
-            "error": "Shell command execution is disabled.",
-            "hint": (
-                'To enable it, add \\"allow_shell\\": true to ~/.syscontrol/config.json. '
-                "Example: {\"allow_shell\": true}"
-            ),
-        }
+    denied = _permission_check("allow_shell", "run_shell_command")
+    if denied:
+        return denied
     if not command:
         return {"error": "command is required."}
     timeout = max(1, min(timeout, 120))
@@ -3138,7 +3137,6 @@ def toggle_do_not_disturb(enabled: bool) -> dict:
 
     # Fallback: try direct osascript Focus toggle (macOS 12+)
     try:
-        action = "on" if enabled else "off"
         script = f'do shell script "shortcuts run \'Focus\'"'
         proc2 = subprocess.run(
             ["osascript", "-e", script],
@@ -3219,8 +3217,7 @@ def create_tool(
         return denied
 
     # ── Input validation ───────────────────────────────────────────────────────
-    import re as _re
-    if not name or not _re.match(r"^[a-z][a-z0-9_]*$", name):
+    if not name or not re.match(r"^[a-z][a-z0-9_]*$", name):
         return {
             "error": (
                 "Tool name must start with a lowercase letter and contain only "
