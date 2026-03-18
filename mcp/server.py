@@ -3358,31 +3358,37 @@ def create_tool(
 TOOLS = {
     "get_cpu_usage": {
         "description": "Returns CPU usage percentage (total and per-core), core count, and frequency, with an inline bar chart.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: _cpu_with_chart(),
     },
     "get_ram_usage": {
         "description": "Returns RAM and swap memory usage (total, used, available, percent), with an inline stacked bar chart.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: _ram_with_chart(),
     },
     "get_gpu_usage": {
         "description": "Returns GPU load, VRAM usage, and temperature (requires nvidia-ml-py on NVIDIA hardware), with an inline grouped bar chart.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: _gpu_with_chart(),
     },
     "get_disk_usage": {
         "description": "Returns disk partition usage and I/O counters.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_disk_usage(),
     },
     "get_network_usage": {
         "description": "Returns total bytes sent/received and network interface status.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_network_usage(),
     },
     "get_realtime_io": {
         "description": "Measures actual disk and network I/O throughput by sampling twice over an interval. Returns disk read/write in MB/s and network download/upload in MB/s and Mbps. Call this instead of get_disk_usage or get_network_usage when the user asks about current speed or throughput.",
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3400,6 +3406,7 @@ TOOLS = {
     },
     "get_top_processes": {
         "description": "Returns the top N resource-hungry processes sorted by CPU or memory usage.",
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3412,46 +3419,55 @@ TOOLS = {
     },
     "get_full_snapshot": {
         "description": "Returns a full system snapshot: CPU, RAM, GPU, disk, network, and top processes.",
+        "parallel": False,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_full_snapshot(),
     },
     "get_device_specs": {
         "description": "Returns static hardware specifications: CPU model, core count, total RAM, GPU model and VRAM, disk capacities, and OS details.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_device_specs(),
     },
     "get_battery_status": {
         "description": "Returns battery percentage, charging state, and estimated time remaining. Returns an error on desktops with no battery.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_battery_status(),
     },
     "get_temperature_sensors": {
         "description": "Returns CPU and motherboard temperature sensor readings. On macOS, returns a helpful message with alternatives (psutil cannot access kernel sensors on Darwin). On Linux/Windows, returns sensor groups with current, high, and critical thresholds.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_temperature_sensors(),
     },
     "get_system_uptime": {
         "description": "Returns how long the system has been running, the last boot time, and the 1/5/15-minute load averages.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_system_uptime(),
     },
     "get_system_alerts": {
         "description": "Scans all key system metrics (CPU, RAM, swap, disk partitions, GPU, battery) and returns a prioritized list of critical/warning alerts. Call this first for general 'why is my machine slow?' questions as a quick triage tool.",
+        "parallel": False,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_system_alerts(),
     },
     "get_network_connections": {
         "description": "Returns all active TCP/UDP connections with local/remote addresses, status, and the owning process name.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_network_connections(),
     },
     "get_startup_items": {
         "description": "Lists applications and services configured to launch automatically at startup/login. macOS: scans ~/Library/LaunchAgents, /Library/LaunchAgents, /Library/LaunchDaemons. Windows: reads Run registry keys. Linux: scans ~/.config/autostart. Use when the user asks what runs at startup or wants to speed up boot times.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_startup_items(),
     },
     "get_process_details": {
         "description": "Returns detailed information about a specific process by PID: executable path, command line, user, memory breakdown, open file count, and more.",
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3463,6 +3479,7 @@ TOOLS = {
     },
     "search_process": {
         "description": "Searches for running processes by name (case-insensitive, partial match). Returns PID, CPU%, memory%, and status for each match.",
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3474,6 +3491,7 @@ TOOLS = {
     },
     "kill_process": {
         "description": "Terminates a process by PID. Sends SIGTERM (graceful) by default; SIGKILL if force=True. Refuses to kill critical system processes (PID 1, launchd, systemd, init, kernel_task, core Windows services). Always confirm with the user before calling.",
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3486,6 +3504,7 @@ TOOLS = {
     },
     "get_hardware_profile": {
         "description": "Returns a full hardware profile for a given use-case: specs, live pressure, overclocking capability (where supported), upgrade feasibility per component, and workload-specific bottleneck analysis. Use this when the user asks about speeding up a specific task, upgrading their machine, or overclocking.",
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3505,6 +3524,7 @@ TOOLS = {
             "'at 9:00 am', 'at 3pm', 'tomorrow at 8am'. "
             "Returns a reminder ID that can be used with cancel_reminder."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3526,11 +3546,13 @@ TOOLS = {
     },
     "list_reminders": {
         "description": "List all pending (unfired) reminders with their IDs, messages, and scheduled fire times.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: list_reminders(),
     },
     "cancel_reminder": {
         "description": "Cancel a pending reminder by its ID. Get the ID from set_reminder or list_reminders.",
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3549,6 +3571,7 @@ TOOLS = {
             "Auto-detects location from IP if no location is provided. "
             "Pass a city name for a specific location (e.g. 'Tokyo' or 'London, UK')."
         ),
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3574,6 +3597,7 @@ TOOLS = {
             "the Mac App Store (requires the 'mas' CLI — install with 'brew install mas'), "
             "and macOS system software updates. Returns lists of outdated apps with current vs available versions."
         ),
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: check_app_updates(),
     },
@@ -3583,6 +3607,7 @@ TOOLS = {
             "Returns current status and recent tracking history. "
             "Note: Amazon TBA numbers must be tracked at amazon.com/orders."
         ),
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3601,6 +3626,7 @@ TOOLS = {
             "Skips hidden directories, .git, __pycache__, node_modules, .venv, and Library. "
             "Use when the user asks what is using disk space or wants to free up storage."
         ),
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3626,6 +3652,7 @@ TOOLS = {
             "Includes an automatic diagnosis (router issue / ISP issue / congestion / normal). "
             "Use when the user asks if their internet is slow or to locate where latency is introduced."
         ),
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: network_latency_check(),
     },
@@ -3635,6 +3662,7 @@ TOOLS = {
             "Also reports total container count (including stopped). "
             "Returns an actionable error if Docker is not installed or the daemon is not running."
         ),
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_docker_status(),
     },
@@ -3644,6 +3672,7 @@ TOOLS = {
             "last backup time and how long ago it was, backup destination name and kind. "
             "Uses tmutil status, latestbackup, and destinationinfo (run in parallel)."
         ),
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_time_machine_status(),
     },
@@ -3655,6 +3684,7 @@ TOOLS = {
             "Optional filter_str narrows results to lines containing that keyword. "
             "Use to diagnose crashes, kernel panics, or application errors."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3680,6 +3710,7 @@ TOOLS = {
             "HTML is stripped. No browser needed, no permission required. "
             "Use this to read articles, docs, pricing pages, or any URL the user mentions."
         ),
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3699,6 +3730,7 @@ TOOLS = {
             "(title, URL, snippet). No API key. No browser permission required. "
             "Combine with web_fetch to read the full content of a result."
         ),
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3718,6 +3750,7 @@ TOOLS = {
             "ONLY call this tool after the user has explicitly said yes/granted/allow. "
             "Writes a permission flag; subsequent browser_* calls will then work."
         ),
+        "parallel": False,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: grant_browser_access(),
     },
@@ -3727,6 +3760,7 @@ TOOLS = {
             "Requires prior browser permission (grant_browser_access). "
             "macOS: uses `open` command. Linux/Windows: uses webbrowser module."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3742,6 +3776,7 @@ TOOLS = {
             "macOS only (falls back to browser_open_url on other platforms). "
             "Requires browser permission. Supports Arc, Chrome, Brave, Edge, Safari."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3758,6 +3793,7 @@ TOOLS = {
             "Requires browser permission. Use this to read what the user is currently looking at, "
             "summarise a page, or answer questions about its content."
         ),
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: browser_get_page(),
     },
@@ -3769,6 +3805,7 @@ TOOLS = {
             "Requires Messages.app to be signed in and Terminal Automation permission. "
             "macOS only."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3792,6 +3829,7 @@ TOOLS = {
             "Requires Full Disk Access for Terminal in System Settings → Privacy & Security. "
             "macOS only."
         ),
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3815,6 +3853,7 @@ TOOLS = {
             "Return the current text content of the system clipboard. "
             "macOS only (uses pbpaste)."
         ),
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_clipboard(),
     },
@@ -3824,6 +3863,7 @@ TOOLS = {
             "macOS only (uses pbcopy). "
             "Use to copy a result or command output so the user can paste it anywhere."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3843,6 +3883,7 @@ TOOLS = {
             "Optionally saves to a file path. "
             "macOS only (uses screencapture -x, no shutter sound)."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3862,6 +3903,7 @@ TOOLS = {
             "Open an application by name on macOS (uses 'open -a'). "
             "Works with any installed app, e.g. 'Calculator', 'Safari', 'Spotify'."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3879,6 +3921,7 @@ TOOLS = {
             "Quit an application gracefully by name using AppleScript ('tell app to quit'). "
             "Pass force=true for immediate SIGKILL. macOS only."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3902,6 +3945,7 @@ TOOLS = {
             "Return the current macOS output volume level (0–100), input volume, alert volume, and mute state. "
             "macOS only."
         ),
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_volume(),
     },
@@ -3910,6 +3954,7 @@ TOOLS = {
             "Set the macOS system output volume to a level between 0 (mute) and 100 (maximum). "
             "macOS only."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3931,6 +3976,7 @@ TOOLS = {
             "signal strength (RSSI in dBm), channel, and security type. "
             "Sorted strongest-first. macOS only (uses airport utility)."
         ),
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_wifi_networks(),
     },
@@ -3941,6 +3987,7 @@ TOOLS = {
             "Returns up to max_chars characters (default 16,000, max 32,000). "
             "Useful for reading config files, logs, scripts, notes, etc."
         ),
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3964,6 +4011,7 @@ TOOLS = {
             "Creates parent directories as needed. Overwrites by default. "
             "Use for saving notes, configs, scripts, or any text output."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3993,6 +4041,7 @@ TOOLS = {
             "Timeout is 30s by default (max 120s). "
             "Always confirm with the user before running destructive commands."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4018,6 +4067,7 @@ TOOLS = {
             "Requires Calendar access for Terminal in System Settings → Privacy & Security. "
             "macOS only."
         ),
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4038,6 +4088,7 @@ TOOLS = {
             "Requires Contacts access for Terminal in System Settings → Privacy & Security. "
             "macOS only."
         ),
+        "parallel": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4058,6 +4109,7 @@ TOOLS = {
             "Requires macOS 12+. "
             "Use to trigger user-defined automations (e.g. 'Send Daily Report', 'Resize Images')."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4081,6 +4133,7 @@ TOOLS = {
             "Requires Accessibility permission for Terminal in System Settings → Privacy & Security. "
             "macOS only."
         ),
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: get_frontmost_app(),
     },
@@ -4091,6 +4144,7 @@ TOOLS = {
             "If those don't exist, returns an error with setup instructions. "
             "macOS 12+ required."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4110,6 +4164,7 @@ TOOLS = {
             "Uses diskutil eject. macOS only. "
             "Use get_disk_usage to find available mountpoints."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4125,6 +4180,7 @@ TOOLS = {
     # ── Tool self-extension ────────────────────────────────────────────────────
     "list_user_tools": {
         "description": "Lists all custom tools installed via create_tool.",
+        "parallel": True,
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: list_user_tools(),
     },
@@ -4134,6 +4190,7 @@ TOOLS = {
             "Requires allow_tool_creation: true in ~/.syscontrol/config.json. "
             "The tool is available after restarting the agent."
         ),
+        "parallel": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4203,6 +4260,7 @@ def handle_request(request: dict) -> dict | None:
             {
                 "name": name,
                 "description": meta["description"],
+                "parallel": meta.get("parallel", True),
                 "inputSchema": meta["inputSchema"],
             }
             for name, meta in TOOLS.items()

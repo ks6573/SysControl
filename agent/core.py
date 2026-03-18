@@ -22,8 +22,9 @@ from openai import OpenAI  # noqa: F401 — re-exported for downstream imports
 # agent/core.py lives inside agent/, so go up one level to reach mcp/
 SERVER_PATH = Path(__file__).parent.parent / "mcp" / "server.py"
 PROMPT_PATH = Path(__file__).parent.parent / "mcp" / "prompt.json"
-MAX_TOKENS  = 16384
-POOL_SIZE   = 4   # max parallel MCP worker processes
+MAX_TOKENS        = 16384
+POOL_SIZE         = 4   # max parallel MCP worker processes
+MAX_PARALLEL_TOOLS = 4  # max tools in a single concurrent batch
 
 # ── Provider config ───────────────────────────────────────────────────────────
 
@@ -139,6 +140,7 @@ class MCPClientPool:
         self._clients: list[MCPClient] = [primary]
         self._pool_size = pool_size
         self._pool_lock = threading.Lock()
+        self._parallel_safe: set[str] | None = None  # lazily populated
 
     def _get_or_create(self, index: int) -> MCPClient:
         # Fast path — already have enough clients.
@@ -160,19 +162,44 @@ class MCPClientPool:
             self._clients.append(new_client)
             return new_client
 
+    def _get_parallel_safe(self) -> set[str]:
+        """Return the set of tool names that are safe to run concurrently.
+
+        Lazily fetches the tool list from the primary MCP client on first call
+        and caches it for the lifetime of the pool.
+        """
+        if self._parallel_safe is None:
+            try:
+                tools = self._clients[0].list_tools()
+                self._parallel_safe = {
+                    t["name"] for t in tools if t.get("parallel", True)
+                }
+            except Exception:
+                # If the server is unreachable fall back to treating everything
+                # as safe (original behaviour) so the agent doesn't stall.
+                self._parallel_safe = set()
+        return self._parallel_safe
+
+    def _is_parallel_safe(self, name: str) -> bool:
+        safe = self._get_parallel_safe()
+        # Empty set means fallback mode — allow everything.
+        return (not safe) or (name in safe)
+
     def call_tools_parallel(
         self, tool_calls: list[dict]
     ) -> list[tuple[str, str, str]]:
         """
-        Execute *all* tool calls in `tool_calls` concurrently.
+        Execute tool calls with parallel-safety enforcement.
 
-        Returns a list of (tool_call_id, name, result) tuples in the **original
-        order** so that messages can be appended deterministically.
+        Batch-safe tools (read-only, fast, no side effects) run concurrently,
+        capped at MAX_PARALLEL_TOOLS per batch.  Unsafe tools (blocking,
+        state-mutating, or large-output) always run sequentially on the primary
+        client.  Results are returned in the original request order.
         """
         if len(tool_calls) == 1:
             # Fast path: no thread overhead for a single call.
-            tc     = tool_calls[0]
-            name   = tc["function"]["name"]
+            tc   = tool_calls[0]
+            name = tc["function"]["name"]
             try:
                 args = json.loads(tc["function"]["arguments"])
             except json.JSONDecodeError:
@@ -180,23 +207,42 @@ class MCPClientPool:
             result = self._clients[0].call_tool(name, args)
             return [(tc["id"], name, result)]
 
-        n_workers = min(len(tool_calls), self._pool_size)
-        results: list[tuple[int, str, str, str]] = []  # (order, id, name, result)
+        # Partition by parallel safety, preserving original indices.
+        indexed       = list(enumerate(tool_calls))
+        safe_indexed  = [(i, tc) for i, tc in indexed
+                         if self._is_parallel_safe(tc["function"]["name"])]
+        serial_indexed = [(i, tc) for i, tc in indexed
+                          if not self._is_parallel_safe(tc["function"]["name"])]
 
-        def _run(order: int, tc: dict) -> tuple[int, str, str, str]:
-            client = self._get_or_create(order % n_workers)
-            name   = tc["function"]["name"]
+        results: list[tuple[int, str, str, str]] = []  # (orig_idx, tc_id, name, result)
+
+        def _run_one(
+            order: int, tc: dict, client: MCPClient
+        ) -> tuple[int, str, str, str]:
+            name = tc["function"]["name"]
             try:
                 args = json.loads(tc["function"]["arguments"])
             except json.JSONDecodeError:
                 args = {}
-            result = client.call_tool(name, args)
-            return (order, tc["id"], name, result)
+            return (order, tc["id"], name, client.call_tool(name, args))
 
-        with ThreadPoolExecutor(max_workers=n_workers) as ex:
-            futures = {ex.submit(_run, i, tc): i for i, tc in enumerate(tool_calls)}
-            for fut in as_completed(futures):
-                results.append(fut.result())
+        # Run parallel-safe calls in batches of at most MAX_PARALLEL_TOOLS.
+        remaining = list(safe_indexed)
+        while remaining:
+            batch    = remaining[:MAX_PARALLEL_TOOLS]
+            remaining = remaining[MAX_PARALLEL_TOOLS:]
+            n_workers = min(len(batch), self._pool_size)
+            with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                futures = [
+                    ex.submit(_run_one, order, tc, self._get_or_create(slot % n_workers))
+                    for slot, (order, tc) in enumerate(batch)
+                ]
+                for fut in as_completed(futures):
+                    results.append(fut.result())
+
+        # Run serial calls one at a time on the primary client.
+        for order, tc in serial_indexed:
+            results.append(_run_one(order, tc, self._clients[0]))
 
         results.sort(key=lambda x: x[0])
         return [(tc_id, name, result) for _, tc_id, name, result in results]
