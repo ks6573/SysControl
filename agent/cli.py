@@ -27,21 +27,15 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-try:
-    import fcntl as _fcntl
-    _HAS_FCNTL = True
-except ImportError:
-    _HAS_FCNTL = False
-
 import openai
 from openai import OpenAI
 
 from agent.core import (
     BLUE, BOLD, CLOUD_BASE_URL, CLOUD_MODEL, CYAN, DIM, GREEN,
-    LOCAL_API_KEY, LOCAL_BASE_URL, LOCAL_MODEL, MAX_TOKENS,
+    HAS_FCNTL, LOCAL_API_KEY, LOCAL_BASE_URL, LOCAL_MODEL, MAX_TOKENS,
     RESET, SERVER_PATH, YELLOW,
     MCPClient, MCPClientPool,
-    _colorize, load_system_prompt, mcp_to_openai_tools,
+    _colorize, fcntl_mod, load_system_prompt, mcp_to_openai_tools,
 )
 
 # ── Memory ────────────────────────────────────────────────────────────────────
@@ -112,16 +106,16 @@ def _append_memory_note(note: str) -> None:
     entry = f"\n- [{timestamp}] {note}\n"
 
     with MEMORY_FILE.open("a", encoding="utf-8") as fh:
-        if _HAS_FCNTL:
-            _fcntl.flock(fh, _fcntl.LOCK_EX)
+        if HAS_FCNTL:
+            fcntl_mod.flock(fh, fcntl_mod.LOCK_EX)
         try:
             fh.seek(0, 2)
             if fh.tell() == 0:
                 fh.write("# SysControl Memory\n\n")
             fh.write(entry)
         finally:
-            if _HAS_FCNTL:
-                _fcntl.flock(fh, _fcntl.LOCK_UN)
+            if HAS_FCNTL:
+                fcntl_mod.flock(fh, fcntl_mod.LOCK_UN)
 
     print(f"{GREEN}✓ Note saved to {MEMORY_FILE.name}{RESET}")
 

@@ -15,6 +15,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
 
+try:
+    import fcntl as fcntl_mod  # noqa: F401 — re-exported for cli.py / server.py
+    HAS_FCNTL = True
+except ImportError:
+    fcntl_mod = None  # type: ignore[assignment]  # noqa: F401
+    HAS_FCNTL = False
+
 from openai import OpenAI  # noqa: F401 — re-exported for downstream imports
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -78,10 +85,10 @@ class MCPClient:
             self.proc.stdin.flush()
             raw = self.proc.stdout.readline()
             if not raw:
-                err = self.proc.stderr.read() if self.proc.stderr else ""
+                err = (self.proc.stderr.read() if self.proc.stderr else "").strip()
                 raise RuntimeError(
                     f"MCP server closed unexpectedly."
-                    f"{(' Server error: ' + err.strip()) if err.strip() else ''}"
+                    f"{(' Server error: ' + err) if err else ''}"
                 )
             return json.loads(raw)
 
@@ -201,14 +208,19 @@ class MCPClientPool:
         state-mutating, or large-output) always run sequentially on the primary
         client.  Results are returned in the original request order.
         """
-        if len(tool_calls) == 1:
-            # Fast path: no thread overhead for a single call.
-            tc   = tool_calls[0]
+        def _parse_args(tc: dict) -> tuple[str, dict]:
+            """Extract tool name and parsed arguments from a tool-call dict."""
             name = tc["function"]["name"]
             try:
                 args = json.loads(tc["function"]["arguments"])
             except json.JSONDecodeError:
                 args = {}
+            return name, args
+
+        if len(tool_calls) == 1:
+            # Fast path: no thread overhead for a single call.
+            tc = tool_calls[0]
+            name, args = _parse_args(tc)
             result = self._clients[0].call_tool(name, args)
             return [(tc["id"], name, result)]
 
@@ -224,18 +236,12 @@ class MCPClientPool:
         def _run_one(
             order: int, tc: dict, client: MCPClient
         ) -> tuple[int, str, str, str]:
-            name = tc["function"]["name"]
-            try:
-                args = json.loads(tc["function"]["arguments"])
-            except json.JSONDecodeError:
-                args = {}
+            name, args = _parse_args(tc)
             return (order, tc["id"], name, client.call_tool(name, args))
 
         # Run parallel-safe calls in batches of at most MAX_PARALLEL_TOOLS.
-        remaining = list(safe_indexed)
-        while remaining:
-            batch    = remaining[:MAX_PARALLEL_TOOLS]
-            remaining = remaining[MAX_PARALLEL_TOOLS:]
+        for batch_start in range(0, len(safe_indexed), MAX_PARALLEL_TOOLS):
+            batch = safe_indexed[batch_start:batch_start + MAX_PARALLEL_TOOLS]
             n_workers = min(len(batch), self._pool_size)
             with ThreadPoolExecutor(max_workers=n_workers) as ex:
                 futures = [

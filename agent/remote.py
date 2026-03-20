@@ -228,18 +228,18 @@ def run_agent(
                 ],
             })
 
-            # Build the list for the pool
-            tool_dicts = [
-                {
+            # Build the list for the pool (single pass)
+            tool_dicts = []
+            names = []
+            for tc in msg.tool_calls:
+                tool_dicts.append({
                     "id": tc.id,
                     "function": {
                         "name":      tc.function.name,
                         "arguments": tc.function.arguments,
                     },
-                }
-                for tc in msg.tool_calls
-            ]
-            names = [tc.function.name for tc in msg.tool_calls]
+                })
+                names.append(tc.function.name)
             log.info("Tool calls: %s", ", ".join(names))
 
             # Execute in parallel via pool
