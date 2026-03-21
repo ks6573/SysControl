@@ -4,10 +4,15 @@ An AI agent for your Mac that answers questions about your system — and can ex
 
 57 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, shell, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
-Two ways to run it:
+Three ways to run it — pick whichever fits your workflow:
 
-- **Terminal agent** (`agent.py`) — conversational REPL powered by Ollama (local) or Ollama Cloud
-- **Claude Desktop** — connect `mcp/server.py` directly via MCP
+| | Command | Best for |
+|---|---|---|
+| **GUI** | `uv run gui.py` | Visual chat with history sidebar, drag-and-drop, and streaming |
+| **CLI** | `uv run agent.py` | Terminal-first workflow, scripting, SSH sessions |
+| **Claude Desktop** | MCP server | Using SysControl tools inside Claude Desktop |
+
+The GUI and CLI share the same agent, tools, and providers — they're interchangeable.
 
 ---
 
@@ -30,6 +35,31 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 uv sync
 ```
+
+---
+
+## GUI
+
+```bash
+uv run gui.py
+```
+
+A native PySide6 chat window with progressive streaming, Markdown rendering, and a warm Claude Desktop-inspired theme.
+
+### Features
+
+- **Streaming responses** — tokens appear as they arrive with debounced Markdown formatting
+- **Chat history** — say "bye" or any farewell to save the session as a `.md` file in `~/.syscontrol/chat_history/`
+- **Other Chats sidebar** — toggle with the clock button or **Ctrl+H** to browse saved chats
+- **Drag-and-drop import** — drop `.md` chat exports from other LLMs onto the sidebar to import them
+- **Chat viewer** — click any saved chat to view it in a styled read-only dialog
+- **Settings** — switch between local/cloud providers and models without restarting
+
+### Goodbye & Save
+
+Type any natural farewell (`bye`, `cya`, `goodnight`, `later`, …) and a dialog will ask whether to save the conversation. Saved chats appear in the sidebar immediately.
+
+> Saved chat files are plain Markdown in `~/.syscontrol/chat_history/` — view, edit, or delete them freely.
 
 ---
 
@@ -81,17 +111,7 @@ Say any natural goodbye (`bye`, `exit`, `quit`, `done`, `farewell`, `cya`, `good
 
 ### Session Memory
 
-On exit you are prompted:
-
-```
-Save session? [yes/no/md/txt]:
-```
-
-- `yes` / `md` — appends the conversation as a Markdown section to `SysControl_Memory.md`
-- `txt` — plain text instead
-- `no` — nothing written
-
-On next startup, if the file exists its contents are injected into the system prompt so the agent has context from prior sessions. The file is append-only and plain text — edit or delete entries freely.
+On exit you are prompted to save a short note about the session. Notes are appended to `SysControl_Memory.md` with a timestamp. On next startup, if the file exists its contents are injected into the system prompt so the agent has context from prior sessions. The file is append-only and plain text — edit or delete entries freely.
 
 > **Privacy:** SysControl stores only what you explicitly save. Ollama processes queries locally by default.
 
