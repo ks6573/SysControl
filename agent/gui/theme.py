@@ -49,6 +49,11 @@ DARK = {
     "border":           "#3a3836",
     "code_bg":          "#222020",
     "avatar_bg":        "#c4715b",
+    "sidebar_bg":       "#252525",
+    "sidebar_item_hover": "#333333",
+    "sidebar_title":    "#e0ddd9",
+    "sidebar_subtitle": "#706e6a",
+    "sidebar_empty":    "#706e6a",
 }
 
 LIGHT = {
@@ -79,6 +84,11 @@ LIGHT = {
     "border":           "#ddd9d4",
     "code_bg":          "#e8e6e1",
     "avatar_bg":        "#c4715b",
+    "sidebar_bg":       "#eeece7",
+    "sidebar_item_hover": "#e8e6e1",
+    "sidebar_title":    "#2d2a26",
+    "sidebar_subtitle": "#9a9590",
+    "sidebar_empty":    "#b0aa9f",
 }
 
 

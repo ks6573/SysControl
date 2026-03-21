@@ -123,6 +123,13 @@ class AgentWorker(QThread):
         # Not perfectly thread-safe, but only called when worker is idle.
         self._messages.clear()
 
+    def get_messages(self) -> list[dict]:
+        """Return a snapshot of the current message history.
+
+        Called from the main thread when the worker is idle (between turns).
+        """
+        return list(self._messages)
+
     # ── QThread entry point ────────────────────────────────────────────────
 
     def run(self) -> None:
