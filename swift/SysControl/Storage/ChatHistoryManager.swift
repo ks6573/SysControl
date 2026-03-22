@@ -48,6 +48,16 @@ struct ChatHistoryManager {
         (try? String(contentsOf: path, encoding: .utf8)) ?? ""
     }
 
+    func deleteChat(at path: URL) -> Bool {
+        do {
+            try FileManager.default.removeItem(at: path)
+            Self.metadataCache.remove(path: path.path)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func importChat(from sourcePath: URL) -> URL? {
         guard sourcePath.pathExtension.lowercased() == "md" else { return nil }
         guard FileManager.default.fileExists(atPath: sourcePath.path) else { return nil }
@@ -289,5 +299,11 @@ private final class SavedChatMetadataCache {
         }
         lock.unlock()
         return loaded
+    }
+
+    func remove(path: String) {
+        lock.lock()
+        entries.removeValue(forKey: path)
+        lock.unlock()
     }
 }

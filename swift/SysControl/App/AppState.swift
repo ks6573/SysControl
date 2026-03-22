@@ -97,6 +97,14 @@ final class AppState {
         selectedSavedChatContent = ""
     }
 
+    func deleteSavedChat(_ chat: SavedChat) {
+        guard history.deleteChat(at: chat.path) else { return }
+        if selectedSavedChat?.id == chat.id {
+            closeSavedChat()
+        }
+        refreshSavedChats()
+    }
+
     func importSavedChats(from urls: [URL]) {
         guard !urls.isEmpty else { return }
         var imported = false

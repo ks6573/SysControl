@@ -89,6 +89,23 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# Copy app icon (.icns) from tracked source (with fallback)
+TRACKED_ICON="$SCRIPT_DIR/SysControl/Resources/AppIcon.icns"
+LEGACY_ICON="$PROJECT_ROOT/build_resources/SysControl.icns"
+ICON_SOURCE=""
+if [ -f "$TRACKED_ICON" ]; then
+    ICON_SOURCE="$TRACKED_ICON"
+elif [ -f "$LEGACY_ICON" ]; then
+    ICON_SOURCE="$LEGACY_ICON"
+fi
+
+if [ -n "$ICON_SOURCE" ]; then
+    cp "$ICON_SOURCE" "$RESOURCES/AppIcon.icns"
+    echo "  App icon: $ICON_SOURCE"
+else
+    echo "  Warning: app icon not found (looked for $TRACKED_ICON and $LEGACY_ICON)"
+fi
+
 # Copy Python backend into Resources
 echo "  Copying Python backend..."
 cp -r "$PROJECT_ROOT/agent" "$RESOURCES/agent"
@@ -97,7 +114,16 @@ cp -r "$PROJECT_ROOT/mcp" "$RESOURCES/mcp"
 # Copy venv if it exists
 if [ -d "$PROJECT_ROOT/.venv" ]; then
     echo "  Copying Python venv (this may take a moment)..."
-    cp -r "$PROJECT_ROOT/.venv" "$RESOURCES/.venv"
+    rm -rf "$RESOURCES/.venv"
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete \
+            --no-owner --no-group --no-perms --executability \
+            --exclude '__pycache__/' \
+            --exclude '*.pyc' \
+            "$PROJECT_ROOT/.venv/" "$RESOURCES/.venv/"
+    else
+        cp -R "$PROJECT_ROOT/.venv" "$RESOURCES/.venv"
+    fi
 fi
 
 # Ad-hoc code sign
@@ -116,7 +142,15 @@ if [ "$MODE" = "release" ]; then
 
     rm -rf "$DMG_DIR" "$DMG_PATH"
     mkdir -p "$DMG_DIR"
-    cp -r "$APP_DIR" "$DMG_DIR/"
+    if command -v rsync >/dev/null 2>&1; then
+        mkdir -p "$DMG_DIR/$APP_NAME.app"
+        rsync -a --delete \
+            --no-owner --no-group --no-perms --executability \
+            --omit-dir-times --no-times \
+            "$APP_DIR/" "$DMG_DIR/$APP_NAME.app/"
+    else
+        cp -R "$APP_DIR" "$DMG_DIR/"
+    fi
 
     # Create symlink to Applications
     ln -s /Applications "$DMG_DIR/Applications"

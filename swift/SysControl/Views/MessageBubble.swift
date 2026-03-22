@@ -3,6 +3,7 @@ import SwiftUI
 /// A single message bubble — styled by role (user, assistant, tool).
 struct MessageBubble: View {
     let message: ChatMessage
+    let isStreaming: Bool
 
     var body: some View {
         switch message.role {
@@ -63,18 +64,32 @@ struct MessageBubble: View {
                         .foregroundStyle(.red.opacity(0.9))
                         .textSelection(.enabled)
                 } else {
-                    LazyMarkdownText(
-                        content: message.content,
-                        style: .inline,
-                        font: .system(size: 14),
-                        foreground: .primary.opacity(0.92),
-                        debounceMilliseconds: 75,
-                        largeTextThreshold: 4000
-                    )
+                    if isStreaming {
+                        // Match the Python GUI behavior: immediate text updates
+                        // with light, debounced markdown cleanup while streaming.
+                        LazyMarkdownText(
+                            content: message.content,
+                            style: .inline,
+                            font: .system(size: 14),
+                            foreground: .primary.opacity(0.92),
+                            debounceMilliseconds: 140,
+                            largeTextThreshold: 4500
+                        )
+                    } else {
+                        // Final pass: fuller markdown rendering once the turn completes.
+                        LazyMarkdownText(
+                            content: message.content,
+                            style: .block,
+                            font: .system(size: 14),
+                            foreground: .primary.opacity(0.92),
+                            debounceMilliseconds: 20,
+                            largeTextThreshold: 12000
+                        )
+                    }
                 }
 
                 // Copy button (visible on hover via overlay)
-                if !message.content.isEmpty && !message.isError {
+                if !isStreaming && !message.content.isEmpty && !message.isError {
                     Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(message.content, forType: .string)

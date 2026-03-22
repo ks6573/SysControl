@@ -42,6 +42,18 @@ from openai import OpenAI
 
 _write_lock = threading.Lock()
 
+_RESPONSE_STYLE_GUIDANCE = (
+    "\n\n---\n\n# Response Style\n\n"
+    "When replying to the user:\n"
+    "- Avoid a single dense paragraph for non-trivial answers.\n"
+    "- Prefer a short direct lead, then concise bullets or numbered steps when helpful.\n"
+    "- Prefer headings + bullet lists over markdown tables unless the user explicitly asks for a table.\n"
+    "- Insert blank lines between sections so responses are easy to scan.\n"
+    "- Use markdown structure naturally (headings, bullets, code blocks) when it improves clarity.\n"
+    "- Keep simple requests short (1-2 sentences).\n"
+    "- For actionable instructions, provide concrete commands/examples.\n"
+)
+
 
 def _emit(event: dict) -> None:
     """Write a single JSON event to stdout (thread-safe)."""
@@ -93,6 +105,7 @@ def main() -> None:
                 "asks what you remember, or when prior context seems relevant. "
                 "Call `append_memory_note` to save a key fact mid-session without waiting for exit."
             )
+        full_system += _RESPONSE_STYLE_GUIDANCE
 
         system_message = {"role": "system", "content": full_system}
     except Exception as exc:
@@ -146,10 +159,10 @@ def main() -> None:
                 callbacks = TurnCallbacks(
                     on_token=lambda t: _emit({"type": "token", "text": t}),
                     on_tool_started=lambda names: _emit({"type": "tool_started", "names": names}),
-                    on_tool_finished=lambda name, result: _emit({
+                    # UI only needs completion signal; omit bulky tool output payload.
+                    on_tool_finished=lambda name, _result: _emit({
                         "type": "tool_finished",
                         "name": name,
-                        "result": result[:2000],  # cap to avoid overwhelming the UI
                     }),
                     on_error=lambda cat, msg: _emit({"type": "error", "category": cat, "message": msg}),
                 )

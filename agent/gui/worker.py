@@ -30,6 +30,18 @@ from agent.core import (
     run_streaming_turn,
 )
 
+_RESPONSE_STYLE_GUIDANCE = (
+    "\n\n---\n\n# Response Style\n\n"
+    "When replying to the user:\n"
+    "- Avoid a single dense paragraph for non-trivial answers.\n"
+    "- Prefer a short direct lead, then concise bullets or numbered steps when helpful.\n"
+    "- Prefer headings + bullet lists over markdown tables unless the user explicitly asks for a table.\n"
+    "- Insert blank lines between sections so responses are easy to scan.\n"
+    "- Use markdown structure naturally (headings, bullets, code blocks) when it improves clarity.\n"
+    "- Keep simple requests short (1-2 sentences).\n"
+    "- For actionable instructions, provide concrete commands/examples.\n"
+)
+
 
 @dataclass
 class ProviderConfig:
@@ -155,6 +167,7 @@ class AgentWorker(QThread):
                 "asks what you remember, or when prior context seems relevant. "
                 "Call `append_memory_note` to save a key fact mid-session without waiting for exit."
             )
+        full_system += _RESPONSE_STYLE_GUIDANCE
 
         self._system_message = {"role": "system", "content": full_system}
         self._llm = OpenAI(

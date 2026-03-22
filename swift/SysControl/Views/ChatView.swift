@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Main chat area: message list with auto-scroll + input bar at the bottom.
 struct ChatView: View {
@@ -35,7 +36,12 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(spacing: 2) {
                     ForEach(session.messages) { message in
-                        MessageBubble(message: message)
+                        MessageBubble(
+                            message: message,
+                            isStreaming: session.isStreaming
+                                && message.role == .assistant
+                                && message.id == session.messages.last?.id
+                        )
                             .id(message.id)
                     }
 
@@ -45,9 +51,9 @@ struct ChatView: View {
                     }
 
                     // Streaming indicator
-                    if session.isStreaming {
+                    if session.isStreaming && isAwaitingFirstToken(session) {
                         HStack {
-                            TypingIndicator()
+                            ThinkingIndicator()
                                 .padding(.leading, 52)
                             Spacer()
                         }
@@ -85,18 +91,12 @@ struct ChatView: View {
     private var welcomeView: some View {
         VStack(spacing: 20) {
             Spacer()
-            ZStack {
-                Circle()
-                    .fill(LinearGradient(
-                        colors: [.blue.opacity(0.3), .purple.opacity(0.3)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
-                    .frame(width: 80, height: 80)
-                Image(systemName: "desktopcomputer")
-                    .font(.system(size: 32))
-                    .foregroundStyle(.white.opacity(0.9))
-            }
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 84, height: 84)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
             Text("SysControl")
                 .font(.title)
                 .fontWeight(.semibold)
@@ -134,6 +134,14 @@ struct ChatView: View {
         pendingScrollWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + debounce, execute: work)
     }
+
+    private func isAwaitingFirstToken(_ session: ChatSession) -> Bool {
+        guard session.isStreaming else { return false }
+        guard let latestAssistant = session.messages.last(where: { $0.role == .assistant }) else {
+            return true
+        }
+        return latestAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 }
 
 // MARK: - Typing Indicator
@@ -166,23 +174,43 @@ private struct ToolIndicatorRow: View {
     }
 }
 
-private struct TypingIndicator: View {
-    @State private var phase: CGFloat = 0
+private struct ThinkingIndicator: View {
+    @State private var startedAt = Date()
+    private let baseText = "Thinking"
+    private let tickSeconds = 0.11
+    private let pulseFrequency = 3.1
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .fill(.secondary.opacity(0.5))
-                    .frame(width: 6, height: 6)
-                    .offset(y: sin(phase + Double(i) * 0.8) * 3)
+        TimelineView(.periodic(from: .now, by: tickSeconds)) { timeline in
+            let elapsed = timeline.date.timeIntervalSince(startedAt)
+            let tick = Int(elapsed / tickSeconds)
+            let cycle = baseText.count + 6
+            let step = tick % max(cycle, 1)
+
+            let letters = min(baseText.count, step + 1)
+            let dots = step < baseText.count ? 0 : min(3, (step - baseText.count) % 4)
+            let animatedText = String(baseText.prefix(letters)) + String(repeating: ".", count: dots)
+
+            let pulse = 0.65 + 0.35 * (sin(elapsed * pulseFrequency) * 0.5 + 0.5)
+
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary.opacity(pulse))
+
+                ZStack(alignment: .leading) {
+                    Text("Thinking...")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.clear)
+                    Text(animatedText)
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
             }
+            .padding(.vertical, 8)
         }
         .onAppear {
-            withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: false)) {
-                phase = .pi * 2
-            }
+            startedAt = Date()
         }
-        .padding(.vertical, 8)
     }
 }

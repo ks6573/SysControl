@@ -104,6 +104,8 @@ struct SidebarView: View {
                         appState.selectSession(session)
                     } label: {
                         SessionRow(session: session)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .listRowBackground(
@@ -123,12 +125,27 @@ struct SidebarView: View {
 
             Section {
                 ForEach(appState.savedChats) { chat in
-                    Button {
-                        appState.openSavedChat(chat)
-                    } label: {
-                        SavedChatRow(chat: chat)
+                    HStack(spacing: 8) {
+                        Button {
+                            appState.openSavedChat(chat)
+                        } label: {
+                            SavedChatRow(chat: chat)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button(role: .destructive) {
+                            appState.deleteSavedChat(chat)
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 12, weight: .semibold))
+                                .frame(width: 30, height: 30)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Delete chat")
                     }
-                    .buttonStyle(.plain)
                     .listRowBackground(
                         appState.selectedSavedChat?.id == chat.id
                             ? Color.accentColor.opacity(0.14)
