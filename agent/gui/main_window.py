@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
     QSizePolicy,
     QStatusBar,
     QToolBar,
@@ -32,7 +33,7 @@ from agent.gui.sidebar import ChatHistorySidebar, ChatViewerDialog
 from agent.gui.worker import AgentWorker, ProviderConfig
 
 
-_SIDEBAR_WIDTH = 320  # px — expanded sidebar panel width
+_SIDEBAR_WIDTH = 380  # px — expanded sidebar panel width
 
 
 class MainWindow(QMainWindow):
@@ -114,9 +115,14 @@ class MainWindow(QMainWindow):
         new_chat_btn.clicked.connect(self._on_new_chat)
         toolbar.addWidget(new_chat_btn)
 
-        settings_btn = QToolButton()
-        settings_btn.setText("\u2699")
-        settings_btn.setFont(QFont(".AppleSystemUIFont", 18))
+        settings_btn = QPushButton("\u2699")
+        settings_btn.setFont(QFont(".AppleSystemUIFont", 28))
+        settings_btn.setFixedSize(44, 44)
+        settings_btn.setStyleSheet(
+            "QPushButton { padding: 0; margin: 0; border: none; "
+            "text-align: center; }"
+        )
+        settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         settings_btn.clicked.connect(self._on_settings)
         toolbar.addWidget(settings_btn)
 
@@ -204,12 +210,12 @@ class MainWindow(QMainWindow):
             self._worker.clear_session()
         self._session_saved = False
 
-    def _auto_save(self, skip_title: bool = False) -> None:
+    def _auto_save(self, title_timeout: float = 10.0) -> None:
         """Save the current session if it has meaningful content.
 
         Args:
-            skip_title: When True, skip the synchronous LLM title-generation
-                call (used by closeEvent to avoid blocking the UI).
+            title_timeout: Timeout in seconds for the LLM title-generation
+                call. Use a short value (e.g. 3s) during closeEvent.
         """
         if self._session_saved or not self._worker:
             return
@@ -218,14 +224,13 @@ class MainWindow(QMainWindow):
         has_asst = any(m.get("role") == "assistant" and m.get("content") for m in messages)
         if not (has_user and has_asst):
             return
-        title = ""
-        if not skip_title:
-            title = generate_title(
-                messages,
-                api_key=self._config.api_key,
-                base_url=self._config.base_url,
-                model=self._config.model,
-            )
+        title = generate_title(
+            messages,
+            api_key=self._config.api_key,
+            base_url=self._config.base_url,
+            model=self._config.model,
+            timeout=title_timeout,
+        )
         path = save_chat(messages, title=title)
         if path:
             self._status_label.setText(f"Chat saved to {path.name}")
@@ -302,6 +307,6 @@ class MainWindow(QMainWindow):
     # ── Window lifecycle ───────────────────────────────────────────────────
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self._auto_save(skip_title=True)
+        self._auto_save(title_timeout=3.0)  # quick LLM title attempt on close
         self._cleanup()
         super().closeEvent(event)

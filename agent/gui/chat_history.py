@@ -160,8 +160,15 @@ def import_chat(source_path: Path) -> Path | None:
     return dest
 
 
-def generate_title(messages: list[dict], api_key: str, base_url: str, model: str) -> str:
-    """Ask the LLM for a brief chat title (3-6 words). Returns '' on failure."""
+def generate_title(
+    messages: list[dict], api_key: str, base_url: str, model: str,
+    timeout: float = 10.0,
+) -> str:
+    """Ask the LLM for a brief chat title (3-6 words). Returns '' on failure.
+
+    Args:
+        timeout: HTTP timeout in seconds for the LLM call.
+    """
     # Collect the first few user/assistant exchanges for context
     snippet_parts: list[str] = []
     for m in messages:
@@ -175,7 +182,7 @@ def generate_title(messages: list[dict], api_key: str, base_url: str, model: str
         return ""
     snippet = "\n".join(snippet_parts)
     try:
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=10.0)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
         resp = client.chat.completions.create(
             model=model,
             max_tokens=20,

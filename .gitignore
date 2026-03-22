@@ -75,3 +75,7 @@ build_resources/SysControl.icns
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
+
+# ── Swift / SwiftPM build artifacts ─────────────────────────────────────────
+swift/.build/
+swift/.swiftpm/
