@@ -67,5 +67,11 @@ coverage.xml
 agent/remote.py
 agent/REMOTE_SETUP.md
 
+# ── Claude Code ──────────────────────────────────────────────────────────────
+.claude/
+
+# ── PyInstaller build resources (generated) ──────────────────────────────────
+build_resources/SysControl.icns
+
 # ── Logs ─────────────────────────────────────────────────────────────────────
 *.log

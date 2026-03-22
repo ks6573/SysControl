@@ -15,7 +15,6 @@ import json
 import queue
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import openai
 from openai import OpenAI
@@ -27,8 +26,10 @@ from agent.core import (
     MAX_TOKENS,
     MCPClient,
     MCPClientPool,
+    load_memory,
     load_system_prompt,
     mcp_to_openai_tools,
+    prune_history,
 )
 
 
@@ -39,46 +40,6 @@ class ProviderConfig:
     base_url: str
     model: str
     label: str
-
-
-# ── History pruning (same logic as cli.py:_prune_history) ─────────────────────
-
-MAX_HISTORY_MESSAGES = 40
-
-
-def _prune_history(messages: list[dict], max_messages: int = MAX_HISTORY_MESSAGES) -> list[dict]:
-    """Trim history while preserving tool-call coherence."""
-    if len(messages) <= max_messages:
-        return messages
-
-    groups: list[list[dict]] = []
-    current: list[dict] = []
-    for msg in messages:
-        if msg["role"] == "user" and current:
-            groups.append(current)
-            current = []
-        current.append(msg)
-    if current:
-        groups.append(current)
-
-    total = sum(len(g) for g in groups)
-    while groups and total > max_messages:
-        total -= len(groups[0])
-        groups.pop(0)
-
-    return [msg for group in groups for msg in group]
-
-
-# ── Memory helpers (same as cli.py, no ANSI) ──────────────────────────────────
-
-MEMORY_FILE = Path(__file__).parent.parent.parent / "SysControl_Memory.md"
-
-
-def _load_memory() -> str | None:
-    if MEMORY_FILE.exists():
-        text = MEMORY_FILE.read_text(encoding="utf-8").strip()
-        return text if text else None
-    return None
 
 
 # ── Sentinel messages ─────────────────────────────────────────────────────────
@@ -180,7 +141,7 @@ class AgentWorker(QThread):
         )
         full_system = system_prompt + tool_list_block
 
-        if _load_memory() is not None:
+        if load_memory() is not None:
             full_system += (
                 "\n\n---\n\n# Memory\n\n"
                 "A persistent memory file exists with notes from past sessions. "
@@ -209,7 +170,7 @@ class AgentWorker(QThread):
 
         while True:
             # Prune history
-            self._messages[:] = _prune_history(self._messages)
+            self._messages[:] = prune_history(self._messages)
 
             # ── Stream LLM response ───────────────────────────────────────
             try:

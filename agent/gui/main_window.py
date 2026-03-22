@@ -11,7 +11,7 @@ import atexit
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
 
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -46,6 +46,44 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(600, 500)
         self.resize(800, 650)
 
+        # ── Menu bar (macOS requires Edit menu for Cmd+C/V/X/A) ──────────
+        menu_bar = self.menuBar()
+        edit_menu = menu_bar.addMenu("Edit")
+
+        undo_action = QAction("Undo", self)
+        undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        undo_action.triggered.connect(lambda: self._forward_to_focus("undo"))
+        edit_menu.addAction(undo_action)
+
+        redo_action = QAction("Redo", self)
+        redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        redo_action.triggered.connect(lambda: self._forward_to_focus("redo"))
+        edit_menu.addAction(redo_action)
+
+        edit_menu.addSeparator()
+
+        cut_action = QAction("Cut", self)
+        cut_action.setShortcut(QKeySequence.StandardKey.Cut)
+        cut_action.triggered.connect(lambda: self._forward_to_focus("cut"))
+        edit_menu.addAction(cut_action)
+
+        copy_action = QAction("Copy", self)
+        copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        copy_action.triggered.connect(lambda: self._forward_to_focus("copy"))
+        edit_menu.addAction(copy_action)
+
+        paste_action = QAction("Paste", self)
+        paste_action.setShortcut(QKeySequence.StandardKey.Paste)
+        paste_action.triggered.connect(lambda: self._forward_to_focus("paste"))
+        edit_menu.addAction(paste_action)
+
+        edit_menu.addSeparator()
+
+        select_all_action = QAction("Select All", self)
+        select_all_action.setShortcut(QKeySequence.StandardKey.SelectAll)
+        select_all_action.triggered.connect(lambda: self._forward_to_focus("selectAll"))
+        edit_menu.addAction(select_all_action)
+
         # ── Toolbar ────────────────────────────────────────────────────────
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
@@ -54,7 +92,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(toolbar)
 
         self._model_label = QLabel("SysControl")
-        self._model_label.setFont(QFont("-apple-system", 13, QFont.Weight.DemiBold))
+        self._model_label.setFont(QFont(".AppleSystemUIFont", 13, QFont.Weight.DemiBold))
         toolbar.addWidget(self._model_label)
 
         spacer = QWidget()
@@ -237,6 +275,17 @@ class MainWindow(QMainWindow):
     def _on_chat_selected(self, path) -> None:
         viewer = ChatViewerDialog(path, self._palette, parent=self)
         viewer.exec()
+
+    # ── Edit menu helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _forward_to_focus(method: str) -> None:
+        """Forward an edit action (copy, paste, …) to the currently focused widget."""
+        from PySide6.QtWidgets import QApplication
+
+        widget = QApplication.focusWidget()
+        if widget is not None and hasattr(widget, method):
+            getattr(widget, method)()
 
     # ── Window lifecycle ───────────────────────────────────────────────────
 

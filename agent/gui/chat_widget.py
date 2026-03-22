@@ -29,7 +29,7 @@ class _ToolIndicator(QFrame):
 
         label_text = names[0] + (f" +{len(names) - 1} more" if len(names) > 1 else "")
         label = QLabel(f"\u25cf  {label_text}\u2026")
-        label.setFont(QFont("-apple-system", 12))
+        label.setFont(QFont(".AppleSystemUIFont", 12))
         label.setStyleSheet(f"color: {palette['tool_text']}; background: transparent;")
 
         layout = QHBoxLayout(self)
@@ -116,7 +116,7 @@ class ChatWidget(QScrollArea):
         """)
         label = QLabel(f"{category}: {message}")
         label.setWordWrap(True)
-        label.setFont(QFont("-apple-system", 13))
+        label.setFont(QFont(".AppleSystemUIFont", 13))
         label.setStyleSheet(f"color: {self._palette['error_text']}; background: transparent;")
 
         layout = QHBoxLayout(frame)

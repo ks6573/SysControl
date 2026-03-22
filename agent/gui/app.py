@@ -17,6 +17,14 @@ from agent.gui.theme import get_palette, is_dark_mode, load_stylesheet
 
 
 def main() -> None:
+    # When running as a frozen PyInstaller bundle the executable may be
+    # re-invoked as an MCP server subprocess (see agent/core.py MCPClient).
+    if getattr(sys, "frozen", False) and "--mcp-server" in sys.argv:
+        from mcp.server import main as server_main
+
+        server_main()
+        return
+
     app = QApplication(sys.argv)
     app.setApplicationName("SysControl")
     app.setOrganizationName("SysControl")

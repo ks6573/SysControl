@@ -19,36 +19,23 @@ import argparse
 import datetime
 import getpass
 import itertools
-import json
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
-from pathlib import Path
-
 import openai
 from openai import OpenAI
 
 from agent.core import (
-    BLUE, BOLD, CLOUD_BASE_URL, CLOUD_MODEL, CYAN, DIM, GREEN,
+    BLUE, BOLD, CLOUD_BASE_URL, CLOUD_MODEL, CYAN, DIM, EXIT_PHRASES, GREEN,
     HAS_FCNTL, LOCAL_API_KEY, LOCAL_BASE_URL, LOCAL_MODEL, MAX_TOKENS,
     RESET, SERVER_PATH, YELLOW,
     MCPClient, MCPClientPool,
-    _colorize, fcntl_mod, load_system_prompt, mcp_to_openai_tools,
+    _colorize, fcntl_mod, fetch_ollama_models, load_memory, load_system_prompt,
+    mcp_to_openai_tools, prune_history,
 )
+from agent.paths import MEMORY_FILE
 
 # ── Memory ────────────────────────────────────────────────────────────────────
-
-MEMORY_FILE = Path(__file__).parent.parent / "SysControl_Memory.md"
-
-# Phrases that signal the user wants to end the session
-EXIT_PHRASES: frozenset[str] = frozenset({
-    "exit", "quit", "bye", "goodbye", "good bye", "farewell",
-    "see ya", "see you", "cya", "later", "take care", "peace",
-    "done", "close", "end", "stop", ":q", "q", "adios", "adieu",
-    "ttyl", "ttfn", "night", "goodnight", "good night",
-})
 
 _PRIVACY_NOTICE = (
     f"\n{DIM}╔══════════════════════════════════════════════════════════════╗\n"
@@ -59,15 +46,6 @@ _PRIVACY_NOTICE = (
     f"║  full details on cloud usage (if applicable).                ║\n"
     f"╚══════════════════════════════════════════════════════════════╝{RESET}\n"
 )
-
-
-def load_memory() -> str | None:
-    """Return the contents of SysControl_Memory.md if it exists, else None."""
-    if MEMORY_FILE.exists():
-        text = MEMORY_FILE.read_text(encoding="utf-8").strip()
-        return text if text else None
-    return None
-
 
 
 def offer_memory_save(messages: list[dict]) -> None:
@@ -185,41 +163,6 @@ class _Spinner:
         sys.stdout.flush()
 
 
-# ── History management ────────────────────────────────────────────────────────
-
-MAX_HISTORY_MESSAGES = 40  # ~20 user turns; keeps context well within model limits
-
-
-def _prune_history(messages: list[dict], max_messages: int = MAX_HISTORY_MESSAGES) -> list[dict]:
-    """
-    Trim message history to at most max_messages entries while preserving
-    tool-call coherence: never separate an assistant tool_calls message from
-    the tool result messages that follow it.
-
-    Groups the history into user-anchored turn chunks, then drops the oldest
-    chunks until the total fits within the budget.
-    """
-    if len(messages) <= max_messages:
-        return messages
-
-    groups: list[list[dict]] = []
-    current: list[dict] = []
-    for msg in messages:
-        if msg["role"] == "user" and current:
-            groups.append(current)
-            current = []
-        current.append(msg)
-    if current:
-        groups.append(current)
-
-    total = sum(len(g) for g in groups)
-    while groups and total > max_messages:
-        total -= len(groups[0])
-        groups.pop(0)
-
-    return [msg for group in groups for msg in group]
-
-
 # ── Agentic Loop ──────────────────────────────────────────────────────────────
 
 def run_turn(
@@ -237,7 +180,7 @@ def run_turn(
 
     while True:
         # Trim history to prevent context-window overflow on long sessions.
-        messages[:] = _prune_history(messages)
+        messages[:] = prune_history(messages)
 
         # ── Stream response ────────────────────────────────────────────────
         # system_message is prepended once; messages already contains history.
@@ -382,24 +325,6 @@ def run_turn(
             break
 
 
-# ── Ollama model detection ────────────────────────────────────────────────────
-
-def _fetch_ollama_models(base_url: str = "http://localhost:11434") -> list[str]:
-    """Return sorted list of locally installed Ollama model names.
-    Returns an empty list if Ollama is not running or unreachable (3 s timeout).
-    """
-    try:
-        req = urllib.request.Request(
-            f"{base_url}/api/tags",
-            headers={"Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=3) as r:
-            data = json.loads(r.read().decode())
-        return sorted(m["name"] for m in data.get("models", []))
-    except Exception:
-        return []
-
-
 def _pick_model(models: list[str]) -> str:
     """Present a numbered list of models and return the user's choice."""
     print(f"\n{BOLD}Available local models:{RESET}")
@@ -426,7 +351,7 @@ def _resolve_local_model() -> str:
     - 1 model               → auto-selects it silently
     - 2+ models             → shows numbered picker
     """
-    models = _fetch_ollama_models()
+    models = fetch_ollama_models()
     if not models:
         print(f"{YELLOW}⚠  No local models detected (is Ollama running?). "
               f"Using default: {LOCAL_MODEL}{RESET}")

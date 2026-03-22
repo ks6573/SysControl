@@ -58,7 +58,7 @@ class MessageBubble(QFrame):
         self._browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._browser.setFrameShape(QFrame.Shape.NoFrame)
-        self._browser.setFont(QFont("-apple-system", 15))
+        self._browser.setFont(QFont(".AppleSystemUIFont", 15))
         self._browser.document().contentsChanged.connect(self._adjust_height)
 
         if self._is_user:
@@ -91,7 +91,7 @@ class MessageBubble(QFrame):
             self._avatar = QLabel("S")
             self._avatar.setFixedSize(28, 28)
             self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._avatar.setFont(QFont("-apple-system", 13, QFont.Weight.Bold))
+            self._avatar.setFont(QFont(".AppleSystemUIFont", 13, QFont.Weight.Bold))
             self._avatar.setStyleSheet(f"""
                 QLabel {{
                     background-color: {palette["avatar_bg"]};
@@ -210,7 +210,7 @@ class MessageBubble(QFrame):
         <style>
             body {{
                 color: {fg};
-                font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+                font-family: '.AppleSystemUIFont', 'Helvetica Neue', sans-serif;
                 font-size: 15px;
                 line-height: 1.7;
                 margin: 0; padding: 0;

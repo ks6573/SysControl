@@ -12,16 +12,9 @@ import re
 import shutil
 from pathlib import Path
 
-CHAT_HISTORY_DIR = Path.home() / ".syscontrol" / "chat_history"
+from agent.core import EXIT_PHRASES  # noqa: F401 — re-exported for main_window.py
 
-# Mirror of agent/cli.py:EXIT_PHRASES — defined here to avoid pulling in
-# cli.py's heavy imports (openai, threading, argparse, etc.).
-EXIT_PHRASES: frozenset[str] = frozenset({
-    "exit", "quit", "bye", "goodbye", "good bye", "farewell",
-    "see ya", "see you", "cya", "later", "take care", "peace",
-    "done", "close", "end", "stop", ":q", "q", "adios", "adieu",
-    "ttyl", "ttfn", "night", "goodnight", "good night",
-})
+CHAT_HISTORY_DIR = Path.home() / ".syscontrol" / "chat_history"
 
 
 def ensure_history_dir() -> Path:

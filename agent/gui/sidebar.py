@@ -61,13 +61,13 @@ class _ChatItem(QFrame):
         layout.setSpacing(2)
 
         title = QLabel(chat_info["title"])
-        title.setFont(QFont("-apple-system", 13, QFont.Weight.DemiBold))
+        title.setFont(QFont(".AppleSystemUIFont", 13, QFont.Weight.DemiBold))
         title.setStyleSheet(f"color: {palette['sidebar_title']}; background: transparent;")
         title.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         layout.addWidget(title)
 
         date = QLabel(chat_info["date_str"])
-        date.setFont(QFont("-apple-system", 11))
+        date.setFont(QFont(".AppleSystemUIFont", 11))
         date.setStyleSheet(f"color: {palette['sidebar_subtitle']}; background: transparent;")
         date.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         layout.addWidget(date)
@@ -131,7 +131,7 @@ class ChatHistorySidebar(QFrame):
         header_layout.setContentsMargins(14, 0, 8, 0)
 
         title = QLabel("Other Chats")
-        title.setFont(QFont("-apple-system", 13, QFont.Weight.DemiBold))
+        title.setFont(QFont(".AppleSystemUIFont", 13, QFont.Weight.DemiBold))
         title.setStyleSheet(f"color: {palette['sidebar_title']}; background: transparent;")
         header_layout.addWidget(title)
 
@@ -178,7 +178,7 @@ class ChatHistorySidebar(QFrame):
         # ── Empty state ───────────────────────────────────────────────────
         self._empty_label = QLabel("No past chats.\nSave something and\nI'll pick up from there!")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_label.setFont(QFont("-apple-system", 12))
+        self._empty_label.setFont(QFont(".AppleSystemUIFont", 12))
         self._empty_label.setStyleSheet(f"color: {palette['sidebar_empty']}; background: transparent;")
         self._empty_label.setWordWrap(True)
         self._list_layout.insertWidget(0, self._empty_label)
@@ -198,7 +198,7 @@ class ChatHistorySidebar(QFrame):
         if not chats:
             self._empty_label = QLabel("No past chats.\nSave something and\nI'll pick up from there!")
             self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._empty_label.setFont(QFont("-apple-system", 12))
+            self._empty_label.setFont(QFont(".AppleSystemUIFont", 12))
             self._empty_label.setStyleSheet(
                 f"color: {self._palette['sidebar_empty']}; background: transparent;"
             )
@@ -277,7 +277,7 @@ class ChatViewerDialog(QDialog):
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
         browser.setFrameShape(QFrame.Shape.NoFrame)
-        browser.setFont(QFont("-apple-system", 14))
+        browser.setFont(QFont(".AppleSystemUIFont", 14))
         browser.setStyleSheet(f"""
             QTextBrowser {{
                 background-color: {bg};
@@ -294,7 +294,7 @@ class ChatViewerDialog(QDialog):
             <style>
                 body {{
                     color: {fg};
-                    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+                    font-family: '.AppleSystemUIFont', 'Helvetica Neue', sans-serif;
                     font-size: 14px; line-height: 1.6;
                     margin: 0; padding: 0;
                 }}

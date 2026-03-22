@@ -11,6 +11,8 @@ import re
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
@@ -24,11 +26,20 @@ except ImportError:
 
 from openai import OpenAI  # noqa: F401 — re-exported for downstream imports
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+from agent.paths import MEMORY_FILE, PROMPT_PATH, SERVER_PATH  # frozen-app-aware paths
 
-# agent/core.py lives inside agent/, so go up one level to reach mcp/
-SERVER_PATH = Path(__file__).parent.parent / "mcp" / "server.py"
-PROMPT_PATH = Path(__file__).parent.parent / "mcp" / "prompt.json"
+# ── Shared constants ─────────────────────────────────────────────────────────
+
+EXIT_PHRASES: frozenset[str] = frozenset({
+    "exit", "quit", "bye", "goodbye", "good bye", "farewell",
+    "see ya", "see you", "cya", "later", "take care", "peace",
+    "done", "close", "end", "stop", ":q", "q", "adios", "adieu",
+    "ttyl", "ttfn", "night", "goodnight", "good night",
+})
+
+MAX_HISTORY_MESSAGES = 40  # ~20 user turns; keeps context within model limits
+
+# ── Constants ─────────────────────────────────────────────────────────────────
 MAX_TOKENS         = 16384
 POOL_SIZE          = 4          # max parallel MCP worker processes
 MAX_PARALLEL_TOOLS = POOL_SIZE  # batch size capped to pool capacity
@@ -60,8 +71,16 @@ class MCPClient:
     """Minimal JSON-RPC client that talks to mcp/server.py over stdio."""
 
     def __init__(self):
+        # In a frozen PyInstaller bundle sys.executable is the app binary,
+        # not a Python interpreter.  Re-invoke ourselves with a flag so the
+        # main entry-point can dispatch to the MCP server.
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--mcp-server"]
+        else:
+            cmd = [sys.executable, str(SERVER_PATH)]
+
         self.proc = subprocess.Popen(
-            [sys.executable, str(SERVER_PATH)],
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -81,8 +100,15 @@ class MCPClient:
             msg: dict = {"jsonrpc": "2.0", "id": self._next_id(), "method": method}
             if params:
                 msg["params"] = params
-            self.proc.stdin.write(json.dumps(msg) + "\n")
-            self.proc.stdin.flush()
+            try:
+                self.proc.stdin.write(json.dumps(msg) + "\n")
+                self.proc.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                err = (self.proc.stderr.read() if self.proc.stderr else "").strip()
+                raise RuntimeError(
+                    f"MCP server crashed."
+                    f"{(' Server error: ' + err) if err else ''}"
+                ) from exc
             raw = self.proc.stdout.readline()
             if not raw:
                 err = (self.proc.stderr.read() if self.proc.stderr else "").strip()
@@ -289,6 +315,61 @@ def mcp_to_openai_tools(mcp_tools: list[dict]) -> list[dict]:
         }
         for t in mcp_tools
     ]
+
+
+# ── Shared helpers (used by CLI, GUI worker, and settings dialog) ────────────
+
+
+def load_memory() -> str | None:
+    """Return the contents of SysControl_Memory.md if it exists, else None."""
+    if MEMORY_FILE.exists():
+        text = MEMORY_FILE.read_text(encoding="utf-8").strip()
+        return text if text else None
+    return None
+
+
+def prune_history(messages: list[dict], max_messages: int = MAX_HISTORY_MESSAGES) -> list[dict]:
+    """Trim history while preserving tool-call coherence.
+
+    Groups the history into user-anchored turn chunks, then drops the oldest
+    chunks until the total fits within the budget.
+    """
+    if len(messages) <= max_messages:
+        return messages
+
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    for msg in messages:
+        if msg["role"] == "user" and current:
+            groups.append(current)
+            current = []
+        current.append(msg)
+    if current:
+        groups.append(current)
+
+    total = sum(len(g) for g in groups)
+    while groups and total > max_messages:
+        total -= len(groups[0])
+        groups.pop(0)
+
+    return [msg for group in groups for msg in group]
+
+
+def fetch_ollama_models(base_url: str = "http://localhost:11434") -> list[str]:
+    """Return sorted list of locally installed Ollama model names.
+
+    Returns an empty list if Ollama is not running or unreachable (3 s timeout).
+    """
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/api/tags",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as r:
+            data = json.loads(r.read().decode())
+        return sorted(m["name"] for m in data.get("models", []))
+    except Exception:
+        return []
 
 
 # ── Markdown → ANSI colorizer ─────────────────────────────────────────────────

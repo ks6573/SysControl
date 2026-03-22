@@ -8,8 +8,6 @@ Detects locally installed Ollama models and persists the user's choice.
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -36,6 +34,7 @@ from agent.core import (
     LOCAL_API_KEY,
     LOCAL_BASE_URL,
     LOCAL_MODEL,
+    fetch_ollama_models,
 )
 from agent.gui.worker import ProviderConfig
 
@@ -73,22 +72,6 @@ def save_config(config: ProviderConfig) -> None:
         }, indent=2),
         encoding="utf-8",
     )
-
-
-# ── Ollama detection (same as cli.py:_fetch_ollama_models) ────────────────────
-
-def fetch_ollama_models(base_url: str = "http://localhost:11434") -> list[str]:
-    """Return sorted list of locally installed Ollama model names."""
-    try:
-        req = urllib.request.Request(
-            f"{base_url}/api/tags",
-            headers={"Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=3) as r:
-            data = json.loads(r.read().decode())
-        return sorted(m["name"] for m in data.get("models", []))
-    except Exception:
-        return []
 
 
 # ── Dialog ────────────────────────────────────────────────────────────────────
@@ -163,7 +146,7 @@ class SettingsDialog(QDialog):
 
         # Title
         title = QLabel("Configure Provider")
-        title.setFont(QFont("SF Pro Display", 18, QFont.Weight.Bold))
+        title.setFont(QFont(".AppleSystemUIFont", 18, QFont.Weight.Bold))
         main_layout.addWidget(title)
 
         # ── Provider radio buttons ─────────────────────────────────────────

@@ -105,7 +105,7 @@ def load_stylesheet(dark: bool = True) -> str:
         background-color: {c["window_bg"]};
     }}
     QWidget {{
-        font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+        font-family: '.AppleSystemUIFont', 'Helvetica Neue', sans-serif;
     }}
 
     /* ── Toolbar ─────────────────────────────────────── */

@@ -95,11 +95,21 @@ _REMINDER_FILE = _REMINDER_DIR / "reminders.json"
 _REMINDER_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Tool self-extension constants ─────────────────────────────────────────────
-# Path to this file — used by create_tool for self-modification.
-_SERVER_FILE  = pathlib.Path(__file__)
-_PROMPT_FILE  = pathlib.Path(__file__).parent / "prompt.json"
-# Persistent memory file — shared with the CLI layer.
-_MEMORY_FILE  = pathlib.Path(__file__).parent.parent / "SysControl_Memory.md"
+_FROZEN = getattr(sys, "frozen", False)
+
+if _FROZEN:
+    # Inside a PyInstaller bundle — data files live under sys._MEIPASS
+    _BUNDLE_DIR   = pathlib.Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    _SERVER_FILE  = _BUNDLE_DIR / "mcp" / "server.py"
+    _PROMPT_FILE  = _BUNDLE_DIR / "mcp" / "prompt.json"
+else:
+    _SERVER_FILE  = pathlib.Path(__file__)
+    _PROMPT_FILE  = pathlib.Path(__file__).parent / "prompt.json"
+
+# Persistent memory file — always in the writable user-data directory.
+_USER_DATA_DIR = pathlib.Path.home() / ".syscontrol"
+_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+_MEMORY_FILE = _USER_DATA_DIR / "SysControl_Memory.md"
 _MEMORY_LOCK  = threading.Lock()
 # Marker prepended to each user-defined function block in this file.
 _USER_TOOL_FN_MARKER  = "# ── User-Defined Tool:"
@@ -3198,6 +3208,8 @@ def eject_disk(mountpoint: str) -> dict:
 
 def list_user_tools() -> dict:
     """Return all user-installed tools (created via create_tool)."""
+    if _FROZEN:
+        return {"count": 0, "user_tools": [], "note": "Tool creation is not available in the bundled app."}
     text  = _SERVER_FILE.read_text()
     names = [
         line.split(_USER_TOOL_FN_MARKER)[1].strip().rstrip("─").strip()
@@ -3257,6 +3269,10 @@ def create_tool(
 
     Requires allow_tool_creation: true in ~/.syscontrol/config.json.
     """
+    # ── Frozen bundle gate ─────────────────────────────────────────────────────
+    if _FROZEN:
+        return {"error": "create_tool is not available in the bundled .app — the bundle is read-only."}
+
     # ── Permission gate ────────────────────────────────────────────────────────
     denied = _permission_check("allow_tool_creation", "create_tool")
     if denied:

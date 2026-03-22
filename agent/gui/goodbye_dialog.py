@@ -57,13 +57,13 @@ class GoodbyeDialog(QDialog):
 
         # Header
         header = QLabel("Goodbye!")
-        header.setFont(QFont("-apple-system", 18, QFont.Weight.Bold))
+        header.setFont(QFont(".AppleSystemUIFont", 18, QFont.Weight.Bold))
         header.setStyleSheet(f"color: {fg}; background: transparent;")
         layout.addWidget(header)
 
         # Body
         body = QLabel(f"Save {message_count} messages from this session?")
-        body.setFont(QFont("-apple-system", 13))
+        body.setFont(QFont(".AppleSystemUIFont", 13))
         body.setStyleSheet(f"color: {dim}; background: transparent;")
         body.setWordWrap(True)
         layout.addWidget(body)

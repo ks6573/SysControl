@@ -28,7 +28,7 @@ class _AutoGrowTextEdit(QTextEdit):
         self._min_lines = 1
         self._max_lines = 5
 
-        self.setFont(QFont("SF Pro Text", 15))
+        self.setFont(QFont(".AppleSystemUIFont", 15))
         self.setPlaceholderText("Message SysControl\u2026")
         self.setAcceptRichText(False)
 
@@ -95,7 +95,7 @@ class InputWidget(QWidget):
         # Send button
         self._send_btn = QPushButton("\u2191")  # up arrow
         self._send_btn.setFixedSize(36, 36)
-        self._send_btn.setFont(QFont("SF Pro Text", 16, QFont.Weight.Bold))
+        self._send_btn.setFont(QFont(".AppleSystemUIFont", 16, QFont.Weight.Bold))
         self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._send_btn.setStyleSheet(f"""
             QPushButton {{
