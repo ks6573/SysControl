@@ -71,6 +71,7 @@ _METRICS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="syscon
 
 # ── pynvml handle cache (handles are stable for the process lifetime) ─────────
 _NVML_HANDLES: list = []
+_NVML_LOCK = threading.Lock()
 
 
 def _get_nvml_handles() -> list:
@@ -78,11 +79,14 @@ def _get_nvml_handles() -> list:
     global _NVML_HANDLES
     if _NVML_HANDLES:
         return _NVML_HANDLES
-    try:
-        count = pynvml.nvmlDeviceGetCount()
-        _NVML_HANDLES = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(count)]
-    except Exception:
-        _NVML_HANDLES = []
+    with _NVML_LOCK:
+        if _NVML_HANDLES:
+            return _NVML_HANDLES
+        try:
+            count = pynvml.nvmlDeviceGetCount()
+            _NVML_HANDLES = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(count)]
+        except Exception:
+            _NVML_HANDLES = []
     return _NVML_HANDLES
 
 
@@ -137,15 +141,15 @@ def _save_reminders(reminders: list) -> None:
 class ReminderChecker:
     """Background daemon thread that fires due reminders via macOS notifications."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="syscontrol-reminders"
         )
 
-    def start(self):
+    def start(self) -> None:
         self._thread.start()
 
-    def _loop(self):
+    def _loop(self) -> None:
         while True:
             next_due = self._check()
             # Sleep until the next reminder is due, capped at 15 s so new
@@ -192,7 +196,7 @@ class ReminderChecker:
         return next_due
 
     @staticmethod
-    def _fire(message: str):
+    def _fire(message: str) -> None:
         script = (
             f'display notification {json.dumps(message)} '
             f'with title "SysControl Reminder" sound name "default"'
@@ -379,7 +383,8 @@ def _fig_to_b64(fig) -> str:
         plt.close(fig)
 
 
-def _safe(fn):
+def _safe(fn: callable) -> object | None:
+    """Call *fn* and swallow psutil access/stale-PID errors, returning None."""
     try:
         return fn()
     except (psutil.AccessDenied, psutil.NoSuchProcess):
@@ -464,7 +469,8 @@ def get_gpu_usage() -> dict:
         return {"gpus": gpus}
     except pynvml.NVMLError as e:
         global _NVML_HANDLES
-        _NVML_HANDLES = []  # invalidate cache on NVML error so next call retries
+        with _NVML_LOCK:
+            _NVML_HANDLES = []  # invalidate cache on NVML error so next call retries
         return {"error": f"NVML error: {e}"}
 
 
@@ -616,7 +622,7 @@ def _ram_with_chart() -> tuple:
     return data, _fig_to_b64(fig)
 
 
-def _gpu_with_chart():
+def _gpu_with_chart() -> dict | tuple[dict, str]:
     data = get_gpu_usage()
     if "error" in data or not data.get("gpus"):
         return data
@@ -1013,6 +1019,8 @@ def search_process(name: str) -> dict:
 
 
 def kill_process(pid: int, force: bool = False) -> dict:
+    if not isinstance(pid, int):
+        return {"success": False, "error": f"PID must be an integer, got {type(pid).__name__}"}
     if pid <= 0:
         return {"success": False, "error": f"Invalid PID {pid}: must be a positive integer"}
     if pid in _PROTECTED_PIDS:
@@ -1148,7 +1156,7 @@ _RELATIVE_UNITS = {
 }
 
 
-def _parse_reminder_time(s: str):
+def _parse_reminder_time(s: str) -> datetime.datetime | None:
     """Parse natural-language time string into a datetime. Returns None on failure."""
     s = s.strip().lower()
     now = datetime.datetime.now()
@@ -4383,7 +4391,7 @@ def handle_request(request: dict) -> dict | None:
 
 # ── stdio transport loop ──────────────────────────────────────────────────────
 
-def main():
+def main() -> None:
     _start_reminder_checker_once()
     for line in sys.stdin:
         line = line.strip()

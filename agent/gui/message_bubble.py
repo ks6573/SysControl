@@ -10,7 +10,7 @@ because a debounced renderer converts to HTML every 150ms.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QFont, QResizeEvent, QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -26,6 +26,10 @@ try:
     _HAS_MARKDOWN = True
 except ImportError:
     _HAS_MARKDOWN = False
+
+
+_RENDER_DEBOUNCE_MS = 150   # milliseconds between streaming Markdown re-renders
+_AVATAR_SIZE = 28           # px — assistant avatar circle diameter
 
 
 class MessageBubble(QFrame):
@@ -89,14 +93,14 @@ class MessageBubble(QFrame):
         self._avatar: QLabel | None = None
         if not self._is_user:
             self._avatar = QLabel("S")
-            self._avatar.setFixedSize(28, 28)
+            self._avatar.setFixedSize(_AVATAR_SIZE, _AVATAR_SIZE)
             self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._avatar.setFont(QFont(".AppleSystemUIFont", 13, QFont.Weight.Bold))
             self._avatar.setStyleSheet(f"""
                 QLabel {{
                     background-color: {palette["avatar_bg"]};
                     color: #ffffff;
-                    border-radius: 14px;
+                    border-radius: {_AVATAR_SIZE // 2}px;
                 }}
             """)
 
@@ -105,7 +109,7 @@ class MessageBubble(QFrame):
         if not self._is_user:
             self._render_timer = QTimer(self)
             self._render_timer.setSingleShot(True)
-            self._render_timer.setInterval(150)
+            self._render_timer.setInterval(_RENDER_DEBOUNCE_MS)
             self._render_timer.timeout.connect(self._render_markdown)
 
         # ── Layout ─────────────────────────────────────────────────────────
@@ -259,7 +263,7 @@ class MessageBubble(QFrame):
         {body}
         """
 
-    def resizeEvent(self, event) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         if self._is_user:
             self._adjust_width()

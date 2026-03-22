@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import openai
 from openai import OpenAI
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from agent.core import (
     LOCAL_API_KEY,
@@ -45,6 +45,7 @@ class ProviderConfig:
 # ── Sentinel messages ─────────────────────────────────────────────────────────
 
 _SHUTDOWN = object()
+_CLEAR_SESSION = object()
 
 
 class AgentWorker(QThread):
@@ -58,7 +59,7 @@ class AgentWorker(QThread):
     error_occurred = Signal(str, str)    # category, message
     ready          = Signal(int, str, str)  # tool_count, provider_label, model
 
-    def __init__(self, config: ProviderConfig, parent=None):
+    def __init__(self, config: ProviderConfig, parent: QObject | None = None):
         super().__init__(parent)
         self._config = config
         self._queue: queue.Queue = queue.Queue()
@@ -80,9 +81,8 @@ class AgentWorker(QThread):
         self.wait(5000)  # wait up to 5s for graceful exit
 
     def clear_session(self) -> None:
-        """Reset the message history (called from main thread between turns)."""
-        # Not perfectly thread-safe, but only called when worker is idle.
-        self._messages.clear()
+        """Thread-safe: ask the worker to clear message history."""
+        self._queue.put(_CLEAR_SESSION)
 
     def get_messages(self) -> list[dict]:
         """Return a snapshot of the current message history.
@@ -109,6 +109,9 @@ class AgentWorker(QThread):
 
             if item is _SHUTDOWN:
                 break
+            if item is _CLEAR_SESSION:
+                self._messages.clear()
+                continue
 
             text = str(item)
             self._messages.append({"role": "user", "content": text})
@@ -166,6 +169,8 @@ class AgentWorker(QThread):
         One complete user turn: stream response, execute tool calls, repeat.
         Modeled after cli.py:run_turn (L225-382).
         """
+        assert self._pool is not None, "MCP pool must be initialised before running turns"
+        assert self._llm is not None, "LLM client must be initialised before running turns"
         start_time = time.monotonic()
 
         while True:

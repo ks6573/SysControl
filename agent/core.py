@@ -87,6 +87,8 @@ class MCPClient:
             text=True,
             bufsize=1,
         )
+        assert self.proc.stdin is not None, "Popen stdin must be a pipe"
+        assert self.proc.stdout is not None, "Popen stdout must be a pipe"
         self._id   = 0
         self._lock = threading.Lock()   # serialise writes/reads on this pipe
         self._initialize()
@@ -170,15 +172,17 @@ class MCPClientPool:
     """
 
     def __init__(self, primary: MCPClient, pool_size: int = POOL_SIZE):
-        self._clients: list[MCPClient] = [primary]
+        self._clients: dict[int, MCPClient] = {0: primary}
         self._pool_size = pool_size
         self._pool_lock = threading.Lock()
         self._parallel_safe: set[str] | None = None  # lazily populated
 
     def _get_or_create(self, index: int) -> MCPClient:
-        # Fast path — already have enough clients.
+        assert 0 <= index < self._pool_size, f"Pool index {index} out of range [0, {self._pool_size})"
+
+        # Fast path — already created.
         with self._pool_lock:
-            if len(self._clients) > index:
+            if index in self._clients:
                 return self._clients[index]
 
         # Construct the new client OUTSIDE the lock — MCPClient.__init__ spawns
@@ -189,10 +193,10 @@ class MCPClientPool:
         with self._pool_lock:
             # Re-check under lock: another thread may have beaten us.
             # If so, discard our new_client to avoid a leaked subprocess.
-            if len(self._clients) > index:
+            if index in self._clients:
                 new_client.close()
                 return self._clients[index]
-            self._clients.append(new_client)
+            self._clients[index] = new_client
             return new_client
 
     # Sentinel: distinguishes "server unreachable, allow everything" from a
@@ -207,7 +211,7 @@ class MCPClientPool:
         """
         if self._parallel_safe is None:
             try:
-                tools = self._clients[0].list_tools()
+                tools = self._clients[0].list_tools()  # primary always at index 0
                 self._parallel_safe = {
                     t["name"] for t in tools if t.get("parallel", True)
                 }
@@ -237,6 +241,7 @@ class MCPClientPool:
         def _parse_args(tc: dict) -> tuple[str, dict]:
             """Extract tool name and parsed arguments from a tool-call dict."""
             name = tc["function"]["name"]
+            assert name, "Tool call has empty name — malformed LLM response"
             try:
                 args = json.loads(tc["function"]["arguments"])
             except json.JSONDecodeError:
@@ -247,7 +252,7 @@ class MCPClientPool:
             # Fast path: no thread overhead for a single call.
             tc = tool_calls[0]
             name, args = _parse_args(tc)
-            result = self._clients[0].call_tool(name, args)
+            result = self._clients[0].call_tool(name, args)  # primary client
             return [(tc["id"], name, result)]
 
         # Partition by parallel safety in a single pass, preserving original indices.
@@ -279,13 +284,13 @@ class MCPClientPool:
 
         # Run serial calls one at a time on the primary client.
         for order, tc in serial_indexed:
-            results.append(_run_one(order, tc, self._clients[0]))
+            results.append(_run_one(order, tc, self._clients[0]))  # primary client
 
         results.sort(key=lambda x: x[0])
         return [(tc_id, name, result) for _, tc_id, name, result in results]
 
     def close_all(self) -> None:
-        for client in self._clients:
+        for client in self._clients.values():
             client.close()
 
 

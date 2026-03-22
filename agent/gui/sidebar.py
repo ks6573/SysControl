@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QFont
 from PySide6.QtWidgets import (
     QDialog,
@@ -33,6 +33,7 @@ except ImportError:
 
 from agent.gui.chat_history import import_chat, list_saved_chats, read_chat
 
+_CHAT_ITEM_HEIGHT = 52  # px — fixed height of each sidebar chat row
 
 # ── Single chat item row ─────────────────────────────────────────────────────
 
@@ -53,7 +54,7 @@ class _ChatItem(QFrame):
         self._palette = palette
 
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(52)
+        self.setFixedHeight(_CHAT_ITEM_HEIGHT)
         self._set_bg(palette["sidebar_bg"])
 
         layout = QVBoxLayout(self)
@@ -81,15 +82,15 @@ class _ChatItem(QFrame):
             }}
         """)
 
-    def enterEvent(self, event) -> None:
+    def enterEvent(self, event: QEvent) -> None:
         self._set_bg(self._palette["sidebar_item_hover"])
         super().enterEvent(event)
 
-    def leaveEvent(self, event) -> None:
+    def leaveEvent(self, event: QEvent) -> None:
         self._set_bg(self._palette["sidebar_bg"])
         super().leaveEvent(event)
 
-    def mousePressEvent(self, event) -> None:
+    def mousePressEvent(self, event: QEvent) -> None:
         self.clicked.emit(self._path)
         super().mousePressEvent(event)
 
@@ -228,7 +229,7 @@ class ChatHistorySidebar(QFrame):
                     return
         event.ignore()
 
-    def dragMoveEvent(self, event) -> None:
+    def dragMoveEvent(self, event: QDragEnterEvent) -> None:
         event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:

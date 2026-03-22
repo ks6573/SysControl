@@ -480,6 +480,7 @@ def main() -> None:
         print(f"\nFailed to start MCP server: {startup_error}", file=sys.stderr)
         sys.exit(1)
 
+    assert mcp_client is not None, "MCP client must be initialised after startup"
     pool = MCPClientPool(mcp_client)
 
     try:

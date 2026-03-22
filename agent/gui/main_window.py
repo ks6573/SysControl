@@ -11,7 +11,7 @@ import atexit
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
 
-from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QCloseEvent, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -31,6 +31,9 @@ from agent.gui.input_widget import InputWidget
 from agent.gui.settings_dialog import SettingsDialog, save_config
 from agent.gui.sidebar import ChatHistorySidebar, ChatViewerDialog
 from agent.gui.worker import AgentWorker, ProviderConfig
+
+
+_SIDEBAR_WIDTH = 280  # px — expanded sidebar panel width
 
 
 class MainWindow(QMainWindow):
@@ -156,6 +159,9 @@ class MainWindow(QMainWindow):
         # ── Wire input ─────────────────────────────────────────────────────
         self._input.message_submitted.connect(self._on_user_submit)
 
+        # Safety net: clean up MCP subprocesses on exit (registered once)
+        atexit.register(self._cleanup)
+
         # ── Start worker ───────────────────────────────────────────────────
         self._start_worker(config)
 
@@ -174,9 +180,6 @@ class MainWindow(QMainWindow):
         self._worker.turn_finished.connect(self._on_turn_finished)
         self._worker.error_occurred.connect(self._on_error)
         self._worker.start()
-
-        # Safety net: clean up MCP subprocesses on exit
-        atexit.register(self._cleanup)
 
     def _cleanup(self) -> None:
         if self._worker is not None:
@@ -267,7 +270,7 @@ class MainWindow(QMainWindow):
         anim = QPropertyAnimation(self._sidebar, b"maximumWidth")
         anim.setDuration(200)
         anim.setStartValue(self._sidebar.maximumWidth())
-        anim.setEndValue(280 if checked else 0)
+        anim.setEndValue(_SIDEBAR_WIDTH if checked else 0)
         anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._sidebar_anim = anim  # prevent GC
         anim.start()
@@ -289,6 +292,6 @@ class MainWindow(QMainWindow):
 
     # ── Window lifecycle ───────────────────────────────────────────────────
 
-    def closeEvent(self, event) -> None:
+    def closeEvent(self, event: QCloseEvent) -> None:
         self._cleanup()
         super().closeEvent(event)
