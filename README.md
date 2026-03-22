@@ -4,19 +4,61 @@ An AI agent for your Mac that answers questions about your system — and can ex
 
 57 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, shell, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
-Three ways to run it — pick whichever fits your workflow:
+Four ways to run it — pick whichever fits your workflow:
 
-| | Command | Best for |
+| | How | Best for |
 |---|---|---|
-| **GUI** | `uv run gui.py` | Visual chat with history sidebar, drag-and-drop, and streaming |
+| **App** | [Download the `.app`](#app-recommended) | One-click native macOS experience — no setup required |
 | **CLI** | `uv run agent.py` | Terminal-first workflow, scripting, SSH sessions |
 | **Claude Desktop** | MCP server | Using SysControl tools inside Claude Desktop |
 
-The GUI and CLI share the same agent, tools, and providers — they're interchangeable.
+All interfaces share the same agent, tools, and providers — they're interchangeable.
 
 ---
 
-## Requirements
+## App (Recommended)
+
+A native SwiftUI app with streaming chat, Markdown rendering, chat history sidebar, and auto-save — no Python, no terminal, no dependencies to install. Just download, open, and configure your provider in Settings.
+
+### Download
+
+Run this in Terminal to download, build, and open the app:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"
+```
+
+Or build manually:
+
+```bash
+git clone https://github.com/ks6573/SysControl.git
+cd SysControl/swift
+./build.sh release
+open .build/SysControl.app
+```
+
+> **Requires:** macOS 14+ and Xcode Command Line Tools (`xcode-select --install`).
+
+### Features
+
+- **Streaming responses** — tokens appear as they arrive with live Markdown formatting
+- **Auto-save** — every conversation is saved automatically with an LLM-generated title
+- **Chat history sidebar** — browse, search, and delete past chats
+- **Settings** — switch between local (Ollama) and cloud providers in-app
+- **No setup** — everything is configured through the app itself
+
+### First Launch
+
+1. Open the app
+2. Click **Settings** (gear icon)
+3. Choose **Local** (requires [Ollama](https://ollama.com) running) or **Cloud** (enter your API key)
+4. Start chatting
+
+> Chat history is saved as Markdown in `~/.syscontrol/chat_history/` — view, edit, or delete freely.
+
+---
+
+## Requirements (CLI only)
 
 - Python **3.11** or later
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
@@ -24,7 +66,7 @@ The GUI and CLI share the same agent, tools, and providers — they're interchan
 
 ---
 
-## Installation
+## Installation (CLI only)
 
 ```bash
 git clone https://github.com/ks6573/SysControl.git
@@ -35,31 +77,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 uv sync
 ```
-
----
-
-## GUI
-
-```bash
-uv run gui.py
-```
-
-A native PySide6 chat window with progressive streaming, Markdown rendering, and a warm Claude Desktop-inspired theme.
-
-### Features
-
-- **Streaming responses** — tokens appear as they arrive with debounced Markdown formatting
-- **Chat history** — say "bye" or any farewell to save the session as a `.md` file in `~/.syscontrol/chat_history/`
-- **Other Chats sidebar** — toggle with the clock button or **Ctrl+H** to browse saved chats
-- **Drag-and-drop import** — drop `.md` chat exports from other LLMs onto the sidebar to import them
-- **Chat viewer** — click any saved chat to view it in a styled read-only dialog
-- **Settings** — switch between local/cloud providers and models without restarting
-
-### Goodbye & Save
-
-Type any natural farewell (`bye`, `cya`, `goodnight`, `later`, …) and a dialog will ask whether to save the conversation. Saved chats appear in the sidebar immediately.
-
-> Saved chat files are plain Markdown in `~/.syscontrol/chat_history/` — view, edit, or delete them freely.
 
 ---
 
