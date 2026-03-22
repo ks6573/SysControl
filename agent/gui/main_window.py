@@ -24,16 +24,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from agent.gui.chat_history import EXIT_PHRASES, save_chat
+from agent.gui.chat_history import EXIT_PHRASES, generate_title, save_chat
 from agent.gui.chat_widget import ChatWidget
-from agent.gui.goodbye_dialog import GoodbyeDialog
 from agent.gui.input_widget import InputWidget
 from agent.gui.settings_dialog import SettingsDialog, save_config
 from agent.gui.sidebar import ChatHistorySidebar, ChatViewerDialog
 from agent.gui.worker import AgentWorker, ProviderConfig
 
 
-_SIDEBAR_WIDTH = 280  # px — expanded sidebar panel width
+_SIDEBAR_WIDTH = 320  # px — expanded sidebar panel width
 
 
 class MainWindow(QMainWindow):
@@ -44,6 +43,7 @@ class MainWindow(QMainWindow):
         self._config = config
         self._palette = palette
         self._worker: AgentWorker | None = None
+        self._session_saved = False
 
         self.setWindowTitle("SysControl")
         self.setMinimumSize(600, 500)
@@ -94,6 +94,13 @@ class MainWindow(QMainWindow):
         toolbar.setFixedHeight(44)
         self.addToolBar(toolbar)
 
+        self._history_btn = QToolButton()
+        self._history_btn.setText("\u2630")  # ☰ hamburger menu icon
+        self._history_btn.setToolTip("Chat History")
+        self._history_btn.setCheckable(True)
+        self._history_btn.toggled.connect(self._on_toggle_sidebar)
+        toolbar.addWidget(self._history_btn)
+
         self._model_label = QLabel("SysControl")
         self._model_label.setFont(QFont(".AppleSystemUIFont", 13, QFont.Weight.DemiBold))
         toolbar.addWidget(self._model_label)
@@ -102,12 +109,6 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
 
-        self._history_btn = QToolButton()
-        self._history_btn.setText("\U0001f553")  # clock emoji
-        self._history_btn.setCheckable(True)
-        self._history_btn.toggled.connect(self._on_toggle_sidebar)
-        toolbar.addWidget(self._history_btn)
-
         new_chat_btn = QToolButton()
         new_chat_btn.setText("+ New")
         new_chat_btn.clicked.connect(self._on_new_chat)
@@ -115,6 +116,7 @@ class MainWindow(QMainWindow):
 
         settings_btn = QToolButton()
         settings_btn.setText("\u2699")
+        settings_btn.setFont(QFont(".AppleSystemUIFont", 18))
         settings_btn.clicked.connect(self._on_settings)
         toolbar.addWidget(settings_btn)
 
@@ -198,43 +200,50 @@ class MainWindow(QMainWindow):
         self._worker.submit_message(text)
 
     def _handle_goodbye(self) -> None:
-        """Show save dialog if session has content, then clear."""
-        messages = self._worker.get_messages() if self._worker else []
-        has_content = any(
-            m.get("role") in ("user", "assistant") and m.get("content")
-            for m in messages
-        )
-        if not has_content:
-            self._on_new_chat()
-            return
-
-        msg_count = sum(1 for m in messages if m["role"] in ("user", "assistant"))
-        dialog = GoodbyeDialog(msg_count, self._palette, parent=self)
-        result = dialog.exec()
-
-        if result == GoodbyeDialog.SAVE:
-            path = save_chat(messages)
-            if path:
-                self._status_label.setText(f"Chat saved to {path.name}")
-                if hasattr(self, "_sidebar"):
-                    self._sidebar.refresh()
-            self._on_new_chat()
-        elif result == GoodbyeDialog.DISCARD:
-            self._on_new_chat()
+        """Auto-save session and start a new chat."""
+        self._auto_save()
+        self._on_new_chat()
 
     def _on_new_chat(self) -> None:
+        self._auto_save()
         self._chat.clear_chat()
         if self._worker:
             self._worker.clear_session()
+        self._session_saved = False
+
+    def _auto_save(self) -> None:
+        """Save the current session if it has meaningful content."""
+        if self._session_saved or not self._worker:
+            return
+        messages = self._worker.get_messages()
+        has_user = any(m.get("role") == "user" and m.get("content") for m in messages)
+        has_asst = any(m.get("role") == "assistant" and m.get("content") for m in messages)
+        if not (has_user and has_asst):
+            return
+        title = generate_title(
+            messages,
+            api_key=self._config.api_key,
+            base_url=self._config.base_url,
+            model=self._config.model,
+        )
+        path = save_chat(messages, title=title)
+        if path:
+            self._status_label.setText(f"Chat saved to {path.name}")
+            self._sidebar.refresh()
+        self._session_saved = True
 
     def _on_settings(self) -> None:
         dialog = SettingsDialog(self._palette, parent=self)
         dialog.load_from_config(self._config)
         if dialog.exec():
+            self._auto_save()
             new_config = dialog.get_config()
             save_config(new_config)
             self._config = new_config
             self._chat.clear_chat()
+            if self._worker:
+                self._worker.clear_session()
+            self._session_saved = False
             self._status_label.setText("Reconnecting\u2026")
             self._start_worker(new_config)
 
@@ -293,5 +302,6 @@ class MainWindow(QMainWindow):
     # ── Window lifecycle ───────────────────────────────────────────────────
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._auto_save()
         self._cleanup()
         super().closeEvent(event)

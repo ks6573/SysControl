@@ -1338,7 +1338,6 @@ version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "matplotlib" },
-    { name = "nvidia-ml-py" },
     { name = "openai" },
     { name = "psutil" },
 ]
@@ -1356,6 +1355,9 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+gpu = [
+    { name = "nvidia-ml-py" },
+]
 gui = [
     { name = "markdown" },
     { name = "pyside6" },
@@ -1366,7 +1368,7 @@ requires-dist = [
     { name = "markdown", marker = "extra == 'gui'", specifier = ">=3.5.0" },
     { name = "matplotlib", specifier = ">=3.7.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
-    { name = "nvidia-ml-py", specifier = ">=12.0.0" },
+    { name = "nvidia-ml-py", marker = "extra == 'gpu'", specifier = ">=12.0.0" },
     { name = "openai", specifier = ">=2.26.0" },
     { name = "pillow", marker = "extra == 'bundle'", specifier = ">=10.0.0" },
     { name = "psutil", specifier = ">=5.9.0" },
@@ -1377,7 +1379,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
     { name = "syscontrol", extras = ["gui"], marker = "extra == 'bundle'" },
 ]
-provides-extras = ["gui", "bundle", "dev"]
+provides-extras = ["gpu", "gui", "bundle", "dev"]
 
 [[package]]
 name = "tomli"

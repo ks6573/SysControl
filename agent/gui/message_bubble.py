@@ -12,9 +12,11 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QResizeEvent, QTextCursor
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QTextBrowser,
     QVBoxLayout,
@@ -112,6 +114,28 @@ class MessageBubble(QFrame):
             self._render_timer.setInterval(_RENDER_DEBOUNCE_MS)
             self._render_timer.timeout.connect(self._render_markdown)
 
+        # ── Copy button (assistant only, shown after finalize) ────────────
+        self._copy_btn: QPushButton | None = None
+        if not self._is_user:
+            self._copy_btn = QPushButton("\U0001f4cb")  # 📋 clipboard icon
+            self._copy_btn.setToolTip("Copy to clipboard")
+            self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._copy_btn.setFixedSize(28, 28)
+            self._copy_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent;
+                    border: none;
+                    border-radius: 6px;
+                    font-size: 14px;
+                    padding: 0;
+                }}
+                QPushButton:hover {{
+                    background-color: {palette["tool_indicator"]};
+                }}
+            """)
+            self._copy_btn.clicked.connect(self._on_copy)
+            self._copy_btn.hide()
+
         # ── Layout ─────────────────────────────────────────────────────────
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -130,6 +154,14 @@ class MessageBubble(QFrame):
             row.addWidget(self._browser, 1)
 
         outer.addLayout(row)
+
+        # Action row beneath assistant messages (copy button)
+        if not self._is_user:
+            action_row = QHBoxLayout()
+            action_row.setContentsMargins(_AVATAR_SIZE + 10, 2, 0, 0)  # align with text
+            action_row.addWidget(self._copy_btn)
+            action_row.addStretch()
+            outer.addLayout(action_row)
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -169,8 +201,29 @@ class MessageBubble(QFrame):
         else:
             self._browser.setPlainText(self._raw_text)
 
+        # Show copy button once response is complete
+        if self._copy_btn is not None:
+            self._copy_btn.show()
+
     def raw_text(self) -> str:
         return self._raw_text
+
+    def _on_copy(self) -> None:
+        """Copy raw text to clipboard and show brief confirmation."""
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self._raw_text)
+        if self._copy_btn is not None:
+            original = self._copy_btn.text()
+            self._copy_btn.setText("\u2713")  # ✓ checkmark
+            self._copy_btn.setToolTip("Copied!")
+            QTimer.singleShot(1500, lambda: self._restore_copy_btn(original))
+
+    def _restore_copy_btn(self, original_text: str) -> None:
+        """Restore copy button to its original state after confirmation."""
+        if self._copy_btn is not None:
+            self._copy_btn.setText(original_text)
+            self._copy_btn.setToolTip("Copy to clipboard")
 
     # ── Internal ───────────────────────────────────────────────────────────
 

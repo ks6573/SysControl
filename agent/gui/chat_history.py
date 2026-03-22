@@ -12,6 +12,8 @@ import re
 import shutil
 from pathlib import Path
 
+from openai import OpenAI
+
 from agent.core import EXIT_PHRASES  # noqa: F401 — re-exported for main_window.py
 
 CHAT_HISTORY_DIR = Path.home() / ".syscontrol" / "chat_history"
@@ -31,7 +33,7 @@ def _slugify(text: str, max_len: int = 40) -> str:
     return slug[:max_len].rstrip("-") or "untitled"
 
 
-def serialize_chat(messages: list[dict]) -> str | None:
+def serialize_chat(messages: list[dict], title: str = "") -> str | None:
     """Convert a worker message list to a clean Markdown string.
 
     Returns None if there are no user/assistant messages with content.
@@ -46,7 +48,8 @@ def serialize_chat(messages: list[dict]) -> str | None:
         return None
 
     now = datetime.datetime.now()
-    header = f"# Chat — {now.strftime('%B %d, %Y %I:%M %p')}\n"
+    display_title = title or "Chat"
+    header = f"# {display_title} — {now.strftime('%B %d, %Y %I:%M %p')}\n"
     msg_count = len(visible)
     meta = f"\n**Messages:** {msg_count}\n"
 
@@ -68,12 +71,17 @@ def serialize_chat(messages: list[dict]) -> str | None:
     return "".join(parts)
 
 
-def save_chat(messages: list[dict]) -> Path | None:
+def save_chat(messages: list[dict], title: str = "") -> Path | None:
     """Serialize and save a conversation to the chat history directory.
+
+    Args:
+        messages: The worker message list to serialize.
+        title: Optional LLM-generated title. Embedded in the markdown header
+               and used by the sidebar for display.
 
     Returns the path of the saved file, or None if there was nothing to save.
     """
-    md = serialize_chat(messages)
+    md = serialize_chat(messages, title=title)
     if md is None:
         return None
 
@@ -82,12 +90,12 @@ def save_chat(messages: list[dict]) -> Path | None:
     now = datetime.datetime.now()
     timestamp = now.strftime("%Y-%m-%d_%H%M%S")
 
-    # Slug from first user message
-    first_user = next(
-        (m["content"] for m in messages if m.get("role") == "user" and m.get("content")),
-        "",
+    slug = _slugify(title) if title else _slugify(
+        next(
+            (m["content"] for m in messages if m.get("role") == "user" and m.get("content")),
+            "",
+        )
     )
-    slug = _slugify(first_user)
     filename = f"{timestamp}_{slug}.md"
     path = CHAT_HISTORY_DIR / filename
 
@@ -151,24 +159,59 @@ def import_chat(source_path: Path) -> Path | None:
     return dest
 
 
+def generate_title(messages: list[dict], api_key: str, base_url: str, model: str) -> str:
+    """Ask the LLM for a brief chat title (3-6 words). Returns '' on failure."""
+    # Collect the first few user/assistant exchanges for context
+    snippet_parts: list[str] = []
+    for m in messages:
+        if m.get("role") in ("user", "assistant") and m.get("content"):
+            role = "User" if m["role"] == "user" else "Assistant"
+            text = m["content"][:200]
+            snippet_parts.append(f"{role}: {text}")
+            if len(snippet_parts) >= 4:
+                break
+    if not snippet_parts:
+        return ""
+    snippet = "\n".join(snippet_parts)
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=10.0)
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=20,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Write a short title (3-6 words, no quotes, no punctuation) "
+                    f"for this conversation:\n\n{snippet}"
+                ),
+            }],
+        )
+        title = (resp.choices[0].message.content or "").strip().strip('"\'.')
+        return title[:50] if title else ""
+    except Exception:
+        return ""
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def _extract_title(path: Path) -> str:
     """Extract a display title from a chat .md file.
 
-    Looks for the first '### You' section content, falling back to filename.
+    Reads the '# Title — Date' header line first. Falls back to the first
+    user message content, then the filename stem.
     """
     try:
         text = path.read_text(encoding="utf-8")
         for line in text.splitlines():
             stripped = line.strip()
-            if stripped.startswith("### You"):
-                continue
-            # First non-empty line after we've seen content
-            if stripped and not stripped.startswith("#") and not stripped.startswith("---") and not stripped.startswith("**"):
-                return stripped[:50]
-        # Fallback: try lines after "### You"
+            # Parse "# Title — Date" header
+            if stripped.startswith("# ") and " — " in stripped:
+                title_part = stripped[2:].split(" — ", 1)[0].strip()
+                if title_part and title_part != "Chat":
+                    return title_part[:50]
+                break  # header found but no meaningful title — fall through
+        # Fallback: first user message content
         in_you = False
         for line in text.splitlines():
             if line.strip() == "### You":

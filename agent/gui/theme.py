@@ -121,7 +121,7 @@ def load_stylesheet(dark: bool = True) -> str:
         border: none;
         padding: 4px 10px;
         border-radius: 5px;
-        font-size: 12px;
+        font-size: 14px;
     }}
     QToolBar QToolButton:hover {{
         background-color: {c["input_bg"]};
