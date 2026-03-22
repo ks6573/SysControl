@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import re
 import shutil
+import sys
 from pathlib import Path
 
 from openai import OpenAI
@@ -188,7 +189,8 @@ def generate_title(messages: list[dict], api_key: str, base_url: str, model: str
         )
         title = (resp.choices[0].message.content or "").strip().strip('"\'.')
         return title[:50] if title else ""
-    except Exception:
+    except Exception as exc:
+        sys.stderr.write(f"[syscontrol] generate_title LLM call failed: {exc}\n")
         return ""
 
 

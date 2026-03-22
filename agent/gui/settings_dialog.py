@@ -8,6 +8,7 @@ Detects locally installed Ollama models and persists the user's choice.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -56,7 +57,8 @@ def load_saved_config() -> ProviderConfig | None:
             model=data["model"],
             label=data["label"],
         )
-    except Exception:
+    except Exception as exc:
+        sys.stderr.write(f"[syscontrol] load_saved_config: corrupt config file: {exc}\n")
         return None
 
 
@@ -79,21 +81,43 @@ def save_config(config: ProviderConfig) -> None:
 class SettingsDialog(QDialog):
     """Provider and model selection dialog."""
 
-    def __init__(self, palette: dict[str, str], parent: QWidget | None = None):
+    def __init__(self, palette: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._palette = palette
         self.setWindowTitle("SysControl — Settings")
         self.setMinimumWidth(440)
+        self._apply_stylesheet()
+
+        self._main_layout = QVBoxLayout(self)
+        self._main_layout.setSpacing(12)
+
+        # Title
+        title = QLabel("Configure Provider")
+        title.setFont(QFont(".AppleSystemUIFont", 18, QFont.Weight.Bold))
+        self._main_layout.addWidget(title)
+
+        self._setup_provider_radios()
+        self._setup_local_panel()
+        self._setup_cloud_panel()
+        self._setup_buttons()
+
+        # Initial state
+        self._on_provider_changed(0, True)
+        self._refresh_models()
+
+    def _apply_stylesheet(self) -> None:
+        """Apply the dialog-level QSS stylesheet."""
+        p = self._palette
         self.setStyleSheet(f"""
             QDialog {{
-                background-color: {palette["window_bg"]};
+                background-color: {p["window_bg"]};
             }}
             QLabel {{
-                color: {palette["asst_bubble_text"]};
+                color: {p["asst_bubble_text"]};
             }}
             QGroupBox {{
-                color: {palette["asst_bubble_text"]};
-                border: 1px solid {palette["border"]};
+                color: {p["asst_bubble_text"]};
+                border: 1px solid {p["border"]};
                 border-radius: 8px;
                 margin-top: 12px;
                 padding-top: 16px;
@@ -105,23 +129,23 @@ class SettingsDialog(QDialog):
                 padding: 0 6px;
             }}
             QRadioButton {{
-                color: {palette["asst_bubble_text"]};
+                color: {p["asst_bubble_text"]};
                 spacing: 6px;
             }}
             QLineEdit, QComboBox {{
-                background-color: {palette["input_bg"]};
-                color: {palette["input_text"]};
-                border: 1px solid {palette["input_border"]};
+                background-color: {p["input_bg"]};
+                color: {p["input_text"]};
+                border: 1px solid {p["input_border"]};
                 border-radius: 6px;
                 padding: 6px 10px;
                 font-size: 13px;
             }}
             QLineEdit:focus, QComboBox:focus {{
-                border: 1px solid {palette["accent"]};
+                border: 1px solid {p["accent"]};
             }}
             QPushButton {{
-                background-color: {palette["send_bg"]};
-                color: {palette["send_text"]};
+                background-color: {p["send_bg"]};
+                color: {p["send_text"]};
                 border: none;
                 border-radius: 6px;
                 padding: 8px 20px;
@@ -129,27 +153,20 @@ class SettingsDialog(QDialog):
                 font-weight: 600;
             }}
             QPushButton:hover {{
-                background-color: {palette["send_hover"]};
+                background-color: {p["send_hover"]};
             }}
             QPushButton#secondary {{
-                background-color: {palette["input_bg"]};
-                color: {palette["asst_bubble_text"]};
-                border: 1px solid {palette["border"]};
+                background-color: {p["input_bg"]};
+                color: {p["asst_bubble_text"]};
+                border: 1px solid {p["border"]};
             }}
             QPushButton#secondary:hover {{
-                background-color: {palette["tool_indicator"]};
+                background-color: {p["tool_indicator"]};
             }}
         """)
 
-        main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(12)
-
-        # Title
-        title = QLabel("Configure Provider")
-        title.setFont(QFont(".AppleSystemUIFont", 18, QFont.Weight.Bold))
-        main_layout.addWidget(title)
-
-        # ── Provider radio buttons ─────────────────────────────────────────
+    def _setup_provider_radios(self) -> None:
+        """Build the local/cloud radio button row."""
         self._radio_local = QRadioButton("Local (Ollama)")
         self._radio_cloud = QRadioButton("Cloud (Ollama Cloud)")
         self._radio_local.setChecked(True)
@@ -163,9 +180,10 @@ class SettingsDialog(QDialog):
         radio_row.addWidget(self._radio_local)
         radio_row.addWidget(self._radio_cloud)
         radio_row.addStretch()
-        main_layout.addLayout(radio_row)
+        self._main_layout.addLayout(radio_row)
 
-        # ── Local panel ────────────────────────────────────────────────────
+    def _setup_local_panel(self) -> None:
+        """Build the local model selection panel."""
         self._local_group = QGroupBox("Local Settings")
         local_layout = QVBoxLayout(self._local_group)
 
@@ -181,9 +199,10 @@ class SettingsDialog(QDialog):
         model_row.addWidget(self._refresh_btn)
         local_layout.addLayout(model_row)
 
-        main_layout.addWidget(self._local_group)
+        self._main_layout.addWidget(self._local_group)
 
-        # ── Cloud panel ────────────────────────────────────────────────────
+    def _setup_cloud_panel(self) -> None:
+        """Build the cloud API key / model panel."""
         self._cloud_group = QGroupBox("Cloud Settings")
         cloud_layout = QVBoxLayout(self._cloud_group)
 
@@ -198,9 +217,10 @@ class SettingsDialog(QDialog):
         self._cloud_model_edit.setPlaceholderText(CLOUD_MODEL)
         cloud_layout.addWidget(self._cloud_model_edit)
 
-        main_layout.addWidget(self._cloud_group)
+        self._main_layout.addWidget(self._cloud_group)
 
-        # ── Buttons ────────────────────────────────────────────────────────
+    def _setup_buttons(self) -> None:
+        """Build the cancel/connect button row."""
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
@@ -213,11 +233,7 @@ class SettingsDialog(QDialog):
         ok_btn.clicked.connect(self._on_accept)
         btn_row.addWidget(ok_btn)
 
-        main_layout.addLayout(btn_row)
-
-        # Initial state
-        self._on_provider_changed(0, True)
-        self._refresh_models()
+        self._main_layout.addLayout(btn_row)
 
     # ── Public API ─────────────────────────────────────────────────────────
 

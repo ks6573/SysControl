@@ -53,7 +53,8 @@ try:
     import pynvml
     pynvml.nvmlInit()
     GPU_BACKEND = "pynvml"
-except Exception:
+except Exception as exc:
+    import sys as _sys; _sys.stderr.write(f"[syscontrol] GPU backend init failed: {exc}\n")
     GPU_BACKEND = None
 
 GPU_AVAILABLE = GPU_BACKEND is not None
@@ -644,7 +645,8 @@ def _gpu_with_chart() -> dict | tuple[dict, str]:
         ax.legend(fontsize=8)
         fig.tight_layout()
         return data, _fig_to_b64(fig)
-    except Exception:
+    except Exception as exc:
+        import sys as _sys; _sys.stderr.write(f"[syscontrol] _gpu_with_chart rendering failed: {exc}\n")
         plt.close(fig)
         return data
 
@@ -785,8 +787,8 @@ def get_system_alerts() -> dict:
         sw = psutil.swap_memory()
         if sw.total > 0 and sw.percent >= 80:
             _alert("warning", "swap", f"Swap high at {sw.percent}% — system may be memory-constrained", sw.percent)
-    except Exception:
-        pass
+    except Exception as exc:
+        import sys as _sys; _sys.stderr.write(f"[syscontrol] swap read failed: {exc}\n")
 
     for part in psutil.disk_partitions(all=False):
         try:
@@ -817,8 +819,8 @@ def get_system_alerts() -> dict:
                             _alert("warning", f"gpu:{i}", f"GPU {name} temp elevated at {temp}°C", temp)
                     except pynvml.NVMLError:
                         pass
-        except Exception:
-            pass
+        except Exception as exc:
+            import sys as _sys; _sys.stderr.write(f"[syscontrol] GPU alert check failed: {exc}\n")
 
     batt = psutil.sensors_battery()
     if batt is not None and not batt.power_plugged and batt.percent <= 10:

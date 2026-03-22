@@ -188,29 +188,23 @@ class ChatHistorySidebar(QFrame):
 
     def refresh(self) -> None:
         """Reload the chat list from disk."""
-        # Clear existing items (keep stretch at the end)
-        while self._list_layout.count() > 1:
-            item = self._list_layout.takeAt(0)
+        # Clear existing items (keep the _empty_label at 0 and stretch at the end)
+        while self._list_layout.count() > 2:
+            item = self._list_layout.takeAt(1)
             if item.widget():
                 item.widget().deleteLater()
 
         chats = list_saved_chats()
 
         if not chats:
-            self._empty_label = QLabel("No past chats.\nSave something and\nI'll pick up from there!")
-            self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._empty_label.setFont(QFont(".AppleSystemUIFont", 12))
-            self._empty_label.setStyleSheet(
-                f"color: {self._palette['sidebar_empty']}; background: transparent;"
-            )
-            self._empty_label.setWordWrap(True)
-            self._list_layout.insertWidget(0, self._empty_label)
+            self._empty_label.show()
             return
 
+        self._empty_label.hide()
         for i, chat_info in enumerate(chats):
             chat_item = _ChatItem(chat_info, self._palette, parent=self._list_container)
             chat_item.clicked.connect(self.chat_selected.emit)
-            self._list_layout.insertWidget(i, chat_item)
+            self._list_layout.insertWidget(i + 1, chat_item)  # after _empty_label
 
     # ── Close button ──────────────────────────────────────────────────────
 

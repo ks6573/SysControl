@@ -38,7 +38,7 @@ _SIDEBAR_WIDTH = 320  # px — expanded sidebar panel width
 class MainWindow(QMainWindow):
     """Main application window — chat interface with toolbar and status bar."""
 
-    def __init__(self, config: ProviderConfig, palette: dict[str, str], parent=None):
+    def __init__(self, config: ProviderConfig, palette: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._config = config
         self._palette = palette
@@ -49,45 +49,45 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(600, 500)
         self.resize(800, 650)
 
-        # ── Menu bar (macOS requires Edit menu for Cmd+C/V/X/A) ──────────
+        self._setup_menu_bar()
+        self._setup_toolbar()
+        self._setup_central_widget()
+        self._setup_status_bar()
+
+        # ── Wire input ─────────────────────────────────────────────────────
+        self._input.message_submitted.connect(self._on_user_submit)
+
+        # Safety net: clean up MCP subprocesses on exit (registered once)
+        atexit.register(self._cleanup)
+
+        # ── Start worker ───────────────────────────────────────────────────
+        self._start_worker(config)
+
+    def _setup_menu_bar(self) -> None:
+        """Build the Edit menu with standard text-editing shortcuts."""
         menu_bar = self.menuBar()
         edit_menu = menu_bar.addMenu("Edit")
 
-        undo_action = QAction("Undo", self)
-        undo_action.setShortcut(QKeySequence.StandardKey.Undo)
-        undo_action.triggered.connect(lambda: self._forward_to_focus("undo"))
-        edit_menu.addAction(undo_action)
+        for label, shortcut, method in (
+            ("Undo",       QKeySequence.StandardKey.Undo,      "undo"),
+            ("Redo",       QKeySequence.StandardKey.Redo,      "redo"),
+            (None, None, None),  # separator
+            ("Cut",        QKeySequence.StandardKey.Cut,       "cut"),
+            ("Copy",       QKeySequence.StandardKey.Copy,      "copy"),
+            ("Paste",      QKeySequence.StandardKey.Paste,     "paste"),
+            (None, None, None),  # separator
+            ("Select All", QKeySequence.StandardKey.SelectAll, "selectAll"),
+        ):
+            if label is None:
+                edit_menu.addSeparator()
+                continue
+            action = QAction(label, self)
+            action.setShortcut(shortcut)
+            action.triggered.connect(lambda _checked=False, m=method: self._forward_to_focus(m))
+            edit_menu.addAction(action)
 
-        redo_action = QAction("Redo", self)
-        redo_action.setShortcut(QKeySequence.StandardKey.Redo)
-        redo_action.triggered.connect(lambda: self._forward_to_focus("redo"))
-        edit_menu.addAction(redo_action)
-
-        edit_menu.addSeparator()
-
-        cut_action = QAction("Cut", self)
-        cut_action.setShortcut(QKeySequence.StandardKey.Cut)
-        cut_action.triggered.connect(lambda: self._forward_to_focus("cut"))
-        edit_menu.addAction(cut_action)
-
-        copy_action = QAction("Copy", self)
-        copy_action.setShortcut(QKeySequence.StandardKey.Copy)
-        copy_action.triggered.connect(lambda: self._forward_to_focus("copy"))
-        edit_menu.addAction(copy_action)
-
-        paste_action = QAction("Paste", self)
-        paste_action.setShortcut(QKeySequence.StandardKey.Paste)
-        paste_action.triggered.connect(lambda: self._forward_to_focus("paste"))
-        edit_menu.addAction(paste_action)
-
-        edit_menu.addSeparator()
-
-        select_all_action = QAction("Select All", self)
-        select_all_action.setShortcut(QKeySequence.StandardKey.SelectAll)
-        select_all_action.triggered.connect(lambda: self._forward_to_focus("selectAll"))
-        edit_menu.addAction(select_all_action)
-
-        # ── Toolbar ────────────────────────────────────────────────────────
+    def _setup_toolbar(self) -> None:
+        """Build the top toolbar with history, model label, new-chat, and settings buttons."""
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
@@ -120,7 +120,8 @@ class MainWindow(QMainWindow):
         settings_btn.clicked.connect(self._on_settings)
         toolbar.addWidget(settings_btn)
 
-        # ── Central widget ─────────────────────────────────────────────────
+    def _setup_central_widget(self) -> None:
+        """Build the central area: sidebar + chat + input."""
         central = QWidget()
         self.setCentralWidget(central)
         h_layout = QHBoxLayout(central)
@@ -128,7 +129,7 @@ class MainWindow(QMainWindow):
         h_layout.setSpacing(0)
 
         # Sidebar (hidden by default)
-        self._sidebar = ChatHistorySidebar(palette, parent=central)
+        self._sidebar = ChatHistorySidebar(self._palette, parent=central)
         self._sidebar.setMaximumWidth(0)
         self._sidebar.chat_selected.connect(self._on_chat_selected)
         self._sidebar.closed.connect(lambda: self._history_btn.setChecked(False))
@@ -140,10 +141,10 @@ class MainWindow(QMainWindow):
         v_layout.setContentsMargins(0, 0, 0, 0)
         v_layout.setSpacing(0)
 
-        self._chat = ChatWidget(palette, parent=right_panel)
+        self._chat = ChatWidget(self._palette, parent=right_panel)
         v_layout.addWidget(self._chat, 1)
 
-        self._input = InputWidget(palette, parent=right_panel)
+        self._input = InputWidget(self._palette, parent=right_panel)
         v_layout.addWidget(self._input, 0)
 
         h_layout.addWidget(right_panel, 1)
@@ -152,20 +153,12 @@ class MainWindow(QMainWindow):
         shortcut = QShortcut(QKeySequence("Ctrl+H"), self)
         shortcut.activated.connect(self._history_btn.toggle)
 
-        # ── Status bar ─────────────────────────────────────────────────────
+    def _setup_status_bar(self) -> None:
+        """Build the bottom status bar."""
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status_label = QLabel("Connecting\u2026")
         self._status.addPermanentWidget(self._status_label)
-
-        # ── Wire input ─────────────────────────────────────────────────────
-        self._input.message_submitted.connect(self._on_user_submit)
-
-        # Safety net: clean up MCP subprocesses on exit (registered once)
-        atexit.register(self._cleanup)
-
-        # ── Start worker ───────────────────────────────────────────────────
-        self._start_worker(config)
 
     # ── Worker lifecycle ───────────────────────────────────────────────────
 
@@ -211,8 +204,13 @@ class MainWindow(QMainWindow):
             self._worker.clear_session()
         self._session_saved = False
 
-    def _auto_save(self) -> None:
-        """Save the current session if it has meaningful content."""
+    def _auto_save(self, skip_title: bool = False) -> None:
+        """Save the current session if it has meaningful content.
+
+        Args:
+            skip_title: When True, skip the synchronous LLM title-generation
+                call (used by closeEvent to avoid blocking the UI).
+        """
         if self._session_saved or not self._worker:
             return
         messages = self._worker.get_messages()
@@ -220,12 +218,14 @@ class MainWindow(QMainWindow):
         has_asst = any(m.get("role") == "assistant" and m.get("content") for m in messages)
         if not (has_user and has_asst):
             return
-        title = generate_title(
-            messages,
-            api_key=self._config.api_key,
-            base_url=self._config.base_url,
-            model=self._config.model,
-        )
+        title = ""
+        if not skip_title:
+            title = generate_title(
+                messages,
+                api_key=self._config.api_key,
+                base_url=self._config.base_url,
+                model=self._config.model,
+            )
         path = save_chat(messages, title=title)
         if path:
             self._status_label.setText(f"Chat saved to {path.name}")
@@ -302,6 +302,6 @@ class MainWindow(QMainWindow):
     # ── Window lifecycle ───────────────────────────────────────────────────
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self._auto_save()
+        self._auto_save(skip_title=True)
         self._cleanup()
         super().closeEvent(event)

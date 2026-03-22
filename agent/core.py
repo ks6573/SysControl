@@ -11,11 +11,14 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from typing import Callable
 
 try:
     import fcntl as fcntl_mod  # noqa: F401 — re-exported for cli.py / server.py
@@ -24,6 +27,7 @@ except ImportError:
     fcntl_mod = None  # type: ignore[assignment]  # noqa: F401
     HAS_FCNTL = False
 
+import openai
 from openai import OpenAI  # noqa: F401 — re-exported for downstream imports
 
 from agent.paths import MEMORY_FILE, PROMPT_PATH, SERVER_PATH  # frozen-app-aware paths
@@ -139,25 +143,27 @@ class MCPClient:
         return resp.get("result", {}).get("tools", [])
 
     def call_tool(self, name: str, arguments: dict | None = None) -> str:
+        """Execute a tool by name and return the text result."""
         resp    = self._send("tools/call", {"name": name, "arguments": arguments or {}})
         content = resp.get("result", {}).get("content", [])
-        return content[0]["text"] if content else str(resp)
+        return content[0].get("text", "") if content else "[no content returned]"
 
     def close(self) -> None:
         """Gracefully shut down the subprocess: close stdin → wait → kill."""
+        pid = self.proc.pid
         try:
             self.proc.stdin.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            sys.stderr.write(f"[syscontrol] MCPClient.close stdin (pid={pid}): {exc}\n")
         try:
             self.proc.terminate()
             self.proc.wait(timeout=2)
-        except Exception:
-            pass
+        except Exception as exc:
+            sys.stderr.write(f"[syscontrol] MCPClient.close terminate (pid={pid}): {exc}\n")
         try:
             self.proc.kill()
         except Exception:
-            pass
+            pass  # expected if already terminated
 
 
 # ── MCP Client Pool ───────────────────────────────────────────────────────────
@@ -352,12 +358,14 @@ def prune_history(messages: list[dict], max_messages: int = MAX_HISTORY_MESSAGES
     if current:
         groups.append(current)
 
+    # Find first group index where cumulative tail count <= max_messages.
     total = sum(len(g) for g in groups)
-    while groups and total > max_messages:
-        total -= len(groups[0])
-        groups.pop(0)
+    cutoff = 0
+    while cutoff < len(groups) and total > max_messages:
+        total -= len(groups[cutoff])
+        cutoff += 1
 
-    return [msg for group in groups for msg in group]
+    return [msg for group in groups[cutoff:] for msg in group]
 
 
 def fetch_ollama_models(base_url: str = "http://localhost:11434") -> list[str]:
@@ -373,7 +381,8 @@ def fetch_ollama_models(base_url: str = "http://localhost:11434") -> list[str]:
         with urllib.request.urlopen(req, timeout=3) as r:
             data = json.loads(r.read().decode())
         return sorted(m["name"] for m in data.get("models", []))
-    except Exception:
+    except Exception as exc:
+        sys.stderr.write(f"[syscontrol] fetch_ollama_models: {exc}\n")
         return []
 
 
@@ -442,3 +451,166 @@ def _apply_inline(text: str) -> str:
     # `code` → magenta
     text = _MD_CODE.sub(_CODE_REPL, text)
     return text
+
+
+# ── Shared streaming agentic loop ─────────────────────────────────────────────
+
+
+@dataclass
+class TurnCallbacks:
+    """Callbacks injected by CLI / GUI to handle presentation during a turn.
+
+    Every callback has a safe no-op default so callers only override what they need.
+    """
+
+    on_token: Callable[[str], None] = field(default=lambda: (lambda _t: None))
+    on_tool_started: Callable[[list[str]], None] = field(default=lambda: (lambda _n: None))
+    on_tool_finished: Callable[[str, str], None] = field(default=lambda: (lambda _n, _r: None))
+    on_error: Callable[[str, str], None] = field(default=lambda: (lambda _c, _m: None))
+
+
+def run_streaming_turn(
+    llm: OpenAI,
+    pool: MCPClientPool,
+    tools: list[dict],
+    system_message: dict,
+    messages: list[dict],
+    model: str,
+    callbacks: TurnCallbacks,
+) -> tuple[str, float]:
+    """Run one user-turn: stream response, execute tool calls, repeat.
+
+    This is the shared core loop used by both the CLI and GUI. Presentation
+    concerns (spinners, colours, Qt signals) are handled by the *callbacks*.
+
+    Args:
+        llm: OpenAI-compatible client.
+        pool: MCP client pool for tool execution.
+        tools: Tool definitions in OpenAI format.
+        system_message: Pre-built ``{"role": "system", ...}`` dict.
+        messages: Mutable conversation history — modified in-place.
+        model: Model identifier string.
+        callbacks: Presentation callbacks.
+
+    Returns:
+        A ``(finish_reason, elapsed_seconds)`` tuple.  *finish_reason* is the
+        last value from the streaming API (``"stop"``, ``"tool_calls"``,
+        ``"length"``, etc.) or ``"error"`` if an exception was raised.
+    """
+    start_time = time.monotonic()
+
+    while True:
+        # Trim history to prevent context-window overflow.
+        messages[:] = prune_history(messages)
+
+        # ── Stream LLM response ───────────────────────────────────────────
+        try:
+            stream = llm.chat.completions.create(
+                model=model,
+                max_tokens=MAX_TOKENS,
+                tools=tools,
+                messages=[system_message] + messages,
+                stream=True,
+            )
+        except openai.APITimeoutError as exc:
+            callbacks.on_error("Timeout", f"LLM request timed out ({exc})")
+            return "error", time.monotonic() - start_time
+        except openai.APIConnectionError as exc:
+            callbacks.on_error("Connection", f"Cannot reach LLM endpoint: {exc}")
+            return "error", time.monotonic() - start_time
+        except openai.AuthenticationError as exc:
+            callbacks.on_error("Auth", f"Invalid API key: {exc}")
+            return "error", time.monotonic() - start_time
+        except openai.APIStatusError as exc:
+            callbacks.on_error("API", f"LLM error {exc.status_code}: {exc.message}")
+            return "error", time.monotonic() - start_time
+        except openai.OpenAIError as exc:
+            callbacks.on_error("LLM", f"LLM error: {exc}")
+            return "error", time.monotonic() - start_time
+
+        # Accumulate streamed content.
+        content_parts: list[str] = []
+        tool_calls: list[dict] = []
+        finish_reason: str | None = None
+
+        for chunk in stream:
+            choice = chunk.choices[0] if chunk.choices else None
+            if choice is None:
+                continue
+            delta = choice.delta
+
+            # Text tokens
+            if delta.content:
+                content_parts.append(delta.content)
+                callbacks.on_token(delta.content)
+
+            # Tool-call fragments (streaming JSON)
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    while len(tool_calls) <= tc.index:
+                        tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
+                    entry = tool_calls[tc.index]
+                    if tc.id:
+                        entry["id"] = tc.id
+                    if tc.function and tc.function.name:
+                        entry["function"]["name"] += tc.function.name
+                    if tc.function and tc.function.arguments:
+                        entry["function"]["arguments"] += tc.function.arguments
+
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+
+        content = "".join(content_parts)
+
+        # ── Handle finish reason ──────────────────────────────────────────
+        if finish_reason in ("stop", None) and not tool_calls:
+            messages.append({"role": "assistant", "content": content})
+            elapsed = time.monotonic() - start_time
+            return finish_reason or "stop", elapsed
+
+        elif finish_reason == "tool_calls":
+            # Record assistant message with tool-call metadata.
+            messages.append({
+                "role": "assistant",
+                "content": content or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            })
+
+            names = [tc["function"]["name"] for tc in tool_calls]
+            callbacks.on_tool_started(names)
+
+            try:
+                results = pool.call_tools_parallel(tool_calls)
+            except RuntimeError as exc:
+                callbacks.on_error("MCP", f"MCP server crashed or closed: {exc}")
+                return "error", time.monotonic() - start_time
+            except Exception as exc:
+                callbacks.on_error("Tool", f"Tool execution failed: {exc}")
+                return "error", time.monotonic() - start_time
+
+            for tc_id, name, result in results:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": result,
+                })
+                callbacks.on_tool_finished(name, result)
+
+            # Continue loop — model will process tool results on next iteration.
+
+        else:
+            # max_tokens, content_filter, etc.
+            messages.append({"role": "assistant", "content": content})
+            elapsed = time.monotonic() - start_time
+            return finish_reason or "unknown", elapsed
+

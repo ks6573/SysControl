@@ -58,7 +58,20 @@ class MessageBubble(QFrame):
         self.setStyleSheet("background: transparent; border: none;")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
-        # ── Text browser ───────────────────────────────────────────────────
+        self._setup_text_browser()
+        self._avatar: QLabel | None = None
+        if not self._is_user:
+            self._setup_avatar()
+        self._render_timer: QTimer | None = None
+        if not self._is_user:
+            self._setup_render_timer()
+        self._copy_btn: QPushButton | None = None
+        if not self._is_user:
+            self._setup_copy_button()
+        self._setup_layout()
+
+    def _setup_text_browser(self) -> None:
+        """Configure the text browser widget with role-specific styling."""
         self._browser = QTextBrowser()
         self._browser.setOpenExternalLinks(True)
         self._browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -71,8 +84,8 @@ class MessageBubble(QFrame):
             self._browser.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
             self._browser.setStyleSheet(f"""
                 QTextBrowser {{
-                    background-color: {palette["user_bubble"]};
-                    color: {palette["user_bubble_text"]};
+                    background-color: {self._palette["user_bubble"]};
+                    color: {self._palette["user_bubble_text"]};
                     border: none;
                     padding: 8px 13px;
                     border-radius: 16px;
@@ -84,59 +97,57 @@ class MessageBubble(QFrame):
             self._browser.setStyleSheet(f"""
                 QTextBrowser {{
                     background: transparent;
-                    color: {palette["asst_bubble_text"]};
+                    color: {self._palette["asst_bubble_text"]};
                     border: none;
                     padding: 2px 0px;
-                    selection-background-color: {palette["accent"]};
+                    selection-background-color: {self._palette["accent"]};
                 }}
             """)
 
-        # ── Avatar (assistant only) ───────────────────────────────────────
-        self._avatar: QLabel | None = None
-        if not self._is_user:
-            self._avatar = QLabel("S")
-            self._avatar.setFixedSize(_AVATAR_SIZE, _AVATAR_SIZE)
-            self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._avatar.setFont(QFont(".AppleSystemUIFont", 13, QFont.Weight.Bold))
-            self._avatar.setStyleSheet(f"""
-                QLabel {{
-                    background-color: {palette["avatar_bg"]};
-                    color: #ffffff;
-                    border-radius: {_AVATAR_SIZE // 2}px;
-                }}
-            """)
+    def _setup_avatar(self) -> None:
+        """Create the assistant avatar circle."""
+        self._avatar = QLabel("S")
+        self._avatar.setFixedSize(_AVATAR_SIZE, _AVATAR_SIZE)
+        self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._avatar.setFont(QFont(".AppleSystemUIFont", 13, QFont.Weight.Bold))
+        self._avatar.setStyleSheet(f"""
+            QLabel {{
+                background-color: {self._palette["avatar_bg"]};
+                color: #ffffff;
+                border-radius: {_AVATAR_SIZE // 2}px;
+            }}
+        """)
 
-        # ── Debounced Markdown renderer (assistant only) ──────────────────
-        self._render_timer: QTimer | None = None
-        if not self._is_user:
-            self._render_timer = QTimer(self)
-            self._render_timer.setSingleShot(True)
-            self._render_timer.setInterval(_RENDER_DEBOUNCE_MS)
-            self._render_timer.timeout.connect(self._render_markdown)
+    def _setup_render_timer(self) -> None:
+        """Create a debounced Markdown render timer (assistant only)."""
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(_RENDER_DEBOUNCE_MS)
+        self._render_timer.timeout.connect(self._render_markdown)
 
-        # ── Copy button (assistant only, shown after finalize) ────────────
-        self._copy_btn: QPushButton | None = None
-        if not self._is_user:
-            self._copy_btn = QPushButton("\U0001f4cb")  # 📋 clipboard icon
-            self._copy_btn.setToolTip("Copy to clipboard")
-            self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self._copy_btn.setFixedSize(28, 28)
-            self._copy_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent;
-                    border: none;
-                    border-radius: 6px;
-                    font-size: 14px;
-                    padding: 0;
-                }}
-                QPushButton:hover {{
-                    background-color: {palette["tool_indicator"]};
-                }}
-            """)
-            self._copy_btn.clicked.connect(self._on_copy)
-            self._copy_btn.hide()
+    def _setup_copy_button(self) -> None:
+        """Create the copy-to-clipboard button (assistant only, hidden until finalize)."""
+        self._copy_btn = QPushButton("\U0001f4cb")  # 📋 clipboard icon
+        self._copy_btn.setToolTip("Copy to clipboard")
+        self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._copy_btn.setFixedSize(28, 28)
+        self._copy_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+                font-size: 14px;
+                padding: 0;
+            }}
+            QPushButton:hover {{
+                background-color: {self._palette["tool_indicator"]};
+            }}
+        """)
+        self._copy_btn.clicked.connect(self._on_copy)
+        self._copy_btn.hide()
 
-        # ── Layout ─────────────────────────────────────────────────────────
+    def _setup_layout(self) -> None:
+        """Assemble the outer layout with avatar, text browser, and action row."""
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)

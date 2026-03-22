@@ -22,16 +22,15 @@ import itertools
 import sys
 import threading
 import time
-import openai
 from openai import OpenAI
 
 from agent.core import (
     BLUE, BOLD, CLOUD_BASE_URL, CLOUD_MODEL, CYAN, DIM, EXIT_PHRASES, GREEN,
     HAS_FCNTL, LOCAL_API_KEY, LOCAL_BASE_URL, LOCAL_MODEL, MAX_TOKENS,
     RESET, SERVER_PATH, YELLOW,
-    MCPClient, MCPClientPool,
+    MCPClient, MCPClientPool, TurnCallbacks,
     _colorize, fcntl_mod, fetch_ollama_models, load_memory, load_system_prompt,
-    mcp_to_openai_tools, prune_history,
+    mcp_to_openai_tools, prune_history, run_streaming_turn,
 )
 from agent.paths import MEMORY_FILE
 
@@ -174,155 +173,78 @@ def run_turn(
     model:          str,
 ) -> None:
     """Run one user-turn: stream response, execute any tool calls, repeat."""
-
-    start_time = time.monotonic()
     spinner = _Spinner()
+    _first_content = True       # tracks whether "Assistant:" header has been printed
+    _pending = ""               # line buffer for colorized output
+    _error_info: list[tuple[str, str]] = []  # captures (category, message) from callback
 
-    while True:
-        # Trim history to prevent context-window overflow on long sessions.
-        messages[:] = prune_history(messages)
+    # ── Callbacks ──────────────────────────────────────────────────────────
 
-        # ── Stream response ────────────────────────────────────────────────
-        # system_message is prepended once; messages already contains history.
-        spinner.start("Thinking…")
-        try:
-            stream = ollama_client.chat.completions.create(
-                model=model,
-                max_tokens=MAX_TOKENS,
-                tools=tools,
-                messages=[system_message] + messages,
-                stream=True,
-            )
-        except openai.APITimeoutError as exc:
+    def _on_token(text: str) -> None:
+        nonlocal _first_content, _pending
+        if _first_content:
             spinner.stop()
-            raise _LLMError(f"LLM request timed out ({exc})") from exc
-        except openai.APIConnectionError as exc:
-            spinner.stop()
-            raise _LLMError(f"Cannot reach LLM endpoint: {exc}") from exc
-        except openai.AuthenticationError as exc:
-            spinner.stop()
-            raise _LLMError(f"Invalid API key: {exc}") from exc
-        except openai.APIStatusError as exc:
-            spinner.stop()
-            raise _LLMError(f"LLM API error {exc.status_code}: {exc.message}") from exc
-        except openai.OpenAIError as exc:
-            spinner.stop()
-            raise _LLMError(f"LLM error: {exc}") from exc
+            sys.stdout.write(f"\n{BOLD}{GREEN}Assistant:{RESET} ")
+            sys.stdout.flush()
+            _first_content = False
+        _pending += text
+        while "\n" in _pending:
+            line, _pending = _pending.split("\n", 1)
+            print(_colorize(line), flush=True)
 
-        # Use a fragment list to avoid O(n²) string copies during streaming.
-        content_parts: list[str] = []
-        tool_calls:    list[dict] = []  # {id, function: {name, arguments}}
-        finish_reason: str | None = None
-        _first_content = True   # used to defer "Assistant: " header until first token
-
-        # Line buffer: accumulate partial lines so colorization applies to
-        # complete lines (markers rarely split across a line boundary).
-        _pending = ""
-
-        for chunk in stream:
-            choice = chunk.choices[0] if chunk.choices else None
-            if choice is None:
-                continue
-            delta = choice.delta
-
-            # Stream text tokens — buffer by line, colorize on newline.
-            if delta.content:
-                if _first_content:
-                    spinner.stop()
-                    sys.stdout.write(f"\n{BOLD}{GREEN}Assistant:{RESET} ")
-                    sys.stdout.flush()
-                    _first_content = False
-                content_parts.append(delta.content)
-                _pending += delta.content
-                while "\n" in _pending:
-                    line, _pending = _pending.split("\n", 1)
-                    print(_colorize(line), flush=True)
-
-            # Accumulate streaming tool-call fragments
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    while len(tool_calls) <= tc.index:
-                        tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
-                    entry = tool_calls[tc.index]
-                    if tc.id:
-                        entry["id"] = tc.id
-                    if tc.function and tc.function.name:
-                        entry["function"]["name"] += tc.function.name
-                    if tc.function and tc.function.arguments:
-                        entry["function"]["arguments"] += tc.function.arguments
-
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-
-        # Flush any partial last line (no trailing newline from model).
-        if _pending:
-            print(_colorize(_pending), end="", flush=True)
-            _pending = ""
-
-        # Stop spinner in case the model produced only tool calls (no text).
+    def _on_tool_started(names: list[str]) -> None:
+        nonlocal _first_content
+        # Stop spinner if it's still running from the thinking phase
         if _first_content:
             spinner.stop()
             _first_content = False
+        n = len(names)
+        label = names[0] + (f" +{n - 1} more" if n > 1 else "")
+        spinner.start(f"Running {label}…")
 
-        content = "".join(content_parts)
+    def _on_tool_finished(_name: str, _result: str) -> None:
+        spinner.stop()
 
-        # ── Handle finish reason ───────────────────────────────────────────
-        # Some models emit finish_reason=None on the last chunk; treat as "stop"
-        if finish_reason in ("stop", None) and not tool_calls:
-            messages.append({"role": "assistant", "content": content})
-            print()   # final newline
-            elapsed = time.monotonic() - start_time
-            print(f"{DIM}  thought for {elapsed:.1f}s{RESET}")
-            break
+    def _on_error(category: str, message: str) -> None:
+        spinner.stop()
+        _error_info.append((category, message))
 
-        elif finish_reason == "tool_calls":
-            # Add the assistant turn with tool-call metadata
-            messages.append({
-                "role":    "assistant",
-                "content": content or None,
-                "tool_calls": [
-                    {
-                        "id":   tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name":      tc["function"]["name"],
-                            "arguments": tc["function"]["arguments"],
-                        },
-                    }
-                    for tc in tool_calls
-                ],
-            })
+    callbacks = TurnCallbacks(
+        on_token=_on_token,
+        on_tool_started=_on_tool_started,
+        on_tool_finished=_on_tool_finished,
+        on_error=_on_error,
+    )
 
-            # ── Execute tool calls in parallel ─────────────────────────────
-            n = len(tool_calls)
-            label = tool_calls[0]["function"]["name"] + (f" +{n - 1} more" if n > 1 else "")
-            spinner.start(f"Running {label}…")
-            try:
-                results = pool.call_tools_parallel(tool_calls)
-            except RuntimeError as exc:
-                spinner.stop()
-                raise _MCPError(f"MCP server crashed or closed: {exc}") from exc
-            except Exception as exc:
-                spinner.stop()
-                raise _ToolError(f"Tool execution failed: {exc}") from exc
-            spinner.stop()
+    # ── Start spinner and delegate to the shared loop ──────────────────────
+    spinner.start("Thinking…")
 
-            for tc_id, _name, result in results:
-                messages.append({
-                    "role":        "tool",
-                    "tool_call_id": tc_id,
-                    "content":     result,
-                })
+    finish_reason, elapsed = run_streaming_turn(
+        ollama_client, pool, tools, system_message, messages, model, callbacks,
+    )
 
-            # Continue loop — next iteration's spinner + first-content guard
-            # will handle the "Assistant: " header.
+    # Flush any partial last line.
+    if _pending:
+        print(_colorize(_pending), end="", flush=True)
 
+    # If the shared loop reported an error via callback, raise typed exceptions
+    # so the REPL can display appropriate user-facing messages.
+    if _error_info:
+        cat, msg = _error_info[0]
+        if cat in ("Timeout", "Connection", "Auth", "API", "LLM"):
+            raise _LLMError(msg)
+        elif cat == "MCP":
+            raise _MCPError(msg)
         else:
-            # max_tokens, content_filter, etc.
-            messages.append({"role": "assistant", "content": content})
-            elapsed = time.monotonic() - start_time
+            raise _ToolError(msg)
+
+    # Normal stop — print elapsed time.
+    if finish_reason in ("stop", "length", "content_filter", "unknown"):
+        if finish_reason == "stop":
+            print()  # final newline
+            print(f"{DIM}  thought for {elapsed:.1f}s{RESET}")
+        else:
             print(f"\n{DIM}[stopped: {finish_reason}] thought for {elapsed:.1f}s{RESET}")
-            break
 
 
 def _pick_model(models: list[str]) -> str:
@@ -441,31 +363,24 @@ def select_provider(args: argparse.Namespace) -> tuple[str, str, str, str]:
 
 # ── Main REPL ─────────────────────────────────────────────────────────────────
 
-def main() -> None:
-    args = parse_args()
-    print_banner()
+def _init_mcp_and_prompt() -> tuple[MCPClient, str]:
+    """Start MCP server and load system prompt in parallel.
 
-    if not SERVER_PATH.exists():
-        print(f"mcp/server.py not found at {SERVER_PATH}", file=sys.stderr)
-        sys.exit(1)
-
-    api_key, base_url, model, provider_label = select_provider(args)
-
-    print(f"\n{DIM}Connecting to system monitor backend…{RESET}", end="", flush=True)
-
-    # ── Parallel startup: MCP init + prompt load ───────────────────────────
+    Returns:
+        A ``(mcp_client, system_prompt)`` tuple. Exits the process on failure.
+    """
     mcp_client:    MCPClient | None = None
     system_prompt: str | None       = None
     startup_error: Exception | None = None
 
-    def _start_mcp():
+    def _start_mcp() -> None:
         nonlocal mcp_client, startup_error
         try:
             mcp_client = MCPClient()
         except Exception as exc:
             startup_error = exc
 
-    def _load_prompt():
+    def _load_prompt() -> None:
         nonlocal system_prompt
         system_prompt = load_system_prompt()
 
@@ -480,7 +395,75 @@ def main() -> None:
         print(f"\nFailed to start MCP server: {startup_error}", file=sys.stderr)
         sys.exit(1)
 
-    assert mcp_client is not None, "MCP client must be initialised after startup"
+    assert mcp_client is not None
+    assert system_prompt is not None
+    return mcp_client, system_prompt
+
+
+def _repl_loop(
+    ollama_client: OpenAI,
+    pool: MCPClientPool,
+    tools: list[dict],
+    system_message: dict,
+    model: str,
+    provider_label: str,
+) -> None:
+    """Interactive read-eval-print loop for the CLI agent."""
+    print(f"\r{GREEN}✓{RESET} Connected — {len(tools)} tools available. {DIM}[{provider_label}  ·  {model}]{RESET}")
+    print(f"{DIM}  Type your question, or 'exit' / 'bye' / 'goodbye' to quit.{RESET}\n")
+
+    messages: list[dict] = []
+
+    while True:
+        try:
+            user_input = input(f"{BOLD}{BLUE}You:{RESET} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{DIM}Goodbye!{RESET}")
+            offer_memory_save(messages)
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.lower() in EXIT_PHRASES:
+            print(f"{DIM}Goodbye!{RESET}")
+            offer_memory_save(messages)
+            break
+
+        messages.append({"role": "user", "content": user_input})
+
+        try:
+            run_turn(ollama_client, pool, tools, system_message, messages, model)
+        except _LLMError as e:
+            print(f"\n{YELLOW}LLM error: {e}{RESET}")
+            print(f"{DIM}  Check your API key or network connection, then try again.{RESET}")
+        except _MCPError as e:
+            print(f"\n{YELLOW}MCP server error: {e}{RESET}")
+            print(f"{DIM}  The system monitor backend crashed — restarting is recommended.{RESET}")
+            break
+        except _ToolError as e:
+            print(f"\n{YELLOW}Tool error: {e}{RESET}")
+            print(f"{DIM}  The tool failed but the session is intact — try again.{RESET}")
+        except Exception as e:
+            print(f"\n{YELLOW}Unexpected error: {e}{RESET}")
+
+        print()   # blank line between turns
+
+
+def main() -> None:
+    """CLI entry point."""
+    args = parse_args()
+    print_banner()
+
+    if not SERVER_PATH.exists():
+        print(f"mcp/server.py not found at {SERVER_PATH}", file=sys.stderr)
+        sys.exit(1)
+
+    api_key, base_url, model, provider_label = select_provider(args)
+
+    print(f"\n{DIM}Connecting to system monitor backend…{RESET}", end="", flush=True)
+
+    mcp_client, system_prompt = _init_mcp_and_prompt()
     pool = MCPClientPool(mcp_client)
 
     try:
@@ -505,48 +488,10 @@ def main() -> None:
                 "Call `append_memory_note` to save a key fact mid-session without waiting for exit."
             )
 
-        system_message = {"role": "system", "content": full_system}   # built once
+        system_message = {"role": "system", "content": full_system}
         ollama_client  = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
 
-        print(f"\r{GREEN}✓{RESET} Connected — {len(tools)} tools available. {DIM}[{provider_label}  ·  {model}]{RESET}")
-        print(f"{DIM}  Type your question, or 'exit' / 'bye' / 'goodbye' to quit.{RESET}\n")
-
-        messages: list[dict] = []
-
-        while True:
-            try:
-                user_input = input(f"{BOLD}{BLUE}You:{RESET} ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print(f"\n{DIM}Goodbye!{RESET}")
-                offer_memory_save(messages)
-                break
-
-            if not user_input:
-                continue
-
-            if user_input.lower() in EXIT_PHRASES:
-                print(f"{DIM}Goodbye!{RESET}")
-                offer_memory_save(messages)
-                break
-
-            messages.append({"role": "user", "content": user_input})
-
-            try:
-                run_turn(ollama_client, pool, tools, system_message, messages, model)
-            except _LLMError as e:
-                print(f"\n{YELLOW}LLM error: {e}{RESET}")
-                print(f"{DIM}  Check your API key or network connection, then try again.{RESET}")
-            except _MCPError as e:
-                print(f"\n{YELLOW}MCP server error: {e}{RESET}")
-                print(f"{DIM}  The system monitor backend crashed — restarting is recommended.{RESET}")
-                break
-            except _ToolError as e:
-                print(f"\n{YELLOW}Tool error: {e}{RESET}")
-                print(f"{DIM}  The tool failed but the session is intact — try again.{RESET}")
-            except Exception as e:
-                print(f"\n{YELLOW}Unexpected error: {e}{RESET}")
-
-            print()   # blank line between turns
+        _repl_loop(ollama_client, pool, tools, system_message, model, provider_label)
 
     finally:
         pool.close_all()
@@ -554,3 +499,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

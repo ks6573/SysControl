@@ -11,25 +11,23 @@ and agent/remote.py:run_agent, but emits signals instead of printing to stdout.
 
 from __future__ import annotations
 
-import json
 import queue
+import threading
 import time
 from dataclasses import dataclass
 
-import openai
 from openai import OpenAI
 from PySide6.QtCore import QObject, QThread, Signal
 
 from agent.core import (
-    LOCAL_API_KEY,
-    LOCAL_BASE_URL,
     MAX_TOKENS,
     MCPClient,
     MCPClientPool,
+    TurnCallbacks,
     load_memory,
     load_system_prompt,
     mcp_to_openai_tools,
-    prune_history,
+    run_streaming_turn,
 )
 
 
@@ -59,11 +57,12 @@ class AgentWorker(QThread):
     error_occurred = Signal(str, str)    # category, message
     ready          = Signal(int, str, str)  # tool_count, provider_label, model
 
-    def __init__(self, config: ProviderConfig, parent: QObject | None = None):
+    def __init__(self, config: ProviderConfig, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._config = config
         self._queue: queue.Queue = queue.Queue()
         self._messages: list[dict] = []
+        self._msg_lock = threading.Lock()  # CR-4: protects _messages across threads
         self._pool: MCPClientPool | None = None
         self._tools: list[dict] = []
         self._system_message: dict = {}
@@ -88,8 +87,10 @@ class AgentWorker(QThread):
         """Return a snapshot of the current message history.
 
         Called from the main thread when the worker is idle (between turns).
+        Thread-safe via _msg_lock.
         """
-        return list(self._messages)
+        with self._msg_lock:
+            return list(self._messages)
 
     # ── QThread entry point ────────────────────────────────────────────────
 
@@ -110,11 +111,13 @@ class AgentWorker(QThread):
             if item is _SHUTDOWN:
                 break
             if item is _CLEAR_SESSION:
-                self._messages.clear()
+                with self._msg_lock:
+                    self._messages.clear()
                 continue
 
             text = str(item)
-            self._messages.append({"role": "user", "content": text})
+            with self._msg_lock:
+                self._messages.append({"role": "user", "content": text})
 
             try:
                 self._run_turn()
@@ -165,131 +168,22 @@ class AgentWorker(QThread):
     # ── Streaming agentic loop ─────────────────────────────────────────────
 
     def _run_turn(self) -> None:
-        """
-        One complete user turn: stream response, execute tool calls, repeat.
-        Modeled after cli.py:run_turn (L225-382).
-        """
+        """One complete user turn — delegates to the shared streaming loop."""
         assert self._pool is not None, "MCP pool must be initialised before running turns"
         assert self._llm is not None, "LLM client must be initialised before running turns"
-        start_time = time.monotonic()
 
-        while True:
-            # Prune history
-            self._messages[:] = prune_history(self._messages)
+        callbacks = TurnCallbacks(
+            on_token=lambda text: self.token_received.emit(text),
+            on_tool_started=lambda names: self.tool_started.emit(names),
+            on_tool_finished=lambda name, result: self.tool_finished.emit(name, result),
+            on_error=lambda cat, msg: self.error_occurred.emit(cat, msg),
+        )
 
-            # ── Stream LLM response ───────────────────────────────────────
-            try:
-                stream = self._llm.chat.completions.create(
-                    model=self._config.model,
-                    max_tokens=MAX_TOKENS,
-                    tools=self._tools,
-                    messages=[self._system_message] + self._messages,
-                    stream=True,
-                )
-            except openai.APITimeoutError as exc:
-                self.error_occurred.emit("Timeout", f"LLM request timed out ({exc})")
-                return
-            except openai.APIConnectionError as exc:
-                self.error_occurred.emit("Connection", f"Cannot reach LLM endpoint: {exc}")
-                return
-            except openai.AuthenticationError as exc:
-                self.error_occurred.emit("Auth", f"Invalid API key: {exc}")
-                return
-            except openai.APIStatusError as exc:
-                self.error_occurred.emit("API", f"LLM error {exc.status_code}: {exc.message}")
-                return
-            except openai.OpenAIError as exc:
-                self.error_occurred.emit("LLM", f"LLM error: {exc}")
-                return
+        finish_reason, elapsed = run_streaming_turn(
+            self._llm, self._pool, self._tools,
+            self._system_message, self._messages,
+            self._config.model, callbacks,
+        )
 
-            # Accumulate streamed content
-            content_parts: list[str] = []
-            tool_calls: list[dict] = []
-            finish_reason: str | None = None
-
-            for chunk in stream:
-                choice = chunk.choices[0] if chunk.choices else None
-                if choice is None:
-                    continue
-                delta = choice.delta
-
-                # Text tokens
-                if delta.content:
-                    content_parts.append(delta.content)
-                    self.token_received.emit(delta.content)
-
-                # Tool call fragments (streaming JSON)
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        while len(tool_calls) <= tc.index:
-                            tool_calls.append({
-                                "id": "",
-                                "function": {"name": "", "arguments": ""},
-                            })
-                        entry = tool_calls[tc.index]
-                        if tc.id:
-                            entry["id"] = tc.id
-                        if tc.function and tc.function.name:
-                            entry["function"]["name"] += tc.function.name
-                        if tc.function and tc.function.arguments:
-                            entry["function"]["arguments"] += tc.function.arguments
-
-                if choice.finish_reason:
-                    finish_reason = choice.finish_reason
-
-            content = "".join(content_parts)
-
-            # ── Handle finish reason ──────────────────────────────────────
-            if finish_reason in ("stop", None) and not tool_calls:
-                self._messages.append({"role": "assistant", "content": content})
-                elapsed = time.monotonic() - start_time
-                self.turn_finished.emit(elapsed)
-                break
-
-            elif finish_reason == "tool_calls":
-                # Record assistant message with tool call metadata
-                self._messages.append({
-                    "role": "assistant",
-                    "content": content or None,
-                    "tool_calls": [
-                        {
-                            "id":   tc["id"],
-                            "type": "function",
-                            "function": {
-                                "name":      tc["function"]["name"],
-                                "arguments": tc["function"]["arguments"],
-                            },
-                        }
-                        for tc in tool_calls
-                    ],
-                })
-
-                # Execute tools in parallel
-                names = [tc["function"]["name"] for tc in tool_calls]
-                self.tool_started.emit(names)
-
-                try:
-                    results = self._pool.call_tools_parallel(tool_calls)
-                except RuntimeError as exc:
-                    self.error_occurred.emit("MCP", f"MCP server crashed: {exc}")
-                    return
-                except Exception as exc:
-                    self.error_occurred.emit("Tool", f"Tool execution failed: {exc}")
-                    return
-
-                for tc_id, name, result in results:
-                    self._messages.append({
-                        "role":         "tool",
-                        "tool_call_id": tc_id,
-                        "content":      result,
-                    })
-                    self.tool_finished.emit(name, result)
-
-                # Loop — model will process tool results on next iteration
-
-            else:
-                # max_tokens, content_filter, etc.
-                self._messages.append({"role": "assistant", "content": content})
-                elapsed = time.monotonic() - start_time
-                self.turn_finished.emit(elapsed)
-                break
+        if finish_reason != "error":
+            self.turn_finished.emit(elapsed)

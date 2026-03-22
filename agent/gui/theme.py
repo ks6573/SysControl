@@ -5,6 +5,7 @@ Detects macOS dark/light mode and provides matching Qt Style Sheets.
 """
 
 import subprocess
+import sys
 
 
 def is_dark_mode() -> bool:
@@ -15,8 +16,9 @@ def is_dark_mode() -> bool:
             capture_output=True, text=True, timeout=2,
         )
         return result.stdout.strip().lower() == "dark"
-    except Exception:
-        return True
+    except Exception as exc:
+        sys.stderr.write(f"[syscontrol] is_dark_mode detection failed: {exc}\n")
+        return True  # default to dark
 
 
 # ── Color palettes ────────────────────────────────────────────────────────────
