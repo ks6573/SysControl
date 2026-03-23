@@ -22,6 +22,8 @@ import itertools
 import sys
 import threading
 import time
+from typing import NamedTuple
+
 from openai import OpenAI
 
 from agent.core import (
@@ -29,7 +31,7 @@ from agent.core import (
     HAS_FCNTL, LOCAL_API_KEY, LOCAL_BASE_URL, LOCAL_MODEL, MAX_TOKENS,
     RESET, SERVER_PATH, YELLOW,
     MCPClient, MCPClientPool, TurnCallbacks,
-    _colorize, fcntl_mod, fetch_ollama_models, load_memory, load_system_prompt,
+    colorize, fcntl_mod, fetch_ollama_models, load_memory, load_system_prompt,
     mcp_to_openai_tools, prune_history, run_streaming_turn,
 )
 from agent.paths import MEMORY_FILE
@@ -100,6 +102,7 @@ def _append_memory_note(note: str) -> None:
 # ── Banner ────────────────────────────────────────────────────────────────────
 
 def print_banner() -> None:
+    """Print the startup banner and memory-file status to stdout."""
     print(f"\n{BOLD}{CYAN}┌─────────────────────────────────────────────────────┐")
     print(f"│               SysControl Agent                      │")
     print(f"│     Your AI system monitoring assistant             │")
@@ -164,40 +167,52 @@ class _Spinner:
 
 # ── Agentic Loop ──────────────────────────────────────────────────────────────
 
-def run_turn(
-    ollama_client:  OpenAI,
-    pool:           MCPClientPool,
-    tools:          list[dict],
-    system_message: dict,          # pre-built {"role": "system", "content": ...}
-    messages:       list[dict],
-    model:          str,
-) -> None:
-    """Run one user-turn: stream response, execute any tool calls, repeat."""
-    spinner = _Spinner()
-    _first_content = True       # tracks whether "Assistant:" header has been printed
-    _pending = ""               # line buffer for colorized output
-    _error_info: list[tuple[str, str]] = []  # captures (category, message) from callback
+_MAX_PENDING = 8192  # flush the line buffer if no newline arrives within this many chars
 
-    # ── Callbacks ──────────────────────────────────────────────────────────
+
+def _build_cli_callbacks(
+    spinner: _Spinner,
+) -> tuple[TurnCallbacks, list[str]]:
+    """Build CLI-specific presentation callbacks for a single turn.
+
+    Args:
+        spinner: Terminal spinner instance managed by the caller.
+
+    Returns:
+        A ``(callbacks, pending_buf)`` tuple.  *pending_buf* is a
+        single-element list used as a mutable string ref so the caller
+        can flush any trailing partial line after the turn completes.
+        If an error occurs, callbacks raise immediately via the captured
+        *error* slot (a single-element list of ``(category, message)``
+        or empty).
+    """
+    first_content = [True]  # mutable flag — avoids nonlocal across closures
+    pending = [""]          # line buffer for colorized output
+    error: list[tuple[str, str]] = []
 
     def _on_token(text: str) -> None:
-        nonlocal _first_content, _pending
-        if _first_content:
+        if first_content[0]:
             spinner.stop()
             sys.stdout.write(f"\n{BOLD}{GREEN}Assistant:{RESET} ")
             sys.stdout.flush()
-            _first_content = False
-        _pending += text
-        while "\n" in _pending:
-            line, _pending = _pending.split("\n", 1)
-            print(_colorize(line), flush=True)
+            first_content[0] = False
+
+        pending[0] += text
+
+        # Flush complete lines through the colorizer.
+        while "\n" in pending[0]:
+            line, pending[0] = pending[0].split("\n", 1)
+            print(colorize(line), flush=True)
+
+        # CR-6: guard against unbounded buffer (e.g. base64 blobs with no newlines).
+        if len(pending[0]) > _MAX_PENDING:
+            print(colorize(pending[0]), flush=True)
+            pending[0] = ""
 
     def _on_tool_started(names: list[str]) -> None:
-        nonlocal _first_content
-        # Stop spinner if it's still running from the thinking phase
-        if _first_content:
+        if first_content[0]:
             spinner.stop()
-            _first_content = False
+            first_content[0] = False
         n = len(names)
         label = names[0] + (f" +{n - 1} more" if n > 1 else "")
         spinner.start(f"Running {label}…")
@@ -207,7 +222,8 @@ def run_turn(
 
     def _on_error(category: str, message: str) -> None:
         spinner.stop()
-        _error_info.append((category, message))
+        if not error:  # keep only the first error
+            error.append((category, message))
 
     callbacks = TurnCallbacks(
         on_token=_on_token,
@@ -215,8 +231,38 @@ def run_turn(
         on_tool_finished=_on_tool_finished,
         on_error=_on_error,
     )
+    # Attach error slot so the caller can inspect it after the turn.
+    callbacks._error = error  # type: ignore[attr-defined]
 
-    # ── Start spinner and delegate to the shared loop ──────────────────────
+    return callbacks, pending
+
+
+def run_turn(
+    ollama_client: OpenAI,
+    pool: MCPClientPool,
+    tools: list[dict],
+    system_message: dict,
+    messages: list[dict],
+    model: str,
+) -> None:
+    """Execute one user turn: stream the LLM response and run tool calls.
+
+    Args:
+        ollama_client: OpenAI-compatible LLM client.
+        pool: MCP client pool for parallel tool execution.
+        tools: Tool definitions in OpenAI format.
+        system_message: Pre-built ``{"role": "system", ...}`` dict.
+        messages: Mutable conversation history — modified in-place.
+        model: Model identifier string.
+
+    Raises:
+        _LLMError: On API/auth/connection/timeout errors.
+        _MCPError: On MCP subprocess crash.
+        _ToolError: On tool execution failure.
+    """
+    spinner = _Spinner()
+    callbacks, pending = _build_cli_callbacks(spinner)
+
     spinner.start("Thinking…")
 
     finish_reason, elapsed = run_streaming_turn(
@@ -224,14 +270,15 @@ def run_turn(
     )
 
     # Flush any partial last line.
-    if _pending:
-        print(_colorize(_pending), end="", flush=True)
+    if pending[0]:
+        print(colorize(pending[0]), end="", flush=True)
 
-    # If the shared loop reported an error via callback, raise typed exceptions
-    # so the REPL can display appropriate user-facing messages.
-    if _error_info:
-        cat, msg = _error_info[0]
-        if cat in ("Timeout", "Connection", "Auth", "API", "LLM"):
+    # If the shared loop reported an error, raise a typed exception
+    # so the REPL can display appropriate user-facing recovery guidance.
+    error = callbacks._error  # type: ignore[attr-defined]
+    if error:
+        cat, msg = error[0]
+        if cat in ("Timeout", "Connection", "Auth", "API", "LLM", "Loop"):
             raise _LLMError(msg)
         elif cat == "MCP":
             raise _MCPError(msg)
@@ -248,7 +295,15 @@ def run_turn(
 
 
 def _pick_model(models: list[str]) -> str:
-    """Present a numbered list of models and return the user's choice."""
+    """Present a numbered list of Ollama models and return the user's choice.
+
+    Args:
+        models: Non-empty list of model name strings.
+
+    Returns:
+        The selected model name.  Exits the process on EOF/interrupt.
+    """
+    assert models, "Cannot pick from an empty model list"
     print(f"\n{BOLD}Available local models:{RESET}")
     for i, name in enumerate(models, 1):
         print(f"  {CYAN}{i}{RESET}) {name}")
@@ -259,8 +314,10 @@ def _pick_model(models: list[str]) -> str:
         except (EOFError, KeyboardInterrupt):
             print(f"\n{DIM}Goodbye!{RESET}")
             sys.exit(0)
-        if raw.isdigit() and 1 <= int(raw) <= len(models):
-            return models[int(raw) - 1]
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(models):
+                return models[idx - 1]
         if raw in models:
             return raw
         print(f"{YELLOW}Please enter a number between 1 and {len(models)}:{RESET} ", end="", flush=True)
@@ -306,30 +363,52 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def select_provider(args: argparse.Namespace) -> tuple[str, str, str, str]:
+class ProviderSelection(NamedTuple):
+    """Result of provider selection — named fields prevent field-order bugs."""
+
+    api_key: str
+    base_url: str
+    model: str
+    label: str
+
+
+def _prompt_cloud_api_key() -> str:
+    """Interactively prompt for the Ollama cloud API key.
+
+    Returns:
+        The non-empty API key string.  Exits the process on EOF/interrupt
+        or if the user provides an empty key.
     """
-    Return (api_key, base_url, model, label).
-    Prefers CLI flags; falls back to interactive prompts.
+    try:
+        api_key = getpass.getpass(f"{BOLD}Ollama API key:{RESET} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n{DIM}Goodbye!{RESET}")
+        sys.exit(0)
+    if not api_key:
+        print(f"{YELLOW}⚠  API key cannot be empty.{RESET}")
+        sys.exit(1)
+    return api_key
+
+
+def select_provider(args: argparse.Namespace) -> ProviderSelection:
+    """Resolve the LLM provider from CLI flags or interactive prompts.
+
+    Args:
+        args: Parsed CLI arguments (may contain provider, model, api_key).
+
+    Returns:
+        A ``ProviderSelection`` with api_key, base_url, model, and label.
     """
     # ── Cloud ──────────────────────────────────────────────────────────────
     if args.provider == "cloud":
-        api_key = args.api_key or ""
-        if not api_key:
-            try:
-                api_key = getpass.getpass(f"{BOLD}Ollama API key:{RESET} ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print(f"\n{DIM}Goodbye!{RESET}")
-                sys.exit(0)
-        if not api_key:
-            print(f"{YELLOW}⚠  API key cannot be empty.{RESET}")
-            sys.exit(1)
+        api_key = args.api_key or _prompt_cloud_api_key()
         model = args.model or CLOUD_MODEL
-        return api_key, CLOUD_BASE_URL, model, "☁  Cloud"
+        return ProviderSelection(api_key, CLOUD_BASE_URL, model, "☁  Cloud")
 
     # ── Local ──────────────────────────────────────────────────────────────
     if args.provider == "local":
         model = args.model or _resolve_local_model()
-        return LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)"
+        return ProviderSelection(LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)")
 
     # ── Interactive fallback ───────────────────────────────────────────────
     print(f"\n{BOLD}Select AI model (type {CYAN}cloud{RESET}{BOLD} or {CYAN}local{RESET}{BOLD}):{RESET} ", end="", flush=True)
@@ -341,21 +420,13 @@ def select_provider(args: argparse.Namespace) -> tuple[str, str, str, str]:
             sys.exit(0)
 
         if choice == "cloud":
-            try:
-                api_key = getpass.getpass(f"{BOLD}Ollama API key:{RESET} ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print(f"\n{DIM}Goodbye!{RESET}")
-                sys.exit(0)
-            if not api_key:
-                print(f"{YELLOW}⚠  API key cannot be empty. Please try again.{RESET}")
-                print(f"{BOLD}Select AI model (type {CYAN}cloud{RESET}{BOLD} or {CYAN}local{RESET}{BOLD}):{RESET} ", end="", flush=True)
-                continue
+            api_key = _prompt_cloud_api_key()
             model = args.model or CLOUD_MODEL
-            return api_key, CLOUD_BASE_URL, model, "☁  Cloud"
+            return ProviderSelection(api_key, CLOUD_BASE_URL, model, "☁  Cloud")
 
         elif choice == "local":
             model = args.model or _resolve_local_model()
-            return LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)"
+            return ProviderSelection(LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)")
 
         else:
             print(f"{YELLOW}Please type 'cloud' or 'local':{RESET} ", end="", flush=True)
@@ -369,8 +440,8 @@ def _init_mcp_and_prompt() -> tuple[MCPClient, str]:
     Returns:
         A ``(mcp_client, system_prompt)`` tuple. Exits the process on failure.
     """
-    mcp_client:    MCPClient | None = None
-    system_prompt: str | None       = None
+    mcp_client: MCPClient | None = None
+    system_prompt: str | None = None
     startup_error: Exception | None = None
 
     def _start_mcp() -> None:
@@ -384,8 +455,8 @@ def _init_mcp_and_prompt() -> tuple[MCPClient, str]:
         nonlocal system_prompt
         system_prompt = load_system_prompt()
 
-    t_mcp    = threading.Thread(target=_start_mcp,    daemon=True)
-    t_prompt = threading.Thread(target=_load_prompt,  daemon=True)
+    t_mcp = threading.Thread(target=_start_mcp, daemon=True)
+    t_prompt = threading.Thread(target=_load_prompt, daemon=True)
     t_mcp.start()
     t_prompt.start()
     t_mcp.join()
@@ -408,7 +479,16 @@ def _repl_loop(
     model: str,
     provider_label: str,
 ) -> None:
-    """Interactive read-eval-print loop for the CLI agent."""
+    """Interactive read-eval-print loop for the CLI agent.
+
+    Args:
+        ollama_client: OpenAI-compatible LLM client.
+        pool: MCP client pool for tool execution.
+        tools: Tool definitions in OpenAI format.
+        system_message: Pre-built system message dict.
+        model: Model identifier string.
+        provider_label: Human-readable provider name for the status line.
+    """
     print(f"\r{GREEN}✓{RESET} Connected — {len(tools)} tools available. {DIM}[{provider_label}  ·  {model}]{RESET}")
     print(f"{DIM}  Type your question, or 'exit' / 'bye' / 'goodbye' to quit.{RESET}\n")
 
@@ -468,7 +548,7 @@ def main() -> None:
 
     try:
         mcp_tools = mcp_client.list_tools()
-        tools     = mcp_to_openai_tools(mcp_tools)
+        tools = mcp_to_openai_tools(mcp_tools)
 
         # Inject available tool names so the model can answer introspection questions
         tool_names = [t["function"]["name"] for t in tools]
@@ -489,7 +569,7 @@ def main() -> None:
             )
 
         system_message = {"role": "system", "content": full_system}
-        ollama_client  = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+        ollama_client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
 
         _repl_loop(ollama_client, pool, tools, system_message, model, provider_label)
 

@@ -47,6 +47,7 @@ MAX_HISTORY_MESSAGES = 40  # ~20 user turns; keeps context within model limits
 MAX_TOKENS         = 16384
 POOL_SIZE          = 4          # max parallel MCP worker processes
 MAX_PARALLEL_TOOLS = POOL_SIZE  # batch size capped to pool capacity
+MAX_TOOL_ROUNDS    = 15         # circuit-breaker for runaway tool-call loops
 
 # ── Provider config ───────────────────────────────────────────────────────────
 
@@ -74,7 +75,7 @@ MAGENTA = "\033[35m" if _USE_COLOR else ""   # used for inline code
 class MCPClient:
     """Minimal JSON-RPC client that talks to mcp/server.py over stdio."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         # In a frozen PyInstaller bundle sys.executable is the app binary,
         # not a Python interpreter.  Re-invoke ourselves with a flag so the
         # main entry-point can dispatch to the MCP server.
@@ -127,8 +128,15 @@ class MCPClient:
     def _notify(self, method: str) -> None:
         with self._lock:
             msg = {"jsonrpc": "2.0", "method": method}
-            self.proc.stdin.write(json.dumps(msg) + "\n")
-            self.proc.stdin.flush()
+            try:
+                self.proc.stdin.write(json.dumps(msg) + "\n")
+                self.proc.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                err = (self.proc.stderr.read() if self.proc.stderr else "").strip()
+                raise RuntimeError(
+                    f"MCP server crashed during notification '{method}'."
+                    f"{(' Server error: ' + err) if err else ''}"
+                ) from exc
 
     def _initialize(self) -> None:
         self._send("initialize", {
@@ -398,7 +406,7 @@ _MD_NUMBERED = re.compile(r"^(\s*)(\d+)\.\s+")
 _MD_HR       = re.compile(r"^[-=_]{3,}\s*$")
 
 
-def _colorize(line: str) -> str:
+def colorize(line: str) -> str:
     """
     Convert one line of markdown to ANSI-coloured plain text.
     Markers are consumed; only the coloured content is printed.
@@ -499,7 +507,7 @@ def run_streaming_turn(
     """
     start_time = time.monotonic()
 
-    while True:
+    for _round in range(MAX_TOOL_ROUNDS):
         # Trim history to prevent context-window overflow.
         messages[:] = prune_history(messages)
 
@@ -613,4 +621,11 @@ def run_streaming_turn(
             messages.append({"role": "assistant", "content": content})
             elapsed = time.monotonic() - start_time
             return finish_reason or "unknown", elapsed
+
+    # for/else: loop exhausted MAX_TOOL_ROUNDS without a terminal finish_reason.
+    else:
+        callbacks.on_error(
+            "Loop", f"Exceeded {MAX_TOOL_ROUNDS} tool-call rounds — aborting turn"
+        )
+        return "error", time.monotonic() - start_time
 
