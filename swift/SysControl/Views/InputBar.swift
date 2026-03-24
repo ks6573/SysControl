@@ -17,7 +17,6 @@ struct InputBar: View {
                         .foregroundStyle(.tertiary)
                         .font(.system(size: 14))
                         .padding(.leading, 5)
-                        .padding(.top, 8)
                         .allowsHitTesting(false)
                 }
 

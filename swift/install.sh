@@ -32,6 +32,11 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         echo "  $DEST not found — skipping"
     fi
 
+    if [ -f "$HOME/.local/bin/syscontrol-update" ]; then
+        rm -f "$HOME/.local/bin/syscontrol-update"
+        echo "✓ Removed syscontrol-update"
+    fi
+
     echo ""
     read -r -p "  Also remove ~/.syscontrol (config, logs, build)? [y/N] " answer
     if [[ "${answer:-n}" =~ ^[Yy]$ ]]; then
@@ -152,11 +157,78 @@ fi
 cp -R "$APP_PATH" "$DEST"
 echo "  Installed: $DEST"
 
+# Install syscontrol-update command
+UPDATE_BIN="$HOME/.local/bin/syscontrol-update"
+mkdir -p "$HOME/.local/bin"
+cat > "$UPDATE_BIN" <<'EOF'
+#!/bin/bash
+# syscontrol-update — pull latest changes and rebuild SysControl
+set -euo pipefail
+
+INSTALL_DIR="$HOME/.syscontrol/build"
+LOG_FILE="$HOME/.syscontrol/install.log"
+DEST="/Applications/SysControl.app"
+
+echo "══════════════════════════════════════════"
+echo " SysControl Updater"
+echo "══════════════════════════════════════════"
+echo ""
+
+if [ ! -d "$INSTALL_DIR" ]; then
+    echo "✗ SysControl source not found at $INSTALL_DIR."
+    echo "  Run the full installer first:"
+    echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"'
+    exit 1
+fi
+
+echo "[1/3] Pulling latest changes..."
+cd "$INSTALL_DIR"
+git pull --ff-only 2>>"$LOG_FILE" || {
+    echo "  Fast-forward failed — re-cloning..."
+    cd /
+    rm -rf "$INSTALL_DIR"
+    git clone --depth 1 https://github.com/ks6573/SyscontrolMCP.git "$INSTALL_DIR" 2>>"$LOG_FILE"
+    cd "$INSTALL_DIR"
+}
+VERSION=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "?")
+echo "  Version: $VERSION"
+
+echo ""
+echo "[2/3] Updating Python backend..."
+uv sync >>"$LOG_FILE" 2>&1
+echo "  Done"
+
+echo ""
+echo "[3/3] Rebuilding app...   [log: $LOG_FILE]"
+cd "$INSTALL_DIR/swift"
+./build.sh release >>"$LOG_FILE" 2>&1
+APP_PATH="$INSTALL_DIR/swift/.build/SysControl.app"
+
+if [ ! -d "$APP_PATH" ]; then
+    echo "✗ Build failed. Check: $LOG_FILE"
+    exit 1
+fi
+
+[ -d "$DEST" ] && rm -rf "$DEST"
+cp -R "$APP_PATH" "$DEST"
+echo "  Installed: $DEST"
+
+echo ""
+echo "══════════════════════════════════════════"
+echo " ✓ Updated to v$VERSION"
+echo "══════════════════════════════════════════"
+echo ""
+open "$DEST"
+EOF
+chmod +x "$UPDATE_BIN"
+echo "  Update command: syscontrol-update"
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════"
 echo " ✓ SysControl v$VERSION installed!"
 echo ""
+echo " To update later:  syscontrol-update"
 echo " Opening now. Press ⌘, in the app"
 echo " to configure your AI provider."
 echo "══════════════════════════════════════════"

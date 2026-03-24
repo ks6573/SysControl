@@ -2,7 +2,7 @@
 
 An AI agent for your Mac that answers questions about your system — and can extend itself with new tools on the fly.
 
-57 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, shell, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
+59 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, shell, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
 Four ways to run it — pick whichever fits your workflow:
 
@@ -38,13 +38,15 @@ Or right-click the app → **Open** → **Open** the first time.
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"
 ```
 
+To update later: `syscontrol-update`
+
 To uninstall: re-run with `--uninstall`.
 
 **Option C — Build manually:**
 
 ```bash
-git clone https://github.com/ks6573/SysControl.git
-cd SysControl/swift
+git clone https://github.com/ks6573/Syscontrol.git
+cd Syscontrol/swift
 ./build.sh release
 open .build/SysControl.app
 ```
@@ -53,9 +55,9 @@ open .build/SysControl.app
 
 ### Features
 
-- **Streaming responses** — tokens appear as they arrive with live Markdown formatting
+- **Streaming responses** — tokens appear as they arrive with live Markdown rendering
 - **Auto-save** — every conversation is saved automatically with an LLM-generated title
-- **Chat history sidebar** — browse, search, and delete past chats
+- **Chat history sidebar** — browse and delete past chats
 - **Settings** — switch between local (Ollama) and cloud providers in-app
 - **No setup** — everything is configured through the app itself
 
@@ -84,8 +86,8 @@ To change providers later, open **Settings** (⌘,).
 ## Installation (CLI only)
 
 ```bash
-git clone https://github.com/ks6573/SysControl.git
-cd SysControl
+git clone https://github.com/ks6573/SyscontrolMCP.git
+cd SyscontrolMCP
 
 # Install uv if needed
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -105,14 +107,14 @@ uv run agent.py
 
 ```bash
 uv run agent.py                                          # interactive
-uv run agent.py --provider local --model qwen2.5        # local, skip prompt
+uv run agent.py --provider local --model qwen3:30b      # local, skip prompt
 uv run agent.py --provider cloud --api-key sk-...       # cloud, skip prompt
 ```
 
 ### Local Mode (Ollama)
 
 ```bash
-ollama pull qwen2.5   # recommended
+ollama pull qwen3:30b   # recommended
 ollama serve
 uv run agent.py --provider local
 ```
@@ -121,10 +123,10 @@ uv run agent.py --provider local
 
 | Model | Notes |
 |---|---|
-| `qwen2.5` | Default. Best tool use at 7B |
-| `qwen3:8b` | Newer, includes thinking mode |
-| `llama3.1:8b` | Battle-tested alternative |
-| `mistral` | Lightweight and fast |
+| `qwen3:30b` | Default. Best tool use and reasoning |
+| `qwen3:8b` | Faster, lower memory — includes thinking mode |
+| `qwen2.5:7b` | Lightweight alternative |
+| `llama3.1:8b` | Battle-tested fallback |
 
 > Models without native tool-calling (e.g. `gemma3`) will error.
 
@@ -223,7 +225,7 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 
 ---
 
-## Tools (57 total)
+## Tools (59 total)
 
 ### Monitoring
 
@@ -314,7 +316,7 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 
 | Tool | What it does |
 |---|---|
-| `read_file` | Read a text file (up to 32,000 chars) |
+| `read_file` | Read a text file (up to 16,000 chars) |
 | `write_file` | Write text to any path, creating directories as needed |
 | `run_shell_command` | Execute a bash command and return stdout/stderr. **Disabled by default.** |
 
@@ -339,6 +341,13 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 | `get_docker_status` | Running containers with live CPU%, memory, image, status, and ports |
 | `get_time_machine_status` | Last backup time, phase and progress if running, destination. macOS only. |
 | `track_package` | Track UPS, USPS, FedEx, or DHL shipments by tracking number |
+
+### Memory
+
+| Tool | What it does |
+|---|---|
+| `read_memory` | Read the persistent memory file — facts and notes saved across sessions |
+| `append_memory_note` | Append a concise note to the memory file for future recall |
 
 ### Self-Extension
 
