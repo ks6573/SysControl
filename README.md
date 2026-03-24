@@ -38,7 +38,7 @@ Or right-click the app → **Open** → **Open** the first time.
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"
 ```
 
-To update later: `syscontrol-update`
+To update later: use **Check for Updates** in the app (⇧⌘U), or run `syscontrol-update` from Terminal.
 
 To uninstall: re-run with `--uninstall`.
 
@@ -59,6 +59,7 @@ open .build/SysControl.app
 - **Auto-save** — every conversation is saved automatically with an LLM-generated title
 - **Chat history sidebar** — browse and delete past chats
 - **Settings** — switch between local (Ollama) and cloud providers in-app
+- **In-app updates** — check for new versions from the menu bar (⇧⌘U) or Settings; DMG users get a one-click download, source-install users update automatically
 - **No setup** — everything is configured through the app itself
 
 ### First Launch
