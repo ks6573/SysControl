@@ -33,6 +33,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import webbrowser
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
@@ -54,7 +55,7 @@ try:
     pynvml.nvmlInit()
     GPU_BACKEND = "pynvml"
 except Exception as exc:
-    import sys as _sys; _sys.stderr.write(f"[syscontrol] GPU backend init failed: {exc}\n")
+    sys.stderr.write(f"[syscontrol] GPU backend init failed: {exc}\n")
     GPU_BACKEND = None
 
 GPU_AVAILABLE = GPU_BACKEND is not None
@@ -72,22 +73,24 @@ _METRICS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="syscon
 
 # ── pynvml handle cache (handles are stable for the process lifetime) ─────────
 _NVML_HANDLES: list = []
+_NVML_HANDLES_READY = False  # sentinel — safe to read without lock
 _NVML_LOCK = threading.Lock()
 
 
 def _get_nvml_handles() -> list:
     """Return cached pynvml device handles; populated lazily on first call."""
-    global _NVML_HANDLES
-    if _NVML_HANDLES:
+    global _NVML_HANDLES, _NVML_HANDLES_READY
+    if _NVML_HANDLES_READY:
         return _NVML_HANDLES
     with _NVML_LOCK:
-        if _NVML_HANDLES:
+        if _NVML_HANDLES_READY:
             return _NVML_HANDLES
         try:
             count = pynvml.nvmlDeviceGetCount()
             _NVML_HANDLES = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(count)]
         except Exception:
             _NVML_HANDLES = []
+        _NVML_HANDLES_READY = True
     return _NVML_HANDLES
 
 
@@ -373,7 +376,7 @@ def _use_case_analysis(use_case: str, cpu_pct: float, ram_pct: float) -> dict:
     }
 
 
-def _fig_to_b64(fig) -> str:
+def _fig_to_b64(fig: plt.Figure) -> str:
     """Serialize a matplotlib figure to a base64 PNG string and close it."""
     try:
         buf = io.BytesIO()
@@ -384,7 +387,7 @@ def _fig_to_b64(fig) -> str:
         plt.close(fig)
 
 
-def _safe(fn: callable) -> object | None:
+def _safe(fn: Callable[[], object]) -> object | None:
     """Call *fn* and swallow psutil access/stale-PID errors, returning None."""
     try:
         return fn()
@@ -392,7 +395,7 @@ def _safe(fn: callable) -> object | None:
         return None
 
 
-def make_error(id_, code: int, message: str) -> dict:
+def make_error(id_: int | None, code: int, message: str) -> dict:
     return {
         "jsonrpc": "2.0",
         "id": id_,
@@ -469,9 +472,10 @@ def get_gpu_usage() -> dict:
             })
         return {"gpus": gpus}
     except pynvml.NVMLError as e:
-        global _NVML_HANDLES
+        global _NVML_HANDLES, _NVML_HANDLES_READY
         with _NVML_LOCK:
             _NVML_HANDLES = []  # invalidate cache on NVML error so next call retries
+            _NVML_HANDLES_READY = False
         return {"error": f"NVML error: {e}"}
 
 
@@ -509,15 +513,20 @@ def get_network_usage() -> dict:
             "is_up": stats.isup,
             "speed_mbps": stats.speed,
         }
-    return {
-        "total_io": {
+    total_io: dict[str, float | int | None]
+    if net_io is not None:
+        total_io = {
             "bytes_sent_mb": round(net_io.bytes_sent / 1e6, 2),
             "bytes_recv_mb": round(net_io.bytes_recv / 1e6, 2),
             "packets_sent": net_io.packets_sent,
             "packets_recv": net_io.packets_recv,
-        },
-        "interfaces": interfaces,
-    }
+        }
+    else:
+        total_io = {
+            "bytes_sent_mb": None, "bytes_recv_mb": None,
+            "packets_sent": None, "packets_recv": None,
+        }
+    return {"total_io": total_io, "interfaces": interfaces}
 
 
 def get_realtime_io(interval: int = 1) -> dict:
@@ -537,18 +546,25 @@ def get_realtime_io(interval: int = 1) -> dict:
         read_mbs = write_mbs = None
         disk_ok = False
 
-    dl_mbs = round((n2.bytes_recv - n1.bytes_recv) / 1e6 / dt, 3)
-    ul_mbs = round((n2.bytes_sent - n1.bytes_sent) / 1e6 / dt, 3)
-
-    return {
-        "interval_seconds": interval,
-        "disk": {"available": disk_ok, "read_mbs": read_mbs, "write_mbs": write_mbs},
-        "network": {
+    if n1 is not None and n2 is not None:
+        dl_mbs = round((n2.bytes_recv - n1.bytes_recv) / 1e6 / dt, 3)
+        ul_mbs = round((n2.bytes_sent - n1.bytes_sent) / 1e6 / dt, 3)
+        net_info: dict = {
             "download_mbs": dl_mbs,
             "upload_mbs": ul_mbs,
             "download_mbps": round(dl_mbs * 8, 3),
             "upload_mbps": round(ul_mbs * 8, 3),
-        },
+        }
+    else:
+        net_info = {
+            "download_mbs": None, "upload_mbs": None,
+            "download_mbps": None, "upload_mbps": None,
+        }
+
+    return {
+        "interval_seconds": interval,
+        "disk": {"available": disk_ok, "read_mbs": read_mbs, "write_mbs": write_mbs},
+        "network": net_info,
     }
 
 
@@ -582,7 +598,7 @@ def get_top_processes(n: int = 10, sort_by: str = "cpu") -> dict:
     }
 
 
-def _cpu_with_chart() -> tuple:
+def _cpu_with_chart() -> tuple[dict, str]:
     data = get_cpu_usage()
     cores = data["per_core_percent"]
     n = len(cores)
@@ -601,7 +617,7 @@ def _cpu_with_chart() -> tuple:
     return data, _fig_to_b64(fig)
 
 
-def _ram_with_chart() -> tuple:
+def _ram_with_chart() -> tuple[dict, str]:
     data = get_ram_usage()
     ram = data["ram"]
     swap = data["swap"]
@@ -646,7 +662,7 @@ def _gpu_with_chart() -> dict | tuple[dict, str]:
         fig.tight_layout()
         return data, _fig_to_b64(fig)
     except Exception as exc:
-        import sys as _sys; _sys.stderr.write(f"[syscontrol] _gpu_with_chart rendering failed: {exc}\n")
+        sys.stderr.write(f"[syscontrol] _gpu_with_chart rendering failed: {exc}\n")
         plt.close(fig)
         return data
 
@@ -790,7 +806,7 @@ def _check_gpu_alerts(alerts: list[dict]) -> None:
             except pynvml.NVMLError:
                 pass
     except Exception as exc:
-        import sys as _sys; _sys.stderr.write(f"[syscontrol] GPU alert check failed: {exc}\n")
+        sys.stderr.write(f"[syscontrol] GPU alert check failed: {exc}\n")
 
 
 def _build_alert_summary(alerts: list[dict]) -> str:
@@ -832,7 +848,7 @@ def get_system_alerts() -> dict:
                 "message": f"Swap high at {sw.percent}% — system may be memory-constrained",
                 "value": sw.percent})
     except Exception as exc:
-        import sys as _sys; _sys.stderr.write(f"[syscontrol] swap read failed: {exc}\n")
+        sys.stderr.write(f"[syscontrol] swap read failed: {exc}\n")
 
     for part in psutil.disk_partitions(all=False):
         try:
@@ -2106,10 +2122,16 @@ def tail_system_logs(lines: int = 50, filter_str: str = "") -> dict:
     """Tail recent system logs. macOS: unified log (last 5 min). Linux: journalctl."""
     lines  = max(10, min(lines, 500))
 
+    # Sanitise filter_str: cap length and strip control characters.
+    filter_str = filter_str[:200]
+    filter_str = re.sub(r"[\x00-\x1f]", "", filter_str)
+
     if IS_MACOS:
         cmd = ["log", "show", "--last", "5m", "--style", "compact"]
         if filter_str:
-            cmd += ["--predicate", f'eventMessage CONTAINS[c] "{filter_str}"']
+            # Escape backslashes and double quotes for NSPredicate string literal.
+            safe = filter_str.replace("\\", "\\\\").replace('"', '\\"')
+            cmd += ["--predicate", f'eventMessage CONTAINS[c] "{safe}"']
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             all_lines = [l for l in proc.stdout.splitlines() if l.strip()]
@@ -2130,6 +2152,10 @@ def tail_system_logs(lines: int = 50, filter_str: str = "") -> dict:
         if shutil.which("journalctl"):
             cmd = ["journalctl", "-n", str(lines), "--no-pager", "-o", "short"]
             if filter_str:
+                try:
+                    re.compile(filter_str)
+                except re.error:
+                    return {"error": "Invalid regex in filter_str."}
                 cmd += ["-g", filter_str]
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
@@ -2484,6 +2510,25 @@ def browser_get_page() -> dict:
 
 # ── iMessage tools ───────────────────────────────────────────────────────────
 
+# Recipient must be an E.164 phone number or a simple email address.
+_IMESSAGE_RECIPIENT_RE = re.compile(
+    r"^\+?[0-9]{7,15}$"          # phone: optional +, 7-15 digits
+    r"|^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"  # email
+)
+
+
+def _escape_applescript(s: str) -> str:
+    """Escape a string for safe embedding in an AppleScript double-quoted literal.
+
+    Replaces backslashes first (to avoid double-escaping), then double quotes.
+    Rejects control characters that cannot be safely represented.
+    """
+    s = s.replace("\\", "\\\\").replace('"', '\\"')
+    # Strip any control characters (U+0000–U+001F except tab/newline)
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
+    return s
+
+
 def send_imessage(recipient: str, message: str) -> dict:
     """Send an iMessage or SMS via macOS Messages.app using AppleScript."""
     denied = _permission_check("allow_messaging", "send_imessage")
@@ -2493,12 +2538,26 @@ def send_imessage(recipient: str, message: str) -> dict:
         return {"error": "send_imessage requires macOS."}
     if not recipient or not message:
         return {"error": "recipient and message are required."}
+
+    # Validate recipient format to prevent AppleScript injection.
+    recipient_clean = recipient.strip()
+    if not _IMESSAGE_RECIPIENT_RE.match(recipient_clean):
+        return {
+            "error": (
+                f"Invalid recipient format: {recipient!r}. "
+                "Must be an E.164 phone number (e.g. +14155551234) or email address."
+            ),
+        }
+
+    safe_recipient = _escape_applescript(recipient_clean)
+    safe_message = _escape_applescript(message)
+
     # AppleScript: send to a buddy (phone number or email).
     script = (
         f'tell application "Messages"\n'
         f'  set targetService to 1st service whose service type = iMessage\n'
-        f'  set targetBuddy to buddy {json.dumps(recipient)} of targetService\n'
-        f'  send {json.dumps(message)} to targetBuddy\n'
+        f'  set targetBuddy to buddy "{safe_recipient}" of targetService\n'
+        f'  send "{safe_message}" to targetBuddy\n'
         f'end tell'
     )
     try:
@@ -2510,7 +2569,7 @@ def send_imessage(recipient: str, message: str) -> dict:
             # Fallback: try without specifying service (works for SMS relay too)
             script2 = (
                 f'tell application "Messages"\n'
-                f'  send {json.dumps(message)} to buddy {json.dumps(recipient)}\n'
+                f'  send "{safe_message}" to buddy "{safe_recipient}"\n'
                 f'end tell'
             )
             proc2 = subprocess.run(
@@ -2526,7 +2585,7 @@ def send_imessage(recipient: str, message: str) -> dict:
                         "Privacy & Security → Automation."
                     ),
                 }
-        return {"status": "sent", "recipient": recipient, "message": message}
+        return {"status": "sent", "recipient": recipient_clean, "message": message}
     except subprocess.TimeoutExpired:
         return {"error": "AppleScript timed out sending iMessage."}
     except Exception as e:
@@ -2724,7 +2783,7 @@ def quit_app(name: str, force: bool = False) -> dict:
                 subprocess.run(["kill", "-9", pid], timeout=5)
             return {"status": "force-killed", "app": name, "pids": pids}
         else:
-            script = f'tell application "{name}" to quit'
+            script = f'tell application "{_escape_applescript(name)}" to quit'
             proc = subprocess.run(
                 ["osascript", "-e", script],
                 capture_output=True, text=True, timeout=10,
@@ -2994,20 +3053,29 @@ _SYSCONTROL_CONFIG_FILE = _REMINDER_DIR / "config.json"
 _CONFIG_CACHE: dict = {}
 _CONFIG_TTL: float = 5.0           # seconds; config changes take effect within one TTL window
 _CONFIG_CACHE_TIME: float = float("-inf")  # force a disk read on the very first call
+_CONFIG_LOCK = threading.Lock()
 
 
 def _load_config() -> dict:
-    """Load ~/.syscontrol/config.json, cached for _CONFIG_TTL seconds."""
+    """Load ~/.syscontrol/config.json, cached for _CONFIG_TTL seconds.
+
+    Thread-safe: uses double-checked locking so concurrent callers
+    never see a partially-updated cache.
+    """
     global _CONFIG_CACHE, _CONFIG_CACHE_TIME
     now = time.monotonic()
     if now - _CONFIG_CACHE_TIME < _CONFIG_TTL:
         return _CONFIG_CACHE
-    try:
-        _CONFIG_CACHE = json.loads(_SYSCONTROL_CONFIG_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        _CONFIG_CACHE = {}
-    _CONFIG_CACHE_TIME = now
-    return _CONFIG_CACHE
+    with _CONFIG_LOCK:
+        # Re-check after acquiring; another thread may have refreshed.
+        if now - _CONFIG_CACHE_TIME < _CONFIG_TTL:
+            return _CONFIG_CACHE
+        try:
+            _CONFIG_CACHE = json.loads(_SYSCONTROL_CONFIG_FILE.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            _CONFIG_CACHE = {}
+        _CONFIG_CACHE_TIME = now
+        return _CONFIG_CACHE
 
 
 def _permission_check(flag: str, tool_name: str) -> dict | None:

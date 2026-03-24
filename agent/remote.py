@@ -22,9 +22,10 @@ import logging
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import uvicorn
@@ -33,6 +34,7 @@ from openai import OpenAI
 
 # ── Shared utilities from agent/core.py ──────────────────────────────────────
 from agent.core import (
+    MAX_TOOL_ROUNDS,
     MCPClient,
     MCPClientPool,
     load_system_prompt,
@@ -240,7 +242,7 @@ def run_agent(
 
     response_parts: list[str] = []
 
-    while True:
+    for _round in range(MAX_TOOL_ROUNDS):
         response = client.chat.completions.create(
             model=model,
             max_tokens=MAX_TOKENS,
@@ -248,6 +250,7 @@ def run_agent(
             messages=[system_msg] + session,
             stream=False,
         )
+        assert response.choices, "LLM returned empty choices list"
         choice  = response.choices[0]
         msg     = choice.message
         content = msg.content or ""
@@ -260,42 +263,54 @@ def run_agent(
             if content:
                 response_parts.append(content)
             break
+    else:
+        # Loop exhausted without a terminal response — prevent runaway tool calls.
+        log.warning("Exceeded %d tool-call rounds — aborting turn", MAX_TOOL_ROUNDS)
+        response_parts.append(f"⚠ Stopped after {MAX_TOOL_ROUNDS} tool-call rounds.")
 
     return "\n".join(response_parts) or "✅ Done."
 
 
-# ── App lifecycle ─────────────────────────────────────────────────────────────
+# ── App state ─────────────────────────────────────────────────────────────────
+# Bundled into a namespace on app.state so that lifespan initialisation is
+# visible to webhook handlers without mutable module-level globals.
+
 
 @asynccontextmanager
-async def _lifespan(application: FastAPI):
-    global _cfg, _pool, _tools, _sysmsg, _client
-
-    _cfg = load_config()
+async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
+    """Initialise MCP pool and LLM client; attach to ``application.state``."""
+    cfg = load_config()
 
     log.info("Starting MCP server subprocess…")
     primary = MCPClient()
-    _pool   = MCPClientPool(primary, pool_size=POOL_SIZE)
+    pool = MCPClientPool(primary, pool_size=POOL_SIZE)
 
     mcp_tools = primary.list_tools()
-    _tools    = mcp_to_openai_tools(mcp_tools)
-    _sysmsg   = {"role": "system", "content": load_system_prompt()}
-    _client   = OpenAI(
-        api_key=_cfg.get("api_key", "ollama") or "ollama",
-        base_url=_cfg.get("base_url", "http://localhost:11434/v1"),
+    tools = mcp_to_openai_tools(mcp_tools)
+    sysmsg = {"role": "system", "content": load_system_prompt()}
+    client = OpenAI(
+        api_key=cfg.get("api_key", "ollama") or "ollama",
+        base_url=cfg.get("base_url", "http://localhost:11434/v1"),
         timeout=120.0,
     )
 
+    # Attach to app.state — accessible from handlers via request.app.state.
+    application.state.cfg = cfg
+    application.state.pool = pool
+    application.state.tools = tools
+    application.state.sysmsg = sysmsg
+    application.state.client = client
+
     enabled = [p for p in ("telegram", "whatsapp", "messenger")
-               if _cfg.get(p, {}).get("enabled")]
+               if cfg.get(p, {}).get("enabled")]
     log.info(
         "✅ Remote bridge ready  |  %d tools  |  platforms: %s",
-        len(_tools), ", ".join(enabled) or "none",
+        len(tools), ", ".join(enabled) or "none",
     )
 
     yield   # server runs here
 
-    if _pool:
-        _pool.close_all()
+    pool.close_all()
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -307,21 +322,14 @@ app = FastAPI(
     lifespan=_lifespan,
 )
 
-# Global state — populated at startup
-_cfg:     dict         = {}
-_pool:    MCPClientPool | None = None
-_tools:   list[dict]   = []
-_sysmsg:  dict         = {}
-_client:  OpenAI | None = None
 
-
-def _is_allowed(platform: str, chat_id: str) -> bool:
+def _is_allowed(cfg: dict, platform: str, chat_id: str) -> bool:
     """Return True iff *chat_id* appears in the allow-list for *platform*.
 
     An empty allow-list rejects everyone and logs the sender's ID so the
     operator can copy it into the config without enabling open access.
     """
-    allowed = _cfg.get("allowed_chat_ids", {}).get(platform, [])
+    allowed = cfg.get("allowed_chat_ids", {}).get(platform, [])
     if not allowed:
         # Allow-list is empty → reject all messages and log the sender so the
         # user can copy the ID into their config.  Accepting everyone when the
@@ -335,25 +343,38 @@ def _is_allowed(platform: str, chat_id: str) -> bool:
     return str(chat_id) in [str(a) for a in allowed]
 
 
-def _dispatch(platform: str, chat_id: str, text: str,
-              reply_fn: "callable[[str], None]") -> None:
+def _dispatch(
+    request: Request,
+    platform: str,
+    chat_id: str,
+    text: str,
+    reply_fn: Callable[[str], None],
+) -> None:
     """Validate, then submit a bounded-pool task that runs the agent and replies."""
-    if not _is_allowed(platform, chat_id):
+    st = request.app.state
+    if not _is_allowed(st.cfg, platform, chat_id):
         reply_fn("⛔ Unauthorized.")
         return
 
     reply_fn("⏳ Working on it…")
 
     session, session_lock = get_session(platform, chat_id)
-    max_h = _cfg.get("max_history", MAX_HISTORY)
+    max_h = st.cfg.get("max_history", MAX_HISTORY)
 
-    def _work():
+    # Capture references from app.state before submitting to the thread pool.
+    pool = st.pool
+    tools = st.tools
+    sysmsg = st.sysmsg
+    model = st.cfg["model"]
+    client = st.client
+
+    def _work() -> None:
         # Per-session lock serialises concurrent messages from the same chat.
         with session_lock:
             try:
                 result = run_agent(
-                    text, session, _pool, _tools, _sysmsg,
-                    _cfg["model"], _client, max_h,
+                    text, session, pool, tools, sysmsg,
+                    model, client, max_h,
                 )
                 reply_fn(result)
             except Exception as exc:
@@ -367,7 +388,8 @@ def _dispatch(platform: str, chat_id: str, text: str,
 
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request) -> dict:
-    if not _cfg.get("telegram", {}).get("enabled"):
+    cfg = request.app.state.cfg
+    if not cfg.get("telegram", {}).get("enabled"):
         return {"ok": True}
 
     data  = await request.json()
@@ -380,8 +402,8 @@ async def telegram_webhook(request: Request) -> dict:
     if not text:
         return {"ok": True}
 
-    token = _cfg["telegram"]["token"]
-    _dispatch("telegram", chat_id, text,
+    token = cfg["telegram"]["token"]
+    _dispatch(request, "telegram", chat_id, text,
               lambda t: _telegram_send(chat_id, t, token))
     return {"ok": True}
 
@@ -390,16 +412,18 @@ async def telegram_webhook(request: Request) -> dict:
 
 @app.get("/webhook/whatsapp")
 async def whatsapp_verify(request: Request) -> Response:
+    cfg = request.app.state.cfg
     p = request.query_params
     if (p.get("hub.mode") == "subscribe"
-            and p.get("hub.verify_token") == _cfg["whatsapp"]["verify_token"]):
+            and p.get("hub.verify_token") == cfg["whatsapp"]["verify_token"]):
         return Response(content=p["hub.challenge"], media_type="text/plain")
     raise HTTPException(status_code=403, detail="WhatsApp verification failed")
 
 
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request) -> dict:
-    if not _cfg.get("whatsapp", {}).get("enabled"):
+    cfg = request.app.state.cfg
+    if not cfg.get("whatsapp", {}).get("enabled"):
         return {"ok": True}
 
     data = await request.json()
@@ -410,8 +434,8 @@ async def whatsapp_webhook(request: Request) -> dict:
                     continue
                 phone = msg["from"]
                 text  = msg["text"]["body"].strip()
-                wa    = _cfg["whatsapp"]
-                _dispatch("whatsapp", phone, text,
+                wa    = cfg["whatsapp"]
+                _dispatch(request, "whatsapp", phone, text,
                           lambda t, p=phone: _whatsapp_send(p, t, wa))
     return {"ok": True}
 
@@ -420,23 +444,25 @@ async def whatsapp_webhook(request: Request) -> dict:
 
 @app.get("/webhook/messenger")
 async def messenger_verify(request: Request) -> Response:
+    cfg = request.app.state.cfg
     p = request.query_params
     if (p.get("hub.mode") == "subscribe"
-            and p.get("hub.verify_token") == _cfg["messenger"]["verify_token"]):
+            and p.get("hub.verify_token") == cfg["messenger"]["verify_token"]):
         return Response(content=p["hub.challenge"], media_type="text/plain")
     raise HTTPException(status_code=403, detail="Messenger verification failed")
 
 
 @app.post("/webhook/messenger")
 async def messenger_webhook(request: Request) -> dict:
-    if not _cfg.get("messenger", {}).get("enabled"):
+    cfg = request.app.state.cfg
+    if not cfg.get("messenger", {}).get("enabled"):
         return {"ok": True}
 
     data = await request.json()
     if data.get("object") != "page":
         return {"ok": True}
 
-    token = _cfg["messenger"]["page_access_token"]
+    token = cfg["messenger"]["page_access_token"]
     for entry in data.get("entry", []):
         for event in entry.get("messaging", []):
             if "message" not in event or event["message"].get("is_echo"):
@@ -445,7 +471,7 @@ async def messenger_webhook(request: Request) -> dict:
             text = event["message"].get("text", "").strip()
             if not text:
                 continue
-            _dispatch("messenger", psid, text,
+            _dispatch(request, "messenger", psid, text,
                       lambda t, p=psid: _messenger_send(p, t, token))
     return {"ok": True}
 
@@ -453,14 +479,15 @@ async def messenger_webhook(request: Request) -> dict:
 # ── Health check ──────────────────────────────────────────────────────────────
 
 @app.get("/health")
-async def health() -> dict:
+async def health(request: Request) -> dict:
+    cfg = request.app.state.cfg
     return {
         "status":    "ok",
-        "tools":     len(_tools),
+        "tools":     len(request.app.state.tools),
         "platforms": {
-            "telegram":  _cfg.get("telegram",  {}).get("enabled", False),
-            "whatsapp":  _cfg.get("whatsapp",  {}).get("enabled", False),
-            "messenger": _cfg.get("messenger", {}).get("enabled", False),
+            "telegram":  cfg.get("telegram",  {}).get("enabled", False),
+            "whatsapp":  cfg.get("whatsapp",  {}).get("enabled", False),
+            "messenger": cfg.get("messenger", {}).get("enabled", False),
         },
     }
 

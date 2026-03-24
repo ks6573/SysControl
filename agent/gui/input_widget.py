@@ -21,7 +21,7 @@ class _AutoGrowTextEdit(QTextEdit):
 
     submit_requested = Signal()
 
-    def __init__(self, palette: dict[str, str], parent: QWidget | None = None):
+    def __init__(self, palette: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._palette = palette
         self._line_height = 20
@@ -78,7 +78,7 @@ class InputWidget(QWidget):
 
     message_submitted = Signal(str)
 
-    def __init__(self, palette: dict[str, str], parent: QWidget | None = None):
+    def __init__(self, palette: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._palette = palette
 

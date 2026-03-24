@@ -23,7 +23,7 @@ from agent.gui.message_bubble import MessageBubble
 class _ToolIndicator(QFrame):
     """Subtle inline row showing which tool is running."""
 
-    def __init__(self, names: list[str], palette: dict[str, str], parent: QWidget | None = None):
+    def __init__(self, names: list[str], palette: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setStyleSheet("background: transparent; border: none;")
 
@@ -41,7 +41,7 @@ class _ToolIndicator(QFrame):
 class ChatWidget(QScrollArea):
     """Scrollable message area containing chat bubbles and tool indicators."""
 
-    def __init__(self, palette: dict[str, str], parent: QWidget | None = None):
+    def __init__(self, palette: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._palette = palette
         self._current_bubble: MessageBubble | None = None

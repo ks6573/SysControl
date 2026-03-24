@@ -8,6 +8,7 @@ signals between the AgentWorker thread and the UI components.
 from __future__ import annotations
 
 import atexit
+from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
 
@@ -289,7 +290,7 @@ class MainWindow(QMainWindow):
         self._sidebar_anim = anim  # prevent GC
         anim.start()
 
-    def _on_chat_selected(self, path) -> None:
+    def _on_chat_selected(self, path: Path) -> None:
         viewer = ChatViewerDialog(path, self._palette, parent=self)
         viewer.exec()
 

@@ -49,6 +49,18 @@ POOL_SIZE          = 4          # max parallel MCP worker processes
 MAX_PARALLEL_TOOLS = POOL_SIZE  # batch size capped to pool capacity
 MAX_TOOL_ROUNDS    = 15         # circuit-breaker for runaway tool-call loops
 
+RESPONSE_STYLE_GUIDANCE: str = (
+    "\n\n---\n\n# Response Style\n\n"
+    "When replying to the user:\n"
+    "- Avoid a single dense paragraph for non-trivial answers.\n"
+    "- Prefer a short direct lead, then concise bullets or numbered steps when helpful.\n"
+    "- Prefer headings + bullet lists over markdown tables unless the user explicitly asks for a table.\n"
+    "- Insert blank lines between sections so responses are easy to scan.\n"
+    "- Use markdown structure naturally (headings, bullets, code blocks) when it improves clarity.\n"
+    "- Keep simple requests short (1-2 sentences).\n"
+    "- For actionable instructions, provide concrete commands/examples.\n"
+)
+
 # ── Provider config ───────────────────────────────────────────────────────────
 
 CLOUD_MODEL    = "gpt-oss:120b"
@@ -186,6 +198,26 @@ class MCPClient:
 
 # ── MCP Client Pool ───────────────────────────────────────────────────────────
 
+
+def _parse_tool_call_args(tc: dict) -> tuple[str, dict]:
+    """Extract tool name and parsed arguments from a tool-call dict.
+
+    Args:
+        tc: An OpenAI-format tool-call dict with ``function.name`` and
+            ``function.arguments`` keys.
+
+    Returns:
+        A ``(name, args)`` tuple.  *args* defaults to ``{}`` on parse failure.
+    """
+    name = tc["function"]["name"]
+    assert name, "Tool call has empty name — malformed LLM response"
+    try:
+        args = json.loads(tc["function"]["arguments"])
+    except json.JSONDecodeError:
+        args = {}
+    return name, args
+
+
 class MCPClientPool:
     """
     Manages a pool of MCPClient instances so independent tool calls can be
@@ -272,20 +304,10 @@ class MCPClientPool:
         state-mutating, or large-output) always run sequentially on the primary
         client.  Results are returned in the original request order.
         """
-        def _parse_args(tc: dict) -> tuple[str, dict]:
-            """Extract tool name and parsed arguments from a tool-call dict."""
-            name = tc["function"]["name"]
-            assert name, "Tool call has empty name — malformed LLM response"
-            try:
-                args = json.loads(tc["function"]["arguments"])
-            except json.JSONDecodeError:
-                args = {}
-            return name, args
-
         if len(tool_calls) == 1:
             # Fast path: no thread overhead for a single call.
             tc = tool_calls[0]
-            name, args = _parse_args(tc)
+            name, args = _parse_tool_call_args(tc)
             result = self._clients[0].call_tool(name, args)  # primary client
             return [(tc["id"], name, result)]
 
@@ -301,7 +323,7 @@ class MCPClientPool:
         def _run_one(
             order: int, tc: dict, client: MCPClient
         ) -> tuple[int, str, str, str]:
-            name, args = _parse_args(tc)
+            name, args = _parse_tool_call_args(tc)
             return (order, tc["id"], name, client.call_tool(name, args))
 
         # Run parallel-safe calls in batches of at most MAX_PARALLEL_TOOLS.
@@ -652,6 +674,43 @@ def _execute_tool_calls(
     return None  # continue loop
 
 
+def _handle_finish_reason(
+    finish_reason: str | None,
+    content: str,
+    tool_calls: list,
+    pool: MCPClientPool,
+    messages: list[dict],
+    callbacks: TurnCallbacks,
+    start_time: float,
+) -> tuple[str, float] | None:
+    """Dispatch on *finish_reason* and return a result tuple, or ``None`` to continue.
+
+    Returns:
+        ``(reason, elapsed)`` if the turn is complete, or ``None`` if the
+        agentic loop should continue with the next round.
+    """
+    elapsed = time.monotonic() - start_time
+
+    if finish_reason == "error":
+        return "error", elapsed
+
+    if finish_reason in ("stop", None) and not tool_calls:
+        messages.append({"role": "assistant", "content": content})
+        return finish_reason or "stop", elapsed
+
+    if finish_reason == "tool_calls":
+        err = _execute_tool_calls(
+            tool_calls, content, pool, messages, callbacks, start_time,
+        )
+        if err == "error":
+            return "error", time.monotonic() - start_time
+        return None  # continue loop
+
+    # max_tokens, content_filter, etc.
+    messages.append({"role": "assistant", "content": content})
+    return finish_reason or "unknown", elapsed
+
+
 def run_streaming_turn(
     llm: OpenAI,
     pool: MCPClientPool,
@@ -689,25 +748,12 @@ def run_streaming_turn(
             llm, model, tools, messages, system_message, callbacks,
         )
 
-        if finish_reason == "error":
-            return "error", time.monotonic() - start_time
-
-        if finish_reason in ("stop", None) and not tool_calls:
-            messages.append({"role": "assistant", "content": content})
-            return finish_reason or "stop", time.monotonic() - start_time
-
-        if finish_reason == "tool_calls":
-            err = _execute_tool_calls(
-                tool_calls, content, pool, messages, callbacks, start_time,
-            )
-            if err == "error":
-                return "error", time.monotonic() - start_time
-            # Continue loop — model will process tool results on next iteration.
-
-        else:
-            # max_tokens, content_filter, etc.
-            messages.append({"role": "assistant", "content": content})
-            return finish_reason or "unknown", time.monotonic() - start_time
+        result = _handle_finish_reason(
+            finish_reason, content, tool_calls,
+            pool, messages, callbacks, start_time,
+        )
+        if result is not None:
+            return result
 
     # Loop exhausted MAX_TOOL_ROUNDS without a terminal finish_reason.
     callbacks.on_error(

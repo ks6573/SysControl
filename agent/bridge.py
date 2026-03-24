@@ -31,6 +31,7 @@ from typing import IO
 from agent.core import (
     MCPClient,
     MCPClientPool,
+    RESPONSE_STYLE_GUIDANCE,
     TurnCallbacks,
     load_memory,
     load_system_prompt,
@@ -42,18 +43,6 @@ from openai import OpenAI
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 _write_lock = threading.Lock()
-
-_RESPONSE_STYLE_GUIDANCE = (
-    "\n\n---\n\n# Response Style\n\n"
-    "When replying to the user:\n"
-    "- Avoid a single dense paragraph for non-trivial answers.\n"
-    "- Prefer a short direct lead, then concise bullets or numbered steps when helpful.\n"
-    "- Prefer headings + bullet lists over markdown tables unless the user explicitly asks for a table.\n"
-    "- Insert blank lines between sections so responses are easy to scan.\n"
-    "- Use markdown structure naturally (headings, bullets, code blocks) when it improves clarity.\n"
-    "- Keep simple requests short (1-2 sentences).\n"
-    "- For actionable instructions, provide concrete commands/examples.\n"
-)
 
 
 def _emit(event: dict) -> None:
@@ -89,8 +78,6 @@ def _initialise_agent() -> tuple[MCPClientPool, list[dict], dict]:
     Raises:
         Exception: Any startup failure — callers should catch and emit an error event.
     """
-    import os as _os  # local import keeps top-level namespace clean
-
     mcp_client = MCPClient()
     pool       = MCPClientPool(mcp_client)
 
@@ -113,7 +100,7 @@ def _initialise_agent() -> tuple[MCPClientPool, list[dict], dict]:
             "asks what you remember, or when prior context seems relevant. "
             "Call `append_memory_note` to save a key fact mid-session without waiting for exit."
         )
-    full_system += _RESPONSE_STYLE_GUIDANCE
+    full_system += RESPONSE_STYLE_GUIDANCE
 
     system_message = {"role": "system", "content": full_system}
     return pool, tools, system_message
@@ -175,32 +162,62 @@ def _handle_user_message(
         _emit({"type": "error", "category": "Turn", "message": str(exc)})
 
 
+# ── Event loop ────────────────────────────────────────────────────────────────
+
+
+def _event_loop(
+    pool: MCPClientPool,
+    tools: list[dict],
+    system_message: dict,
+    llm: OpenAI,
+    model: str,
+    log: IO[str],
+) -> tuple[OpenAI, str]:
+    """Read stdin commands, dispatch them, and return the (possibly reconfigured) client/model.
+
+    Runs until EOF or a ``shutdown`` command. Unknown command types are
+    silently ignored for forward compatibility.
+    """
+    messages: list[dict] = []
+
+    while True:
+        cmd = _read_command()
+        if cmd is None:
+            break  # EOF — parent closed pipe
+
+        cmd_type = cmd.get("type", "")
+
+        if cmd_type == "shutdown":
+            break
+        elif cmd_type == "clear_session":
+            messages.clear()
+            _emit({"type": "session_cleared"})
+        elif cmd_type == "configure":
+            # Allow runtime reconfiguration of provider.
+            api_key = cmd.get("api_key", llm.api_key)
+            base_url = cmd.get("base_url", str(llm.base_url))
+            model = cmd.get("model", model)
+            llm = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+            _emit({"type": "configured", "model": model})
+        elif cmd_type == "user_message":
+            _handle_user_message(
+                cmd, messages, llm, pool, tools, system_message, model, log,
+            )
+
+    return llm, model
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
-    """Run the JSON-over-stdio bridge event loop.
+    """Run the JSON-over-stdio bridge.
 
-    Starts the MCP client pool, emits a ``ready`` event, then processes
-    newline-delimited JSON commands from stdin until EOF or ``shutdown``.
-
-    Supported commands (stdin → bridge):
-        ``user_message``  — ``{"type":"user_message","text":"..."}``
-        ``clear_session`` — ``{"type":"clear_session"}``
-        ``configure``     — ``{"type":"configure","api_key":"...","base_url":"...","model":"..."}``
-        ``shutdown``      — ``{"type":"shutdown"}``
-
-    Emitted events (bridge → stdout):
-        ``ready``         — ``{"type":"ready","tool_count":N,"model":"..."}``
-        ``token``         — ``{"type":"token","text":"..."}``
-        ``tool_started``  — ``{"type":"tool_started","names":[...]}``
-        ``tool_finished`` — ``{"type":"tool_finished","name":"..."}``
-        ``turn_done``     — ``{"type":"turn_done","finish_reason":"stop","elapsed":1.23}``
-        ``error``         — ``{"type":"error","category":"...","message":"..."}``
+    Starts the MCP client pool, emits a ``ready`` event, then delegates
+    to :func:`_event_loop` for command processing.
     """
     import os
 
-    # Redirect stderr so Python warnings/tracebacks don't pollute the
-    # JSON stdout channel.  We keep a reference for logging.
     log = sys.stderr
 
     try:
@@ -209,43 +226,15 @@ def main() -> None:
         _emit({"type": "error", "category": "Startup", "message": str(exc)})
         sys.exit(1)
 
-    # The Swift app tells us which provider/model to use via the first
-    # configure command.  For now, we read env vars or default to local.
-    api_key  = os.environ.get("SYSCONTROL_API_KEY", "ollama")
+    api_key = os.environ.get("SYSCONTROL_API_KEY", "ollama")
     base_url = os.environ.get("SYSCONTROL_BASE_URL", "http://localhost:11434/v1")
-    model    = os.environ.get("SYSCONTROL_MODEL", "qwen2.5:7b")
+    model = os.environ.get("SYSCONTROL_MODEL", "qwen2.5:7b")
 
     llm = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
     _emit({"type": "ready", "tool_count": len(tools), "model": model})
 
-    messages: list[dict] = []
-
     try:
-        while True:
-            cmd = _read_command()
-            if cmd is None:
-                break  # EOF — parent closed pipe
-
-            cmd_type = cmd.get("type", "")
-
-            if cmd_type == "shutdown":
-                break
-            elif cmd_type == "clear_session":
-                messages.clear()
-                _emit({"type": "session_cleared"})
-            elif cmd_type == "configure":
-                # Allow runtime reconfiguration of provider.
-                api_key  = cmd.get("api_key", api_key)
-                base_url = cmd.get("base_url", base_url)
-                model    = cmd.get("model", model)
-                llm = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
-                _emit({"type": "configured", "model": model})
-            elif cmd_type == "user_message":
-                _handle_user_message(
-                    cmd, messages, llm, pool, tools, system_message, model, log,
-                )
-            # Unknown command types are silently ignored for forward compatibility.
-
+        _event_loop(pool, tools, system_message, llm, model, log)
     except KeyboardInterrupt:
         pass
     finally:
