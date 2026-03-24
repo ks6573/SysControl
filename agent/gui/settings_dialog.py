@@ -11,7 +11,6 @@ import json
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -289,8 +288,7 @@ class SettingsDialog(QDialog):
             self._model_combo.addItem(LOCAL_MODEL)
 
     def _on_accept(self) -> None:
-        if self._radio_cloud.isChecked():
-            if not self._api_key_edit.text().strip():
-                QMessageBox.warning(self, "Missing API Key", "Please enter your Ollama Cloud API key.")
-                return
+        if self._radio_cloud.isChecked() and not self._api_key_edit.text().strip():
+            QMessageBox.warning(self, "Missing API Key", "Please enter your Ollama Cloud API key.")
+            return
         self.accept()

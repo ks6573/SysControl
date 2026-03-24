@@ -11,7 +11,6 @@ import atexit
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
-
 from PySide6.QtGui import QAction, QCloseEvent, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -32,7 +31,6 @@ from agent.gui.input_widget import InputWidget
 from agent.gui.settings_dialog import SettingsDialog, save_config
 from agent.gui.sidebar import ChatHistorySidebar, ChatViewerDialog
 from agent.gui.worker import AgentWorker, ProviderConfig
-
 
 _SIDEBAR_WIDTH = 380  # px — expanded sidebar panel width
 

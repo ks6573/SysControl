@@ -92,21 +92,13 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Copy app icon (.icns) from tracked source (with fallback)
-TRACKED_ICON="$SCRIPT_DIR/SysControl/Resources/AppIcon.icns"
-LEGACY_ICON="$PROJECT_ROOT/build_resources/SysControl.icns"
-ICON_SOURCE=""
-if [ -f "$TRACKED_ICON" ]; then
-    ICON_SOURCE="$TRACKED_ICON"
-elif [ -f "$LEGACY_ICON" ]; then
-    ICON_SOURCE="$LEGACY_ICON"
-fi
-
-if [ -n "$ICON_SOURCE" ]; then
+# Copy app icon (.icns) from tracked source
+ICON_SOURCE="$SCRIPT_DIR/SysControl/Resources/AppIcon.icns"
+if [ -f "$ICON_SOURCE" ]; then
     cp "$ICON_SOURCE" "$RESOURCES/AppIcon.icns"
     echo "  App icon: $ICON_SOURCE"
 else
-    echo "  Warning: app icon not found (looked for $TRACKED_ICON and $LEGACY_ICON)"
+    echo "  Warning: app icon not found at $ICON_SOURCE"
 fi
 
 # Copy Python backend into Resources

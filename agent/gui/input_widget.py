@@ -10,7 +10,6 @@ from PySide6.QtGui import QFont, QKeyEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
-    QSizePolicy,
     QTextEdit,
     QWidget,
 )

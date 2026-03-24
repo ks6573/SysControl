@@ -29,20 +29,10 @@ dependencies = [
 [project.scripts]
 syscontrol        = "agent.cli:main"
 syscontrol-server = "mcp.server:main"
-syscontrol-gui    = "agent.gui.app:main"
 
 [project.optional-dependencies]
 gpu = [
     "nvidia-ml-py>=12.0.0",
-]
-gui = [
-    "PySide6>=6.6.0",
-    "markdown>=3.5.0",
-]
-bundle = [
-    "syscontrol[gui]",
-    "pyinstaller>=6.0.0",
-    "Pillow>=10.0.0",
 ]
 dev = [
     "ruff>=0.4.0",
@@ -57,7 +47,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 # Package layout: root shims + both sub-packages.
-include = ["agent.py", "gui.py", "agent/", "mcp/"]
+include = ["agent.py", "agent/", "mcp/"]
 
 
 # ── ruff ──────────────────────────────────────────────────────────────────────

@@ -13,17 +13,15 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 from dataclasses import dataclass
 
 from openai import OpenAI
 from PySide6.QtCore import QObject, QThread, Signal
 
 from agent.core import (
-    MAX_TOKENS,
+    RESPONSE_STYLE_GUIDANCE,
     MCPClient,
     MCPClientPool,
-    RESPONSE_STYLE_GUIDANCE,
     TurnCallbacks,
     load_memory,
     load_system_prompt,

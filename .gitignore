@@ -34,7 +34,7 @@ reminder_log.txt
 *.key
 *.pem
 secrets.json
-# Remote bridge config contains bot tokens — never commit it.
+# Remote bridge config contains bot tokens — never commit.
 # Copy remote_config.example.json to ~/.syscontrol/remote_config.json instead.
 remote_config.json
 
@@ -65,15 +65,11 @@ htmlcov/
 .coverage
 coverage.xml
 
-# ── Remote bridge (tabled for now) ───────────────────────────────────────────
-agent/remote.py
-agent/REMOTE_SETUP.md
-
 # ── Claude Code ──────────────────────────────────────────────────────────────
 .claude/
 CLAUDE.md
 
-# ── PyInstaller build resources (generated) ──────────────────────────────────
+# ── Build resources (generated icons) ────────────────────────────────────────
 build_resources/SysControl.icns
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
