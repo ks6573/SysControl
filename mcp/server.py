@@ -239,9 +239,13 @@ def _start_reminder_checker_once() -> None:
 # ── MCP helpers ──────────────────────────────────────────────────────────────
 
 def _classify_pressure(percent: float) -> str:
-    if percent >= 90: return "critical"
-    if percent >= 75: return "high"
-    if percent >= 50: return "moderate"
+    """Classify a resource-usage percentage into a severity label."""
+    if percent >= 90:
+        return "critical"
+    if percent >= 75:
+        return "high"
+    if percent >= 50:
+        return "moderate"
     return "low"
 
 
@@ -396,6 +400,7 @@ def _safe(fn: Callable[[], object]) -> object | None:
 
 
 def make_error(id_: int | None, code: int, message: str) -> dict:
+    """Build a JSON-RPC 2.0 error response envelope."""
     return {
         "jsonrpc": "2.0",
         "id": id_,
@@ -1260,11 +1265,16 @@ def _parse_reminder_time(s: str) -> datetime.datetime | None:
 
 
 def _human_timedelta(delta: datetime.timedelta) -> str:
+    """Format a timedelta as a short human-readable string."""
     secs = int(delta.total_seconds())
-    if secs < 0: return "overdue"
-    if secs < 60: return f"{secs} seconds"
-    if secs < 3600: return f"{secs // 60} minutes"
-    if secs < 86400: return f"{secs // 3600} hours {(secs % 3600) // 60} minutes"
+    if secs < 0:
+        return "overdue"
+    if secs < 60:
+        return f"{secs} seconds"
+    if secs < 3600:
+        return f"{secs // 60} minutes"
+    if secs < 86400:
+        return f"{secs // 3600} hours {(secs % 3600) // 60} minutes"
     return f"{secs // 86400} days"
 
 
@@ -1687,15 +1697,24 @@ def check_app_updates() -> dict:
 # ── Package tracking ──────────────────────────────────────────────────────────
 
 def _detect_carrier(tn: str) -> str:
+    """Guess the shipping carrier from a tracking number pattern."""
     tn = re.sub(r"\s+", "", tn).upper()
-    if tn.startswith("TBA"):                           return "amazon_logistics"
-    if re.match(r"^1Z[A-Z0-9]{16}$", tn):             return "ups"
-    if re.match(r"^(94|93|92|91|90)\d{18,20}$", tn): return "usps"
-    if re.match(r"^[A-Z]{2}\d{9}[A-Z]{2}$", tn):     return "usps"
-    if _FEDEX_RE.match(tn):                            return "fedex"   # 12, 15, or 22 digits
-    if re.match(r"^\d{20,21}$", tn):                  return "usps"
-    if re.match(r"^\d{10,11}$", tn):                  return "dhl"
-    if re.match(r"^(JD|GM)\d{14,20}$", tn):           return "dhl"
+    if tn.startswith("TBA"):
+        return "amazon_logistics"
+    if re.match(r"^1Z[A-Z0-9]{16}$", tn):
+        return "ups"
+    if re.match(r"^(94|93|92|91|90)\d{18,20}$", tn):
+        return "usps"
+    if re.match(r"^[A-Z]{2}\d{9}[A-Z]{2}$", tn):
+        return "usps"
+    if _FEDEX_RE.match(tn):
+        return "fedex"
+    if re.match(r"^\d{20,21}$", tn):
+        return "usps"
+    if re.match(r"^\d{10,11}$", tn):
+        return "dhl"
+    if re.match(r"^(JD|GM)\d{14,20}$", tn):
+        return "dhl"
     return "unknown"
 
 
@@ -2118,72 +2137,80 @@ def get_time_machine_status() -> dict:
     return result
 
 
+def _tail_macos_log(lines: int, filter_str: str) -> dict:
+    """Tail the macOS unified log (last 5 minutes)."""
+    cmd = ["log", "show", "--last", "5m", "--style", "compact"]
+    if filter_str:
+        # Escape backslashes and double quotes for NSPredicate string literal.
+        safe = filter_str.replace("\\", "\\\\").replace('"', '\\"')
+        cmd += ["--predicate", f'eventMessage CONTAINS[c] "{safe}"']
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        all_lines = [l for l in proc.stdout.splitlines() if l.strip()]
+        tail = all_lines[-lines:]
+        return {
+            "platform": "macOS",
+            "source":   "unified system log (last 5 minutes)",
+            "filter":   filter_str or None,
+            "line_count": len(tail),
+            "lines":    tail,
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Log command timed out — try reducing lines or adding a filter."}
+    except Exception as exc:
+        return {"error": f"Failed to read logs: {exc}"}
+
+
+def _tail_linux_log(lines: int, filter_str: str) -> dict:
+    """Tail Linux system logs via journalctl or /var/log/syslog fallback."""
+    if shutil.which("journalctl"):
+        cmd = ["journalctl", "-n", str(lines), "--no-pager", "-o", "short"]
+        if filter_str:
+            try:
+                re.compile(filter_str)
+            except re.error:
+                return {"error": "Invalid regex in filter_str."}
+            cmd += ["-g", filter_str]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            log_lines = proc.stdout.splitlines()
+            return {
+                "platform": "Linux", "source": "journalctl",
+                "filter": filter_str or None,
+                "line_count": len(log_lines), "lines": log_lines,
+            }
+        except Exception as exc:
+            return {"error": f"journalctl failed: {exc}"}
+    syslog = pathlib.Path("/var/log/syslog")
+    if syslog.exists():
+        try:
+            all_lines = syslog.read_text(errors="replace").splitlines()
+            tail = [
+                l for l in all_lines
+                if not filter_str or filter_str.lower() in l.lower()
+            ][-lines:]
+            return {
+                "platform": "Linux", "source": "/var/log/syslog",
+                "filter": filter_str or None,
+                "line_count": len(tail), "lines": tail,
+            }
+        except PermissionError:
+            return {"error": "Permission denied reading /var/log/syslog. Try sudo."}
+    return {"error": "No supported log source found (journalctl or /var/log/syslog)."}
+
+
 def tail_system_logs(lines: int = 50, filter_str: str = "") -> dict:
     """Tail recent system logs. macOS: unified log (last 5 min). Linux: journalctl."""
-    lines  = max(10, min(lines, 500))
+    lines = max(10, min(lines, 500))
 
     # Sanitise filter_str: cap length and strip control characters.
     filter_str = filter_str[:200]
     filter_str = re.sub(r"[\x00-\x1f]", "", filter_str)
 
     if IS_MACOS:
-        cmd = ["log", "show", "--last", "5m", "--style", "compact"]
-        if filter_str:
-            # Escape backslashes and double quotes for NSPredicate string literal.
-            safe = filter_str.replace("\\", "\\\\").replace('"', '\\"')
-            cmd += ["--predicate", f'eventMessage CONTAINS[c] "{safe}"']
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            all_lines = [l for l in proc.stdout.splitlines() if l.strip()]
-            tail = all_lines[-lines:]
-            return {
-                "platform": "macOS",
-                "source":   "unified system log (last 5 minutes)",
-                "filter":   filter_str or None,
-                "line_count": len(tail),
-                "lines":    tail,
-            }
-        except subprocess.TimeoutExpired:
-            return {"error": "Log command timed out — try reducing lines or adding a filter."}
-        except Exception as exc:
-            return {"error": f"Failed to read logs: {exc}"}
-
+        return _tail_macos_log(lines, filter_str)
     if IS_LINUX:
-        if shutil.which("journalctl"):
-            cmd = ["journalctl", "-n", str(lines), "--no-pager", "-o", "short"]
-            if filter_str:
-                try:
-                    re.compile(filter_str)
-                except re.error:
-                    return {"error": "Invalid regex in filter_str."}
-                cmd += ["-g", filter_str]
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-                log_lines = proc.stdout.splitlines()
-                return {
-                    "platform": "Linux", "source": "journalctl",
-                    "filter": filter_str or None,
-                    "line_count": len(log_lines), "lines": log_lines,
-                }
-            except Exception as exc:
-                return {"error": f"journalctl failed: {exc}"}
-        syslog = pathlib.Path("/var/log/syslog")
-        if syslog.exists():
-            try:
-                all_lines = syslog.read_text(errors="replace").splitlines()
-                tail = [
-                    l for l in all_lines
-                    if not filter_str or filter_str.lower() in l.lower()
-                ][-lines:]
-                return {
-                    "platform": "Linux", "source": "/var/log/syslog",
-                    "filter": filter_str or None,
-                    "line_count": len(tail), "lines": tail,
-                }
-            except PermissionError:
-                return {"error": "Permission denied reading /var/log/syslog. Try sudo."}
-        return {"error": "No supported log source found (journalctl or /var/log/syslog)."}
-
+        return _tail_linux_log(lines, filter_str)
     return {"error": f"tail_system_logs is not supported on {_SYSTEM}."}
 
 
@@ -2529,6 +2556,32 @@ def _escape_applescript(s: str) -> str:
     return s
 
 
+def _imessage_fallback(safe_recipient: str, safe_message: str, first_stderr: str) -> dict | None:
+    """Try sending an iMessage without specifying the service (SMS relay compatible).
+
+    Returns an error dict on failure, or ``None`` on success.
+    """
+    script = (
+        f'tell application "Messages"\n'
+        f'  send "{safe_message}" to buddy "{safe_recipient}"\n'
+        f'end tell'
+    )
+    proc = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True, text=True, timeout=15,
+    )
+    if proc.returncode != 0:
+        return {
+            "error": proc.stderr.strip() or first_stderr,
+            "hint": (
+                "Make sure Messages.app is signed in and you have granted "
+                "Automation permission to Terminal/iTerm in System Settings → "
+                "Privacy & Security → Automation."
+            ),
+        }
+    return None
+
+
 def send_imessage(recipient: str, message: str) -> dict:
     """Send an iMessage or SMS via macOS Messages.app using AppleScript."""
     denied = _permission_check("allow_messaging", "send_imessage")
@@ -2552,7 +2605,6 @@ def send_imessage(recipient: str, message: str) -> dict:
     safe_recipient = _escape_applescript(recipient_clean)
     safe_message = _escape_applescript(message)
 
-    # AppleScript: send to a buddy (phone number or email).
     script = (
         f'tell application "Messages"\n'
         f'  set targetService to 1st service whose service type = iMessage\n'
@@ -2566,25 +2618,9 @@ def send_imessage(recipient: str, message: str) -> dict:
             capture_output=True, text=True, timeout=15,
         )
         if proc.returncode != 0:
-            # Fallback: try without specifying service (works for SMS relay too)
-            script2 = (
-                f'tell application "Messages"\n'
-                f'  send "{safe_message}" to buddy "{safe_recipient}"\n'
-                f'end tell'
-            )
-            proc2 = subprocess.run(
-                ["osascript", "-e", script2],
-                capture_output=True, text=True, timeout=15,
-            )
-            if proc2.returncode != 0:
-                return {
-                    "error": proc2.stderr.strip() or proc.stderr.strip(),
-                    "hint": (
-                        "Make sure Messages.app is signed in and you have granted "
-                        "Automation permission to Terminal/iTerm in System Settings → "
-                        "Privacy & Security → Automation."
-                    ),
-                }
+            err = _imessage_fallback(safe_recipient, safe_message, proc.stderr.strip())
+            if err is not None:
+                return err
         return {"status": "sent", "recipient": recipient_clean, "message": message}
     except subprocess.TimeoutExpired:
         return {"error": "AppleScript timed out sending iMessage."}
@@ -4548,7 +4584,33 @@ TOOLS = {
 
 # ── MCP request dispatcher ────────────────────────────────────────────────────
 
+def _handle_tools_call(id_: int | None, params: dict) -> dict:
+    """Execute a ``tools/call`` request and return the JSON-RPC response."""
+    tool_name = params.get("name")
+    args = params.get("arguments", {})
+    if tool_name not in TOOLS:
+        return make_error(id_, -32601, f"Unknown tool: {tool_name}")
+    try:
+        result = TOOLS[tool_name]["fn"](args)
+        if isinstance(result, tuple):
+            data, img_b64 = result
+            content = [
+                {"type": "text", "text": json.dumps(data, indent=2)},
+                {"type": "image", "data": img_b64, "mimeType": "image/png"},
+            ]
+        else:
+            content = [{"type": "text", "text": json.dumps(result, indent=2)}]
+        return {"jsonrpc": "2.0", "id": id_, "result": {"content": content}}
+    except Exception as e:
+        return make_error(id_, -32603, str(e))
+
+
 def handle_request(request: dict) -> dict | None:
+    """Dispatch a JSON-RPC request to the appropriate handler.
+
+    Supports ``initialize``, ``tools/list``, ``tools/call``, and ``ping``.
+    Returns ``None`` for notifications (requests without an ``id``).
+    """
     method = request.get("method")
     id_ = request.get("id")
     params = request.get("params", {})
@@ -4581,25 +4643,8 @@ def handle_request(request: dict) -> dict | None:
         return {"jsonrpc": "2.0", "id": id_, "result": {"tools": tools_list}}
 
     if method == "tools/call":
-        tool_name = params.get("name")
-        args = params.get("arguments", {})
-        if tool_name not in TOOLS:
-            return make_error(id_, -32601, f"Unknown tool: {tool_name}")
-        try:
-            result = TOOLS[tool_name]["fn"](args)
-            if isinstance(result, tuple):
-                data, img_b64 = result
-                content = [
-                    {"type": "text", "text": json.dumps(data, indent=2)},
-                    {"type": "image", "data": img_b64, "mimeType": "image/png"},
-                ]
-            else:
-                content = [{"type": "text", "text": json.dumps(result, indent=2)}]
-            return {"jsonrpc": "2.0", "id": id_, "result": {"content": content}}
-        except Exception as e:
-            return make_error(id_, -32603, str(e))
+        return _handle_tools_call(id_, params)
 
-    # Ping / unknown
     if method == "ping":
         return {"jsonrpc": "2.0", "id": id_, "result": {}}
 
@@ -4609,6 +4654,7 @@ def handle_request(request: dict) -> dict | None:
 # ── stdio transport loop ──────────────────────────────────────────────────────
 
 def main() -> None:
+    """MCP stdio transport loop — read JSON-RPC requests from stdin, write responses to stdout."""
     _start_reminder_checker_once()
     for line in sys.stdin:
         line = line.strip()

@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Callable
+from collections.abc import Callable
 
 import httpx
 import uvicorn

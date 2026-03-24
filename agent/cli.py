@@ -197,23 +197,22 @@ def _flush_token(
 
 def _build_cli_callbacks(
     spinner: _Spinner,
-) -> tuple[TurnCallbacks, list[str]]:
+) -> tuple[TurnCallbacks, list[str], list[tuple[str, str]]]:
     """Build CLI-specific presentation callbacks for a single turn.
 
     Args:
         spinner: Terminal spinner instance managed by the caller.
 
     Returns:
-        A ``(callbacks, pending_buf)`` tuple.  *pending_buf* is a
+        A ``(callbacks, pending_buf, errors)`` triple.  *pending_buf* is a
         single-element list used as a mutable string ref so the caller
         can flush any trailing partial line after the turn completes.
-        If an error occurs, callbacks raise immediately via the captured
-        *error* slot (a single-element list of ``(category, message)``
-        or empty).
+        *errors* is a mutable list that the ``on_error`` callback appends
+        to; the caller inspects it after the turn to raise typed exceptions.
     """
     first_content = [True]  # mutable flag — avoids nonlocal across closures
     pending = [""]          # line buffer for colorized output
-    error: list[tuple[str, str]] = []
+    errors: list[tuple[str, str]] = []
 
     def _on_token(text: str) -> None:
         _flush_token(text, spinner, first_content, pending)
@@ -231,8 +230,8 @@ def _build_cli_callbacks(
 
     def _on_error(category: str, message: str) -> None:
         spinner.stop()
-        if not error:  # keep only the first error
-            error.append((category, message))
+        if not errors:  # keep only the first error
+            errors.append((category, message))
 
     callbacks = TurnCallbacks(
         on_token=_on_token,
@@ -240,10 +239,8 @@ def _build_cli_callbacks(
         on_tool_finished=_on_tool_finished,
         on_error=_on_error,
     )
-    # Attach error slot so the caller can inspect it after the turn.
-    callbacks._error = error  # type: ignore[attr-defined]
 
-    return callbacks, pending
+    return callbacks, pending, errors
 
 
 def run_turn(
@@ -270,7 +267,7 @@ def run_turn(
         _ToolError: On tool execution failure.
     """
     spinner = _Spinner()
-    callbacks, pending = _build_cli_callbacks(spinner)
+    callbacks, pending, errors = _build_cli_callbacks(spinner)
 
     spinner.start("Thinking…")
 
@@ -284,9 +281,8 @@ def run_turn(
 
     # If the shared loop reported an error, raise a typed exception
     # so the REPL can display appropriate user-facing recovery guidance.
-    error = callbacks._error  # type: ignore[attr-defined]
-    if error:
-        cat, msg = error[0]
+    if errors:
+        cat, msg = errors[0]
         if cat in ("Timeout", "Connection", "Auth", "API", "LLM", "Loop"):
             raise _LLMError(msg)
         elif cat == "MCP":

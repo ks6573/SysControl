@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 try:
     import fcntl as fcntl_mod  # noqa: F401 — re-exported for cli.py / server.py
