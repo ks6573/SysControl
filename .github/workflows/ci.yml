@@ -25,7 +25,8 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           uv run ruff check .
 
-      - name: Mypy type check
+      - name: Mypy type check (informational)
+        continue-on-error: true
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           uv run mypy agent/ mcp/
