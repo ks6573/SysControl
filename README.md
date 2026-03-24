@@ -441,8 +441,3 @@ After `pip install -e .`, these registered scripts also work:
 | `syscontrol-server` | MCP server (stdio) |
 | `syscontrol-gui` | PySide6 GUI |
 
----
-
-## License
-
-

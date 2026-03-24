@@ -3,7 +3,6 @@ name = "syscontrol"
 version = "0.2.0"
 description = "All-In-One AI agent with MCP tool server; Ultron but slightly weaker "
 readme = "README.md"
-***REMOVED***
 requires-python = ">=3.11"
 keywords = ["mcp", "system-monitor", "ollama", "ai", "agent"]
 classifiers = [
@@ -11,7 +10,6 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
-    ***REMOVED***
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Operating System :: Microsoft :: Windows",
