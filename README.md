@@ -4,7 +4,7 @@ An AI agent for your Mac that answers questions about your system — and can ex
 
 59 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, shell, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
-Four ways to run it — pick whichever fits your workflow:
+Three ways to run it — pick whichever fits your workflow:
 
 | | How | Best for |
 |---|---|---|
@@ -146,6 +146,8 @@ Say any natural goodbye (`bye`, `exit`, `quit`, `done`, `farewell`, `cya`, `good
 ### Session Memory
 
 On exit you are prompted to save a short note about the session. Notes are appended to `SysControl_Memory.md` with a timestamp. On next startup, if the file exists its contents are injected into the system prompt so the agent has context from prior sessions. The file is append-only and plain text — edit or delete entries freely.
+
+The agent can also save and recall memory mid-session via the `read_memory` and `append_memory_note` tools — no need to wait for exit.
 
 > **Privacy:** SysControl stores only what you explicitly save. Ollama processes queries locally by default.
 
@@ -368,3 +370,79 @@ Detected automatically from hardware and platform:
 | Intel Mac | ✗ Not supported (no BIOS) | ✗ Not supported (macOS) |
 | Intel K/KF/KS — Windows/Linux | ✅ Intel XTU or BIOS | ✅ MSI Afterburner |
 | AMD Ryzen — Windows/Linux | ✅ Ryzen Master / PBO | ✅ MSI Afterburner |
+
+---
+
+## Project Structure
+
+```
+SysControl/
+├── agent.py                 # CLI entry-point shim
+├── gui.py                   # PySide6 GUI entry-point shim
+├── remote.py                # Remote bridge entry-point shim
+├── agent/
+│   ├── cli.py               # Interactive terminal REPL
+│   ├── core.py              # Shared agent logic: MCP client, streaming loop, helpers
+│   ├── bridge.py            # JSON-over-stdio bridge for the Swift app
+│   ├── paths.py             # Frozen-app-aware path resolution
+│   └── remote.py            # Telegram / WhatsApp / Messenger webhook bridge
+├── mcp/
+│   ├── server.py            # MCP tool server (59 tools + self-extension)
+│   └── prompt.json          # System prompt for the agent
+├── swift/
+│   ├── Package.swift         # SwiftPM package definition
+│   ├── build.sh              # Build + bundle script
+│   ├── install.sh            # One-line installer
+│   └── SysControl/           # SwiftUI source (App, Models, Views, Services, Storage)
+├── scripts/
+│   ├── build_macos.sh        # PyInstaller macOS build
+│   └── build_dmg.sh          # DMG creation script
+├── pyproject.toml            # Python project config, dependencies, linting
+├── VERSION                   # Current release version
+└── SysControl.command        # Double-click launcher for the GUI
+```
+
+### Architecture
+
+```
+┌──────────────────────┐
+│    SwiftUI App       │   Native macOS frontend
+│  (swift/SysControl/) │   Onboarding, chat, settings, history
+└────────┬─────────────┘
+         │  JSON-over-stdio (bridge.py)
+┌────────▼─────────────┐
+│    Agent Core        │   Streaming agentic loop, LLM client
+│  (agent/core.py)     │   Provider selection, tool dispatch
+└────────┬─────────────┘
+         │  JSON-RPC (stdio)
+┌────────▼─────────────┐
+│    MCP Server        │   59 tools, self-extension, permission checks
+│  (mcp/server.py)     │   Concurrent tool execution via client pool
+└──────────────────────┘
+```
+
+The Swift frontend communicates with the Python backend through `agent/bridge.py`, which speaks a simple JSON-over-stdio protocol. The bridge reuses the same `MCPClientPool` and streaming loop used by the CLI, so all tools and capabilities are shared across every interface.
+
+---
+
+## Entry Points
+
+| Command | Description |
+|---|---|
+| `uv run agent.py` | Interactive CLI agent |
+| `uv run remote.py` | Remote bridge (Telegram, WhatsApp, Messenger) |
+| `uv run gui.py` | PySide6 desktop GUI (requires `uv pip install -e '.[gui]'`) |
+
+After `pip install -e .`, these registered scripts also work:
+
+| Script | Description |
+|---|---|
+| `syscontrol` | CLI agent |
+| `syscontrol-server` | MCP server (stdio) |
+| `syscontrol-gui` | PySide6 GUI |
+
+---
+
+## License
+
+
