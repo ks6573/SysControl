@@ -170,6 +170,31 @@ class _Spinner:
 _MAX_PENDING = 8192  # flush the line buffer if no newline arrives within this many chars
 
 
+def _flush_token(
+    text: str,
+    spinner: "_Spinner",
+    first_content: list[bool],
+    pending: list[str],
+) -> None:
+    """Write a streaming token to stdout, flushing complete lines via colorize()."""
+    if first_content[0]:
+        spinner.stop()
+        sys.stdout.write(f"\n{BOLD}{GREEN}Assistant:{RESET} ")
+        sys.stdout.flush()
+        first_content[0] = False
+
+    pending[0] += text
+
+    while "\n" in pending[0]:
+        line, pending[0] = pending[0].split("\n", 1)
+        print(colorize(line), flush=True)
+
+    # CR-6: guard against unbounded buffer (e.g. base64 blobs with no newlines).
+    if len(pending[0]) > _MAX_PENDING:
+        print(colorize(pending[0]), flush=True)
+        pending[0] = ""
+
+
 def _build_cli_callbacks(
     spinner: _Spinner,
 ) -> tuple[TurnCallbacks, list[str]]:
@@ -191,23 +216,7 @@ def _build_cli_callbacks(
     error: list[tuple[str, str]] = []
 
     def _on_token(text: str) -> None:
-        if first_content[0]:
-            spinner.stop()
-            sys.stdout.write(f"\n{BOLD}{GREEN}Assistant:{RESET} ")
-            sys.stdout.flush()
-            first_content[0] = False
-
-        pending[0] += text
-
-        # Flush complete lines through the colorizer.
-        while "\n" in pending[0]:
-            line, pending[0] = pending[0].split("\n", 1)
-            print(colorize(line), flush=True)
-
-        # CR-6: guard against unbounded buffer (e.g. base64 blobs with no newlines).
-        if len(pending[0]) > _MAX_PENDING:
-            print(colorize(pending[0]), flush=True)
-            pending[0] = ""
+        _flush_token(text, spinner, first_content, pending)
 
     def _on_tool_started(names: list[str]) -> None:
         if first_content[0]:
@@ -411,7 +420,11 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
         return ProviderSelection(LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)")
 
     # ── Interactive fallback ───────────────────────────────────────────────
-    print(f"\n{BOLD}Select AI model (type {CYAN}cloud{RESET}{BOLD} or {CYAN}local{RESET}{BOLD}):{RESET} ", end="", flush=True)
+    prompt = (
+        f"\n{BOLD}Select AI model "
+        f"(type {CYAN}cloud{RESET}{BOLD} or {CYAN}local{RESET}{BOLD}):{RESET} "
+    )
+    print(prompt, end="", flush=True)
     while True:
         try:
             choice = input("").strip().lower()
@@ -466,8 +479,12 @@ def _init_mcp_and_prompt() -> tuple[MCPClient, str]:
         print(f"\nFailed to start MCP server: {startup_error}", file=sys.stderr)
         sys.exit(1)
 
-    assert mcp_client is not None
-    assert system_prompt is not None
+    assert mcp_client is not None, (
+        "_init_mcp_and_prompt: MCPClient not set — startup thread failed"
+    )
+    assert system_prompt is not None, (
+        "_init_mcp_and_prompt: system_prompt not set — prompt thread failed"
+    )
     return mcp_client, system_prompt
 
 

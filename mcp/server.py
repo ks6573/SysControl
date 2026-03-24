@@ -765,28 +765,72 @@ def get_system_uptime() -> dict:
     }
 
 
-def get_system_alerts() -> dict:
-    alerts = []
+def _check_gpu_alerts(alerts: list[dict]) -> None:
+    """Append GPU load and temperature alerts to *alerts* if pynvml is available."""
+    if not GPU_AVAILABLE or GPU_BACKEND != "pynvml":
+        return
+    try:
+        for i, h in enumerate(_get_nvml_handles()):
+            util = pynvml.nvmlDeviceGetUtilizationRates(h)
+            name = pynvml.nvmlDeviceGetName(h)
+            if isinstance(name, bytes):
+                name = name.decode()
+            load_pct = util.gpu
+            if load_pct >= 95:
+                alerts.append({"severity": "critical", "resource": f"gpu:{i}",
+                    "message": f"GPU {name} load critically high at {load_pct}%", "value": load_pct})
+            try:
+                temp = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
+                if temp >= 85:
+                    alerts.append({"severity": "critical", "resource": f"gpu:{i}",
+                        "message": f"GPU {name} temp critically high at {temp}°C", "value": temp})
+                elif temp >= 75:
+                    alerts.append({"severity": "warning", "resource": f"gpu:{i}",
+                        "message": f"GPU {name} temp elevated at {temp}°C", "value": temp})
+            except pynvml.NVMLError:
+                pass
+    except Exception as exc:
+        import sys as _sys; _sys.stderr.write(f"[syscontrol] GPU alert check failed: {exc}\n")
 
-    def _alert(severity, resource, message, value):
-        alerts.append({"severity": severity, "resource": resource, "message": message, "value": value})
+
+def _build_alert_summary(alerts: list[dict]) -> str:
+    """Return a human-readable summary string for the given alert list."""
+    if not alerts:
+        return "All systems nominal — no alerts detected."
+    critical_n = sum(1 for a in alerts if a["severity"] == "critical")
+    warning_n  = sum(1 for a in alerts if a["severity"] == "warning")
+    if critical_n:
+        return (f"{critical_n} critical and {warning_n} warning alert(s) detected."
+                " Immediate attention recommended.")
+    return f"{len(alerts)} warning(s) detected. System under stress but not critical."
+
+
+def get_system_alerts() -> dict:
+    """Return resource alerts for CPU, RAM, swap, disk, GPU, and battery."""
+    alerts: list[dict] = []
 
     cpu_pct = psutil.cpu_percent(interval=0.5)
     if cpu_pct >= 90:
-        _alert("critical", "cpu", f"CPU usage critically high at {cpu_pct}%", cpu_pct)
+        alerts.append({"severity": "critical", "resource": "cpu",
+            "message": f"CPU usage critically high at {cpu_pct}%", "value": cpu_pct})
     elif cpu_pct >= 75:
-        _alert("warning", "cpu", f"CPU usage elevated at {cpu_pct}%", cpu_pct)
+        alerts.append({"severity": "warning", "resource": "cpu",
+            "message": f"CPU usage elevated at {cpu_pct}%", "value": cpu_pct})
 
     vm = psutil.virtual_memory()
     if vm.percent >= 90:
-        _alert("critical", "ram", f"RAM critically high at {vm.percent}%", vm.percent)
+        alerts.append({"severity": "critical", "resource": "ram",
+            "message": f"RAM critically high at {vm.percent}%", "value": vm.percent})
     elif vm.percent >= 75:
-        _alert("warning", "ram", f"RAM elevated at {vm.percent}%", vm.percent)
+        alerts.append({"severity": "warning", "resource": "ram",
+            "message": f"RAM elevated at {vm.percent}%", "value": vm.percent})
 
     try:
         sw = psutil.swap_memory()
         if sw.total > 0 and sw.percent >= 80:
-            _alert("warning", "swap", f"Swap high at {sw.percent}% — system may be memory-constrained", sw.percent)
+            alerts.append({"severity": "warning", "resource": "swap",
+                "message": f"Swap high at {sw.percent}% — system may be memory-constrained",
+                "value": sw.percent})
     except Exception as exc:
         import sys as _sys; _sys.stderr.write(f"[syscontrol] swap read failed: {exc}\n")
 
@@ -794,48 +838,26 @@ def get_system_alerts() -> dict:
         try:
             usage = psutil.disk_usage(part.mountpoint)
             if usage.percent >= 95:
-                _alert("critical", f"disk:{part.mountpoint}", f"Disk {part.mountpoint} almost full at {usage.percent}%", usage.percent)
+                alerts.append({"severity": "critical", "resource": f"disk:{part.mountpoint}",
+                    "message": f"Disk {part.mountpoint} almost full at {usage.percent}%",
+                    "value": usage.percent})
             elif usage.percent >= 85:
-                _alert("warning", f"disk:{part.mountpoint}", f"Disk {part.mountpoint} getting full at {usage.percent}%", usage.percent)
+                alerts.append({"severity": "warning", "resource": f"disk:{part.mountpoint}",
+                    "message": f"Disk {part.mountpoint} getting full at {usage.percent}%",
+                    "value": usage.percent})
         except (PermissionError, OSError):
             continue
 
-    if GPU_AVAILABLE:
-        try:
-            if GPU_BACKEND == "pynvml":
-                for i, h in enumerate(_get_nvml_handles()):
-                    util = pynvml.nvmlDeviceGetUtilizationRates(h)
-                    name = pynvml.nvmlDeviceGetName(h)
-                    if isinstance(name, bytes):
-                        name = name.decode()
-                    load_pct = util.gpu
-                    if load_pct >= 95:
-                        _alert("critical", f"gpu:{i}", f"GPU {name} load critically high at {load_pct}%", load_pct)
-                    try:
-                        temp = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
-                        if temp >= 85:
-                            _alert("critical", f"gpu:{i}", f"GPU {name} temp critically high at {temp}°C", temp)
-                        elif temp >= 75:
-                            _alert("warning", f"gpu:{i}", f"GPU {name} temp elevated at {temp}°C", temp)
-                    except pynvml.NVMLError:
-                        pass
-        except Exception as exc:
-            import sys as _sys; _sys.stderr.write(f"[syscontrol] GPU alert check failed: {exc}\n")
+    _check_gpu_alerts(alerts)
 
     batt = psutil.sensors_battery()
     if batt is not None and not batt.power_plugged and batt.percent <= 10:
-        _alert("critical", "battery", f"Battery critically low at {batt.percent}% and not plugged in", batt.percent)
+        alerts.append({"severity": "critical", "resource": "battery",
+            "message": f"Battery critically low at {batt.percent}% and not plugged in",
+            "value": batt.percent})
 
+    summary    = _build_alert_summary(alerts)
     has_critical = any(a["severity"] == "critical" for a in alerts)
-    critical_n = sum(1 for a in alerts if a["severity"] == "critical")
-    warning_n = sum(1 for a in alerts if a["severity"] == "warning")
-    if not alerts:
-        summary = "All systems nominal — no alerts detected."
-    elif has_critical:
-        summary = f"{critical_n} critical and {warning_n} warning alert(s) detected. Immediate attention recommended."
-    else:
-        summary = f"{len(alerts)} warning(s) detected. System under stress but not critical."
-
     return {
         "alerts": alerts,
         "alert_count": len(alerts),
@@ -873,94 +895,114 @@ def get_network_connections() -> dict:
     return {"connections": connections, "total": len(connections)}
 
 
-def get_startup_items() -> dict:
-    if IS_MACOS:
-        scan_dirs = [
-            (pathlib.Path.home() / "Library" / "LaunchAgents", "user"),
-            (pathlib.Path("/Library/LaunchAgents"), "system"),
-            (pathlib.Path("/Library/LaunchDaemons"), "system-daemon"),
-        ]
-        items = []
-        for directory, scope in scan_dirs:
-            if not directory.exists():
-                continue
-            for plist_path in sorted(directory.glob("*.plist")):
-                try:
-                    with open(plist_path, "rb") as f:
-                        data = plistlib.load(f)
-                    prog_args = data.get("ProgramArguments", [])
-                    command = " ".join(str(a) for a in prog_args) if prog_args else data.get("Program", "")
-                    items.append({
-                        "name": data.get("Label") or plist_path.stem,
-                        "command": command,
-                        "path": str(plist_path),
-                        "scope": scope,
-                        "run_at_load": bool(data.get("RunAtLoad", False)),
-                    })
-                except (plistlib.InvalidFileException, OSError, KeyError, TypeError):
-                    items.append({
-                        "name": plist_path.stem,
-                        "command": "",
-                        "path": str(plist_path),
-                        "scope": scope,
-                        "run_at_load": None,
-                        "parse_error": True,
-                    })
-        return {"platform": "macOS", "items": items, "count": len(items)}
-
-    if IS_WIN:
-        try:
-            import winreg
-        except ImportError:
-            return {"platform": "Windows", "error": "winreg not available", "items": [], "count": 0}
-        items = []
-        for hive, reg_path, scope in [
-            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "user"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "system"),
-        ]:
+def _get_startup_items_macos() -> dict:
+    """Return launch agents / daemons from standard macOS plist directories."""
+    scan_dirs = [
+        (pathlib.Path.home() / "Library" / "LaunchAgents", "user"),
+        (pathlib.Path("/Library/LaunchAgents"),              "system"),
+        (pathlib.Path("/Library/LaunchDaemons"),             "system-daemon"),
+    ]
+    items: list[dict] = []
+    for directory, scope in scan_dirs:
+        if not directory.exists():
+            continue
+        for plist_path in sorted(directory.glob("*.plist")):
             try:
-                key = winreg.OpenKey(hive, reg_path, 0, winreg.KEY_READ)
-                i = 0
-                while True:
-                    try:
-                        name, value, _ = winreg.EnumValue(key, i)
-                        items.append({"name": name, "command": value, "scope": scope})
-                        i += 1
-                    except OSError:
-                        break
-                winreg.CloseKey(key)
+                with open(plist_path, "rb") as fh:
+                    data = plistlib.load(fh)
+                prog_args = data.get("ProgramArguments", [])
+                command   = (
+                    " ".join(str(a) for a in prog_args)
+                    if prog_args else data.get("Program", "")
+                )
+                items.append({
+                    "name":        data.get("Label") or plist_path.stem,
+                    "command":     command,
+                    "path":        str(plist_path),
+                    "scope":       scope,
+                    "run_at_load": bool(data.get("RunAtLoad", False)),
+                })
+            except (plistlib.InvalidFileException, OSError, KeyError, TypeError):
+                items.append({
+                    "name":        plist_path.stem,
+                    "command":     "",
+                    "path":        str(plist_path),
+                    "scope":       scope,
+                    "run_at_load": None,
+                    "parse_error": True,
+                })
+    return {"platform": "macOS", "items": items, "count": len(items)}
+
+
+def _get_startup_items_windows() -> dict:
+    """Return startup entries from the Windows registry Run keys."""
+    try:
+        import winreg
+    except ImportError:
+        return {"platform": "Windows", "error": "winreg not available", "items": [], "count": 0}
+
+    items: list[dict] = []
+    run_keys = [
+        (winreg.HKEY_CURRENT_USER,
+         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "user"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "system"),
+    ]
+    for hive, reg_path, scope in run_keys:
+        try:
+            key = winreg.OpenKey(hive, reg_path, 0, winreg.KEY_READ)
+            i = 0
+            while True:
+                try:
+                    name, value, _ = winreg.EnumValue(key, i)
+                    items.append({"name": name, "command": value, "scope": scope})
+                    i += 1
+                except OSError:
+                    break
+            winreg.CloseKey(key)
+        except OSError:
+            continue
+    return {"platform": "Windows", "items": items, "count": len(items)}
+
+
+def _get_startup_items_linux() -> dict:
+    """Return XDG autostart entries from ``~/.config/autostart/*.desktop``."""
+    autostart = pathlib.Path.home() / ".config" / "autostart"
+    items: list[dict] = []
+    if autostart.exists():
+        for dp in sorted(autostart.glob("*.desktop")):
+            try:
+                text    = dp.read_text(encoding="utf-8", errors="replace")
+                name    = ""
+                command = ""
+                hidden  = False
+                for line in text.splitlines():
+                    if line.startswith("Name="):
+                        name = line[5:].strip()
+                    elif line.startswith("Exec="):
+                        command = line[5:].strip()
+                    elif line.startswith("Hidden="):
+                        hidden = line[7:].strip().lower() == "true"
+                items.append({
+                    "name":    name or dp.stem,
+                    "command": command,
+                    "path":    str(dp),
+                    "scope":   "user",
+                    "hidden":  hidden,
+                })
             except OSError:
                 continue
-        return {"platform": "Windows", "items": items, "count": len(items)}
+    return {"platform": "Linux", "items": items, "count": len(items)}
 
+
+def get_startup_items() -> dict:
+    """Return platform startup items (launchagents, registry run keys, XDG autostart)."""
+    if IS_MACOS:
+        return _get_startup_items_macos()
+    if IS_WIN:
+        return _get_startup_items_windows()
     if IS_LINUX:
-        autostart = pathlib.Path.home() / ".config" / "autostart"
-        items = []
-        if autostart.exists():
-            for dp in sorted(autostart.glob("*.desktop")):
-                try:
-                    text = dp.read_text(encoding="utf-8", errors="replace")
-                    name = ""
-                    command = ""
-                    hidden = False
-                    for line in text.splitlines():
-                        if line.startswith("Name="):
-                            name = line[5:].strip()
-                        elif line.startswith("Exec="):
-                            command = line[5:].strip()
-                        elif line.startswith("Hidden="):
-                            hidden = line[7:].strip().lower() == "true"
-                    items.append({
-                        "name": name or dp.stem,
-                        "command": command,
-                        "path": str(dp),
-                        "scope": "user",
-                        "hidden": hidden,
-                    })
-                except OSError:
-                    continue
-        return {"platform": "Linux", "items": items, "count": len(items)}
-
+        return _get_startup_items_linux()
     return {"platform": _SYSTEM, "error": f"Not supported on {_SYSTEM}", "items": [], "count": 0}
 
 
@@ -1332,229 +1374,271 @@ def _clothing_suggestions(temp_f: float, code: int, wind_mph: float, humidity_pc
     return suggestions
 
 
+def _resolve_location_coords(
+    location: str,
+) -> tuple[float, float, str, str, str, str] | dict:
+    """Resolve *location* string to GPS coordinates and place labels.
+
+    Args:
+        location: City/address string to geocode, or empty string for IP auto-detect.
+
+    Returns:
+        On success: ``(lat, lon, city_name, region, country, source)`` tuple.
+        On failure: an error dict suitable for returning directly from the tool.
+    """
+    if location.strip():
+        encoded  = urllib.parse.quote(location.strip())
+        url      = (
+            f"https://nominatim.openstreetmap.org/search"
+            f"?q={encoded}&format=json&limit=1"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "syscontrol-mcp/0.1"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            geo_data = json.loads(r.read().decode())
+        if not geo_data:
+            return {"error": f"Location '{location}' not found. Try a different city name."}
+        lat     = float(geo_data[0]["lat"])
+        lon     = float(geo_data[0]["lon"])
+        display = geo_data[0].get("display_name", location)
+        parts   = [p.strip() for p in display.split(",")]
+        city    = parts[0]
+        country = parts[-1] if len(parts) > 1 else ""
+        region  = parts[1]  if len(parts) > 2 else ""
+        return lat, lon, city, region, country, "geocode"
+
+    # Auto-detect from IP via ipinfo.io
+    with urllib.request.urlopen("https://ipinfo.io/json", timeout=8) as r:
+        ip_data = json.loads(r.read().decode())
+    loc_str = ip_data.get("loc", "0,0")
+    lat, lon = map(float, loc_str.split(","))
+    return (
+        lat, lon,
+        ip_data.get("city", "Unknown"),
+        ip_data.get("region", ""),
+        ip_data.get("country", ""),
+        "ip_geolocation",
+    )
+
+
+def _fetch_openmeteo(
+    lat: float, lon: float, temp_unit: str, wind_unit: str, units: str,
+) -> dict:
+    """Fetch current conditions from Open-Meteo (free, no API key required)."""
+    params = (
+        f"latitude={lat}&longitude={lon}"
+        f"&current=temperature_2m,apparent_temperature,relative_humidity_2m,"
+        f"precipitation,weathercode,windspeed_10m,is_day"
+        f"&temperature_unit={temp_unit}&wind_speed_unit={wind_unit}"
+        f"&precipitation_unit={'inch' if units == 'imperial' else 'mm'}"
+        f"&forecast_days=1"
+    )
+    with urllib.request.urlopen(
+        f"https://api.open-meteo.com/v1/forecast?{params}", timeout=10
+    ) as r:
+        return json.loads(r.read().decode())
+
+
 def get_weather(location: str = "", units: str = "imperial") -> dict:
-    units = units if units in ("imperial", "metric") else "imperial"
-    temp_unit  = "fahrenheit" if units == "imperial" else "celsius"
-    wind_unit  = "mph" if units == "imperial" else "kmh"
-    temp_symbol = "°F" if units == "imperial" else "°C"
-    speed_label = "mph" if units == "imperial" else "km/h"
+    """Return current weather conditions for *location* (or the machine's IP city)."""
+    units       = units if units in ("imperial", "metric") else "imperial"
+    temp_unit   = "fahrenheit" if units == "imperial" else "celsius"
+    wind_unit   = "mph"        if units == "imperial" else "kmh"
+    temp_symbol = "°F"         if units == "imperial" else "°C"
+    speed_label = "mph"        if units == "imperial" else "km/h"
 
     try:
-        if location.strip():
-            # Geocode named location via Nominatim (OpenStreetMap)
-            encoded = urllib.parse.quote(location.strip())
-            url = f"https://nominatim.openstreetmap.org/search?q={encoded}&format=json&limit=1"
-            req = urllib.request.Request(url, headers={"User-Agent": "syscontrol-mcp/0.1"})
-            with urllib.request.urlopen(req, timeout=8) as r:
-                geo_data = json.loads(r.read().decode())
-            if not geo_data:
-                return {"error": f"Location '{location}' not found. Try a different city name."}
-            lat = float(geo_data[0]["lat"])
-            lon = float(geo_data[0]["lon"])
-            display = geo_data[0].get("display_name", location)
-            parts = [p.strip() for p in display.split(",")]
-            city_name = parts[0]
-            country = parts[-1] if len(parts) > 1 else ""
-            region = parts[1] if len(parts) > 2 else ""
-            location_source = "geocode"
-        else:
-            # Auto-detect from IP via ipinfo.io
-            with urllib.request.urlopen("https://ipinfo.io/json", timeout=8) as r:
-                ip_data = json.loads(r.read().decode())
-            loc_str = ip_data.get("loc", "0,0")
-            lat, lon = map(float, loc_str.split(","))
-            city_name = ip_data.get("city", "Unknown")
-            region = ip_data.get("region", "")
-            country = ip_data.get("country", "")
-            location_source = "ip_geolocation"
+        coords = _resolve_location_coords(location)
+        if isinstance(coords, dict):
+            return coords  # error dict from geocoding
+        lat, lon, city_name, region, country, location_source = coords
 
-        # Fetch weather from Open-Meteo (free, no API key)
-        params = (
-            f"latitude={lat}&longitude={lon}"
-            f"&current=temperature_2m,apparent_temperature,relative_humidity_2m,"
-            f"precipitation,weathercode,windspeed_10m,is_day"
-            f"&temperature_unit={temp_unit}&wind_speed_unit={wind_unit}"
-            f"&precipitation_unit={'inch' if units == 'imperial' else 'mm'}"
-            f"&forecast_days=1"
-        )
-        weather_url = f"https://api.open-meteo.com/v1/forecast?{params}"
-        with urllib.request.urlopen(weather_url, timeout=10) as r:
-            weather_data = json.loads(r.read().decode())
+        weather_data = _fetch_openmeteo(lat, lon, temp_unit, wind_unit, units)
+        current      = weather_data["current"]
+        temp         = current["temperature_2m"]
+        feels_like   = current["apparent_temperature"]
+        humidity     = current["relative_humidity_2m"]
+        wind         = current["windspeed_10m"]
+        precip       = current["precipitation"]
+        code         = current["weathercode"]
+        is_day       = bool(current["is_day"])
 
-        current = weather_data["current"]
-        temp      = current["temperature_2m"]
-        feels_like = current["apparent_temperature"]
-        humidity  = current["relative_humidity_2m"]
-        wind      = current["windspeed_10m"]
-        precip    = current["precipitation"]
-        code      = current["weathercode"]
-        is_day    = bool(current["is_day"])
-
-        # Convert to °F for clothing logic when units=metric
-        temp_f   = temp if units == "imperial" else (temp * 9 / 5 + 32)
-        wind_mph = wind if units == "imperial" else wind * 0.621371
+        temp_f    = temp if units == "imperial" else (temp * 9 / 5 + 32)
+        wind_mph  = wind if units == "imperial" else wind * 0.621371
         condition = _WMO_DESCRIPTIONS.get(code, f"Weather code {code}")
         clothing  = _clothing_suggestions(temp_f, code, wind_mph, humidity)
 
         return {
             "location": {
-                "city": city_name,
-                "region": region,
-                "country": country,
+                "city":        city_name,
+                "region":      region,
+                "country":     country,
                 "coordinates": {"lat": round(lat, 4), "lon": round(lon, 4)},
-                "source": location_source,
+                "source":      location_source,
             },
             "current": {
-                "temperature":  {"value": round(temp, 1), "unit": temp_symbol},
-                "feels_like":   {"value": round(feels_like, 1), "unit": temp_symbol},
+                "temperature":      {"value": round(temp, 1),       "unit": temp_symbol},
+                "feels_like":       {"value": round(feels_like, 1), "unit": temp_symbol},
                 "humidity_percent": humidity,
-                "wind_speed":   {"value": round(wind, 1), "unit": speed_label},
-                "precipitation": {"value": round(precip, 2), "unit": "in" if units == "imperial" else "mm"},
-                "condition":    condition,
+                "wind_speed":       {"value": round(wind, 1),       "unit": speed_label},
+                "precipitation": {
+                    "value": round(precip, 2),
+                    "unit":  "in" if units == "imperial" else "mm",
+                },
+                "condition":      condition,
                 "condition_code": code,
-                "is_day": is_day,
+                "is_day":         is_day,
             },
             "clothing_suggestions": clothing,
         }
-    except (urllib.error.URLError, socket.timeout, OSError) as e:
-        return {"error": f"Network error: {str(e)}. Check your internet connection."}
-    except (KeyError, ValueError, json.JSONDecodeError) as e:
-        return {"error": f"Failed to parse weather data: {str(e)}"}
+    except (urllib.error.URLError, socket.timeout, OSError) as exc:
+        return {"error": f"Network error: {exc}. Check your internet connection."}
+    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+        return {"error": f"Failed to parse weather data: {exc}"}
 
 
 # ── App update checker ────────────────────────────────────────────────────────
 
+def _check_brew(results: dict, lock: threading.Lock) -> None:
+    """Populate *results* with outdated Homebrew formulae and casks."""
+    if not shutil.which("brew"):
+        with lock:
+            results["errors"].append(
+                "Homebrew not installed — install from https://brew.sh"
+            )
+        return
+    try:
+        proc = subprocess.run(
+            ["brew", "outdated", "--json=v2"],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1"},
+        )
+        if proc.returncode in (0, 1) and proc.stdout.strip():
+            data     = json.loads(proc.stdout)
+            formulae = [
+                {
+                    "name":      f["name"],
+                    "installed": (
+                        f["installed_versions"][0]
+                        if f.get("installed_versions") else "?"
+                    ),
+                    "available": f.get("current_version", "?"),
+                }
+                for f in data.get("formulae", [])
+            ]
+            casks = [
+                {
+                    "name":      c["name"],
+                    "installed": c.get("installed_versions", ["?"])[0],
+                    "available": c.get("current_version", "?"),
+                }
+                for c in data.get("casks", [])
+            ]
+            with lock:
+                results["brew_formulae"] = formulae
+                results["brew_casks"]    = casks
+        elif proc.returncode not in (0, 1):
+            with lock:
+                results["errors"].append(f"brew error: {proc.stderr.strip()[:200]}")
+    except subprocess.TimeoutExpired:
+        with lock:
+            results["errors"].append("brew outdated timed out (>120s)")
+    except (json.JSONDecodeError, OSError) as exc:
+        with lock:
+            results["errors"].append(f"brew parse error: {exc}")
+
+
+def _check_mas(results: dict, lock: threading.Lock) -> None:
+    """Populate *results* with outdated Mac App Store apps via ``mas outdated``."""
+    if not shutil.which("mas"):
+        with lock:
+            results["errors"].append(
+                "mas not installed — install with 'brew install mas' to check App Store updates"
+            )
+        return
+    try:
+        proc = subprocess.run(
+            ["mas", "outdated"], capture_output=True, text=True, timeout=60,
+        )
+        apps = []
+        for line in proc.stdout.splitlines():
+            m = re.match(r"(\d+)\s+(.+?)\s+\((.+?)\)", line.strip())
+            if m:
+                apps.append({
+                    "app_id":            m.group(1),
+                    "name":              m.group(2).strip(),
+                    "available_version": m.group(3),
+                })
+        with lock:
+            results["mac_app_store"] = apps
+    except subprocess.TimeoutExpired:
+        with lock:
+            results["errors"].append("mas outdated timed out (>60s)")
+    except OSError as exc:
+        with lock:
+            results["errors"].append(f"mas error: {exc}")
+
+
+def _check_softwareupdate(results: dict, lock: threading.Lock) -> None:
+    """Populate *results* with pending macOS system updates via ``softwareupdate -l``."""
+    if not shutil.which("softwareupdate"):
+        return
+    try:
+        proc = subprocess.run(
+            ["softwareupdate", "-l"], capture_output=True, text=True, timeout=60,
+        )
+        combined      = proc.stdout + proc.stderr
+        current_label = None
+        updates: list = []
+        for line in combined.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("* Label:"):
+                current_label = stripped.split(":", 1)[1].strip()
+            elif current_label and "Title:" in stripped:
+                m = re.search(r"Title:\s*(.+?),\s*Version:\s*([\d.]+)", stripped)
+                if m:
+                    updates.append({
+                        "label":   current_label,
+                        "title":   m.group(1).strip(),
+                        "version": m.group(2),
+                    })
+                current_label = None
+        with lock:
+            results["system_updates"] = updates
+    except subprocess.TimeoutExpired:
+        with lock:
+            results["errors"].append("softwareupdate timed out (>60s)")
+    except OSError as exc:
+        with lock:
+            results["errors"].append(f"softwareupdate error: {exc}")
+
+
 def check_app_updates() -> dict:
+    """Check for outdated Homebrew, Mac App Store, and macOS system updates."""
     if not IS_MACOS:
         return {"error": "check_app_updates is currently macOS-only."}
 
     results: dict = {
-        "brew_formulae": [],
-        "brew_casks": [],
-        "mac_app_store": [],
+        "brew_formulae":  [],
+        "brew_casks":     [],
+        "mac_app_store":  [],
         "system_updates": [],
-        "errors": [],
-        "summary": "",
+        "errors":         [],
+        "summary":        "",
     }
     lock = threading.Lock()
 
-    def _brew():
-        if not shutil.which("brew"):
-            with lock:
-                results["errors"].append("Homebrew not installed — install from https://brew.sh")
-            return
-        try:
-            proc = subprocess.run(
-                ["brew", "outdated", "--json=v2"],
-                capture_output=True, text=True, timeout=120,
-                env={**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1"},
-            )
-            if proc.returncode in (0, 1) and proc.stdout.strip():
-                data = json.loads(proc.stdout)
-                formulae = [
-                    {
-                        "name": f["name"],
-                        "installed": f["installed_versions"][0] if f.get("installed_versions") else "?",
-                        "available": f.get("current_version", "?"),
-                    }
-                    for f in data.get("formulae", [])
-                ]
-                casks = [
-                    {
-                        "name": c["name"],
-                        "installed": c.get("installed_versions", ["?"])[0],
-                        "available": c.get("current_version", "?"),
-                    }
-                    for c in data.get("casks", [])
-                ]
-                with lock:
-                    results["brew_formulae"] = formulae
-                    results["brew_casks"]    = casks
-            elif proc.returncode not in (0, 1):
-                with lock:
-                    results["errors"].append(f"brew error: {proc.stderr.strip()[:200]}")
-        except subprocess.TimeoutExpired:
-            with lock:
-                results["errors"].append("brew outdated timed out (>120s)")
-        except (json.JSONDecodeError, OSError) as e:
-            with lock:
-                results["errors"].append(f"brew parse error: {str(e)}")
-
-    def _mas():
-        if not shutil.which("mas"):
-            with lock:
-                results["errors"].append(
-                    "mas not installed — install with 'brew install mas' to check App Store updates"
-                )
-            return
-        try:
-            proc = subprocess.run(
-                ["mas", "outdated"],
-                capture_output=True, text=True, timeout=60,
-            )
-            apps = []
-            for line in proc.stdout.splitlines():
-                m = re.match(r"(\d+)\s+(.+?)\s+\((.+?)\)", line.strip())
-                if m:
-                    apps.append({
-                        "app_id": m.group(1),
-                        "name":   m.group(2).strip(),
-                        "available_version": m.group(3),
-                    })
-            with lock:
-                results["mac_app_store"] = apps
-        except subprocess.TimeoutExpired:
-            with lock:
-                results["errors"].append("mas outdated timed out (>60s)")
-        except OSError as e:
-            with lock:
-                results["errors"].append(f"mas error: {str(e)}")
-
-    def _sysupdate():
-        if not shutil.which("softwareupdate"):
-            return
-        try:
-            proc = subprocess.run(
-                ["softwareupdate", "-l"],
-                capture_output=True, text=True, timeout=60,
-            )
-            combined = proc.stdout + proc.stderr
-            current_label = None
-            updates = []
-            for line in combined.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("* Label:"):
-                    current_label = stripped.split(":", 1)[1].strip()
-                elif current_label and "Title:" in stripped:
-                    m = re.search(r"Title:\s*(.+?),\s*Version:\s*([\d.]+)", stripped)
-                    if m:
-                        updates.append({
-                            "label":   current_label,
-                            "title":   m.group(1).strip(),
-                            "version": m.group(2),
-                        })
-                    current_label = None
-            with lock:
-                results["system_updates"] = updates
-        except subprocess.TimeoutExpired:
-            with lock:
-                results["errors"].append("softwareupdate timed out (>60s)")
-        except OSError as e:
-            with lock:
-                results["errors"].append(f"softwareupdate error: {str(e)}")
-
     # Run all three checks concurrently via the shared executor.
     futures = [
-        ("brew", _METRICS_EXECUTOR.submit(_brew)),
-        ("mas", _METRICS_EXECUTOR.submit(_mas)),
-        ("softwareupdate", _METRICS_EXECUTOR.submit(_sysupdate)),
+        ("brew",          _METRICS_EXECUTOR.submit(_check_brew,           results, lock)),
+        ("mas",           _METRICS_EXECUTOR.submit(_check_mas,            results, lock)),
+        ("softwareupdate", _METRICS_EXECUTOR.submit(_check_softwareupdate, results, lock)),
     ]
     for label, f in futures:
         try:
             f.result(timeout=130)   # brew timeout is 120s; add a small buffer
         except Exception as exc:
             with lock:
-                results["errors"].append(f"{label} worker failed: {str(exc)}")
+                results["errors"].append(f"{label} worker failed: {exc}")
 
     total = (
         len(results["brew_formulae"]) + len(results["brew_casks"])
@@ -1563,7 +1647,7 @@ def check_app_updates() -> dict:
     if total == 0:
         results["summary"] = "All apps are up to date."
     else:
-        parts = []
+        parts: list[str] = []
         if results["brew_formulae"]:
             n = len(results["brew_formulae"])
             parts.append(f"{n} Homebrew formula{'e' if n != 1 else ''}")
@@ -1576,7 +1660,10 @@ def check_app_updates() -> dict:
         if results["system_updates"]:
             n = len(results["system_updates"])
             parts.append(f"{n} system update{'s' if n != 1 else ''}")
-        results["summary"] = f"{total} update{'s' if total != 1 else ''} available: " + ", ".join(parts)
+        results["summary"] = (
+            f"{total} update{'s' if total != 1 else ''} available: "
+            + ", ".join(parts)
+        )
 
     return results
 
@@ -1611,7 +1698,57 @@ _17TRACK_CARRIER_NAMES = {
 }
 
 
+def _parse_17track_response(
+    resp: dict, tracking_number: str, carrier: str,
+) -> dict:
+    """Convert a 17track API response dict into a normalised tracking result."""
+    if not resp.get("shipments"):
+        return {
+            "tracking_number": tracking_number,
+            "detected_carrier": carrier,
+            "status": "Not found",
+            "note": "No tracking information found. The package may not yet be in the system.",
+        }
+
+    shipment = resp["shipments"][0]
+    carrier_code     = shipment.get("carrier")
+    reported_carrier = _17TRACK_CARRIER_NAMES.get(carrier_code, f"Carrier #{carrier_code}")
+
+    track = shipment.get("track", {})
+    w1    = track.get("w1", {})
+    if not isinstance(w1, dict):
+        return {
+            "tracking_number": tracking_number,
+            "detected_carrier": carrier,
+            "status": "Unexpected response structure from 17track — their internal API may have changed.",
+        }
+    latest      = w1.get("z0", {})
+    history_raw = w1.get("z1", [])
+    status_code = latest.get("c", 10)
+    status      = _17TRACK_STATUS_MAP.get(status_code, f"Status code {status_code}")
+
+    latest_event = {
+        "description": latest.get("b", latest.get("a", "")),
+        "location":    latest.get("e", ""),
+        "timestamp":   latest.get("d", ""),
+    }
+    history = [
+        {"timestamp": e.get("a", ""), "description": e.get("b", ""), "location": e.get("c", "")}
+        for e in history_raw[:10]
+    ]
+    return {
+        "tracking_number":  tracking_number,
+        "detected_carrier": carrier,
+        "reported_carrier": reported_carrier,
+        "status":           status,
+        "status_code":      status_code,
+        "latest_event":     latest_event,
+        "history":          history,
+    }
+
+
 def track_package(tracking_number: str) -> dict:
+    """Look up package tracking information via the 17track public API."""
     tn_clean = re.sub(r"\s+", "", tracking_number).upper()
     carrier  = _detect_carrier(tn_clean)
 
@@ -1639,58 +1776,7 @@ def track_package(tracking_number: str) -> dict:
         )
         with urllib.request.urlopen(req, timeout=12) as r:
             resp = json.loads(r.read().decode())
-
-        if not resp.get("shipments"):
-            return {
-                "tracking_number": tracking_number,
-                "detected_carrier": carrier,
-                "status": "Not found",
-                "note": "No tracking information found. The package may not yet be in the system.",
-            }
-
-        shipment = resp["shipments"][0]
-        carrier_code    = shipment.get("carrier")
-        reported_carrier = _17TRACK_CARRIER_NAMES.get(carrier_code, f"Carrier #{carrier_code}")
-
-        track  = shipment.get("track", {})
-        w1     = track.get("w1", {})
-        if not isinstance(w1, dict):
-            return {
-                "tracking_number": tracking_number,
-                "detected_carrier": carrier,
-                "status": "Unexpected response structure from 17track — their internal API may have changed.",
-            }
-        latest = w1.get("z0", {})
-        history_raw = w1.get("z1", [])
-
-        status_code = latest.get("c", 10)
-        status = _17TRACK_STATUS_MAP.get(status_code, f"Status code {status_code}")
-
-        latest_event = {
-            "description": latest.get("b", latest.get("a", "")),
-            "location":    latest.get("e", ""),
-            "timestamp":   latest.get("d", ""),
-        }
-
-        history = [
-            {
-                "timestamp":   e.get("a", ""),
-                "description": e.get("b", ""),
-                "location":    e.get("c", ""),
-            }
-            for e in history_raw[:10]
-        ]
-
-        return {
-            "tracking_number":  tracking_number,
-            "detected_carrier": carrier,
-            "reported_carrier": reported_carrier,
-            "status":      status,
-            "status_code": status_code,
-            "latest_event": latest_event,
-            "history": history,
-        }
-
+        return _parse_17track_response(resp, tracking_number, carrier)
     except (urllib.error.URLError, socket.timeout, OSError) as e:
         return {"tracking_number": tracking_number, "error": f"Network error: {str(e)}"}
     except (json.JSONDecodeError, KeyError, ValueError) as e:
@@ -1737,13 +1823,75 @@ def find_large_files(path: str = "", n: int = 10) -> dict:
     }
 
 
+def _ping_host(
+    label: str, host: str, results: dict, lock: threading.Lock
+) -> None:
+    """Ping *host* (4 packets) and store latency info under ``results[label]``.
+
+    Designed to run concurrently in a thread pool; *lock* serialises writes to
+    the shared *results* dict.
+    """
+    try:
+        cmd = (
+            ["ping", "-n", "4", "-w", "2000", host]
+            if IS_WIN
+            else ["ping", "-c", "4", "-W", "2", host]
+        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        out  = proc.stdout + proc.stderr
+
+        avg_ms: float | None = None
+        # macOS/Linux: min/avg/max/stddev = x/y/z/w ms
+        m = re.search(r"min/avg/max(?:/(?:mdev|stddev))?\s*=\s*[\d.]+/([\d.]+)/", out)
+        if m:
+            avg_ms = float(m.group(1))
+        # Windows: Average = Xms
+        if avg_ms is None:
+            m = re.search(r"Average\s*=\s*([\d.]+)\s*ms", out, re.I)
+            if m:
+                avg_ms = float(m.group(1))
+
+        with lock:
+            results[label] = {
+                "host":           host,
+                "reachable":      proc.returncode == 0,
+                "avg_latency_ms": avg_ms,
+            }
+    except subprocess.TimeoutExpired:
+        with lock:
+            results[label] = {"host": host, "reachable": False, "error": "ping timed out"}
+    except Exception as exc:
+        with lock:
+            results[label] = {"host": host, "reachable": False, "error": str(exc)}
+
+
+def _diagnose_latency(
+    gateway: str | None, results: dict
+) -> list[str]:
+    """Interpret ping results and return a list of human-readable diagnosis strings."""
+    gw = results.get("gateway",        {})
+    cf = results.get("cloudflare_dns", {})
+    gd = results.get("google_dns",     {})
+
+    if gateway and not gw.get("reachable"):
+        return ["Cannot reach your local gateway — likely a router/Wi-Fi issue."]
+    if not cf.get("reachable") and not gd.get("reachable"):
+        return ["Gateway reachable but public DNS is not — likely an ISP or WAN issue."]
+
+    lat = cf.get("avg_latency_ms") or gd.get("avg_latency_ms")
+    if lat and lat > 100:
+        return [f"High latency ({lat} ms) to public DNS — possible ISP congestion."]
+    if lat and lat > 50:
+        return [f"Moderate latency ({lat} ms) — network is functional but not ideal."]
+    return ["Network connectivity looks normal."]
+
+
 def network_latency_check() -> dict:
     """
     Pings the local gateway, Cloudflare (1.1.1.1), and Google DNS (8.8.8.8)
     CONCURRENTLY using threads, then diagnoses where latency is introduced.
     Async: YES — all pings run in parallel via threading.
     """
-    # Discover default gateway
     gateway: str | None = None
     try:
         nr = subprocess.run(["netstat", "-nr"], capture_output=True, text=True, timeout=5)
@@ -1765,66 +1913,39 @@ def network_latency_check() -> dict:
     results: dict = {}
     lock = threading.Lock()
 
-    def _ping(label: str, host: str) -> None:
-        try:
-            cmd = (
-                ["ping", "-n", "4", "-w", "2000", host]
-                if IS_WIN
-                else ["ping", "-c", "4", "-W", "2", host]
-            )
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            out  = proc.stdout + proc.stderr
-
-            avg_ms: float | None = None
-            # macOS/Linux: min/avg/max/stddev = x/y/z/w ms
-            m = re.search(r"min/avg/max(?:/(?:mdev|stddev))?\s*=\s*[\d.]+/([\d.]+)/", out)
-            if m:
-                avg_ms = float(m.group(1))
-            # Windows: Average = Xms
-            if avg_ms is None:
-                m = re.search(r"Average\s*=\s*([\d.]+)\s*ms", out, re.I)
-                if m:
-                    avg_ms = float(m.group(1))
-
-            with lock:
-                results[label] = {
-                    "host":            host,
-                    "reachable":       proc.returncode == 0,
-                    "avg_latency_ms":  avg_ms,
-                }
-        except subprocess.TimeoutExpired:
-            with lock:
-                results[label] = {"host": host, "reachable": False, "error": "ping timed out"}
-        except Exception as exc:
-            with lock:
-                results[label] = {"host": host, "reachable": False, "error": str(exc)}
-
-    futures = [_METRICS_EXECUTOR.submit(_ping, lbl, h) for lbl, h in targets.items()]
+    futures = [
+        _METRICS_EXECUTOR.submit(_ping_host, lbl, h, results, lock)
+        for lbl, h in targets.items()
+    ]
     for f in futures:
         try:
             f.result(timeout=20)
         except Exception:
             pass
 
-    # Diagnosis
-    gw = results.get("gateway",       {})
-    cf = results.get("cloudflare_dns", {})
-    gd = results.get("google_dns",    {})
-    diagnosis: list[str] = []
-    if gateway and not gw.get("reachable"):
-        diagnosis.append("Cannot reach your local gateway — likely a router/Wi-Fi issue.")
-    elif not cf.get("reachable") and not gd.get("reachable"):
-        diagnosis.append("Gateway reachable but public DNS is not — likely an ISP or WAN issue.")
-    else:
-        lat = cf.get("avg_latency_ms") or gd.get("avg_latency_ms")
-        if lat and lat > 100:
-            diagnosis.append(f"High latency ({lat} ms) to public DNS — possible ISP congestion.")
-        elif lat and lat > 50:
-            diagnosis.append(f"Moderate latency ({lat} ms) — network is functional but not ideal.")
-        else:
-            diagnosis.append("Network connectivity looks normal.")
+    return {"targets": results, "diagnosis": _diagnose_latency(gateway, results)}
 
-    return {"targets": results, "diagnosis": diagnosis}
+
+def _attach_docker_stats(containers: list[dict]) -> None:
+    """Fetch one-shot container stats and merge CPU/memory data into *containers* in-place."""
+    if not containers:
+        return
+    stats = subprocess.run(
+        ["docker", "stats", "--no-stream", "--format",
+         "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"],
+        capture_output=True, text=True, timeout=20,
+    )
+    stat_map: dict[str, dict] = {}
+    for line in stats.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 4:
+            stat_map[parts[0]] = {
+                "cpu_percent":    parts[1],
+                "memory_usage":   parts[2],
+                "memory_percent": parts[3],
+            }
+    for c in containers:
+        c.update(stat_map.get(c["name"], {}))
 
 
 def get_docker_status() -> dict:
@@ -1861,26 +1982,8 @@ def get_docker_status() -> dict:
                     "ports":  parts[4] if len(parts) > 4 else "",
                 })
 
-        # One-shot stats (no-stream)
-        if containers:
-            stats = subprocess.run(
-                ["docker", "stats", "--no-stream", "--format",
-                 "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"],
-                capture_output=True, text=True, timeout=20,
-            )
-            stat_map: dict[str, dict] = {}
-            for line in stats.stdout.strip().splitlines():
-                parts = line.split("\t")
-                if len(parts) >= 4:
-                    stat_map[parts[0]] = {
-                        "cpu_percent":     parts[1],
-                        "memory_usage":    parts[2],
-                        "memory_percent":  parts[3],
-                    }
-            for c in containers:
-                c.update(stat_map.get(c["name"], {}))
+        _attach_docker_stats(containers)
 
-        # Total container count (including stopped)
         all_ps = subprocess.run(
             ["docker", "ps", "-a", "--format", "{{.Status}}"],
             capture_output=True, text=True, timeout=10,
@@ -1888,15 +1991,88 @@ def get_docker_status() -> dict:
         total = len(all_ps.stdout.strip().splitlines()) if all_ps.stdout.strip() else 0
 
         return {
-            "docker_version":      server_version,
-            "running_count":       len(containers),
-            "total_containers":    total,
-            "running_containers":  containers,
+            "docker_version":     server_version,
+            "running_count":      len(containers),
+            "total_containers":   total,
+            "running_containers": containers,
         }
     except subprocess.TimeoutExpired:
         return {"error": "Docker command timed out."}
     except Exception as exc:
         return {"error": f"Failed to query Docker: {exc}"}
+
+
+def _tmutil_status(result: dict, lock: threading.Lock) -> None:
+    """Populate *result* with current Time Machine backup status (running, phase, progress)."""
+    try:
+        proc = subprocess.run(
+            ["tmutil", "status"], capture_output=True, text=True, timeout=10
+        )
+        out  = proc.stdout
+        data: dict = {"running": "Running = 1" in out}
+        m = re.search(r'BackupPhase\s*=\s*"?([^";\n]+)"?', out)
+        if m:
+            data["phase"] = m.group(1).strip()
+        m = re.search(r'Percent\s*=\s*([\d.]+)', out)
+        if m:
+            data["progress_percent"] = round(float(m.group(1)) * 100, 1)
+        m = re.search(r'_raw_Percent\s*=\s*([\d.]+)', out)
+        if m:
+            data["progress_percent"] = round(float(m.group(1)) * 100, 1)
+        with lock:
+            result.update(data)
+    except Exception as exc:
+        with lock:
+            result["status_error"] = str(exc)
+
+
+def _tmutil_latest(result: dict, lock: threading.Lock) -> None:
+    """Populate *result* with the path and human-readable age of the latest backup."""
+    try:
+        proc = subprocess.run(
+            ["tmutil", "latestbackup"], capture_output=True, text=True, timeout=10
+        )
+        bp = proc.stdout.strip()
+        if bp and "No backups" not in bp:
+            with lock:
+                result["last_backup_path"] = bp
+            m = re.search(r"(\d{4}-\d{2}-\d{2}-\d{6})", bp)
+            if m:
+                try:
+                    dt    = datetime.datetime.strptime(m.group(1), "%Y-%m-%d-%H%M%S")
+                    delta = datetime.datetime.now() - dt
+                    hours = int(delta.total_seconds() // 3600)
+                    age   = f"{hours} hours ago" if hours < 48 else f"{delta.days} days ago"
+                    with lock:
+                        result["last_backup"]     = dt.isoformat()
+                        result["last_backup_age"] = age
+                except ValueError:
+                    with lock:
+                        result["last_backup"] = m.group(1)
+        else:
+            with lock:
+                result["last_backup"] = "No backups found"
+    except Exception as exc:
+        with lock:
+            result["last_backup_error"] = str(exc)
+
+
+def _tmutil_dest(result: dict, lock: threading.Lock) -> None:
+    """Populate *result* with Time Machine destination name and kind."""
+    try:
+        proc = subprocess.run(
+            ["tmutil", "destinationinfo"], capture_output=True, text=True, timeout=10
+        )
+        m = re.search(r"Name\s*:\s*(.+)", proc.stdout)
+        if m:
+            with lock:
+                result["destination"] = m.group(1).strip()
+        m = re.search(r"Kind\s*:\s*(.+)", proc.stdout)
+        if m:
+            with lock:
+                result["destination_kind"] = m.group(1).strip()
+    except Exception:
+        pass
 
 
 def get_time_machine_status() -> dict:
@@ -1912,74 +2088,10 @@ def get_time_machine_status() -> dict:
     result: dict = {}
     lock = threading.Lock()
 
-    def _status() -> None:
-        try:
-            proc = subprocess.run(["tmutil", "status"], capture_output=True,
-                                  text=True, timeout=10)
-            out = proc.stdout
-            data: dict = {"running": "Running = 1" in out}
-            m = re.search(r'BackupPhase\s*=\s*"?([^";\n]+)"?', out)
-            if m:
-                data["phase"] = m.group(1).strip()
-            m = re.search(r'Percent\s*=\s*([\d.]+)', out)
-            if m:
-                data["progress_percent"] = round(float(m.group(1)) * 100, 1)
-            m = re.search(r'_raw_Percent\s*=\s*([\d.]+)', out)
-            if m:
-                data["progress_percent"] = round(float(m.group(1)) * 100, 1)
-            with lock:
-                result.update(data)
-        except Exception as exc:
-            with lock:
-                result["status_error"] = str(exc)
-
-    def _latest() -> None:
-        try:
-            proc = subprocess.run(["tmutil", "latestbackup"], capture_output=True,
-                                  text=True, timeout=10)
-            bp = proc.stdout.strip()
-            if bp and "No backups" not in bp:
-                with lock:
-                    result["last_backup_path"] = bp
-                m = re.search(r"(\d{4}-\d{2}-\d{2}-\d{6})", bp)
-                if m:
-                    try:
-                        dt = datetime.datetime.strptime(m.group(1), "%Y-%m-%d-%H%M%S")
-                        delta = datetime.datetime.now() - dt
-                        hours = int(delta.total_seconds() // 3600)
-                        age = f"{hours} hours ago" if hours < 48 else f"{delta.days} days ago"
-                        with lock:
-                            result["last_backup"] = dt.isoformat()
-                            result["last_backup_age"] = age
-                    except ValueError:
-                        with lock:
-                            result["last_backup"] = m.group(1)
-            else:
-                with lock:
-                    result["last_backup"] = "No backups found"
-        except Exception as exc:
-            with lock:
-                result["last_backup_error"] = str(exc)
-
-    def _dest() -> None:
-        try:
-            proc = subprocess.run(["tmutil", "destinationinfo"], capture_output=True,
-                                  text=True, timeout=10)
-            m = re.search(r"Name\s*:\s*(.+)", proc.stdout)
-            if m:
-                with lock:
-                    result["destination"] = m.group(1).strip()
-            m = re.search(r"Kind\s*:\s*(.+)", proc.stdout)
-            if m:
-                with lock:
-                    result["destination_kind"] = m.group(1).strip()
-        except Exception:
-            pass
-
     futures = [
-        _METRICS_EXECUTOR.submit(_status),
-        _METRICS_EXECUTOR.submit(_latest),
-        _METRICS_EXECUTOR.submit(_dest),
+        _METRICS_EXECUTOR.submit(_tmutil_status, result, lock),
+        _METRICS_EXECUTOR.submit(_tmutil_latest, result, lock),
+        _METRICS_EXECUTOR.submit(_tmutil_dest,   result, lock),
     ]
     for f in futures:
         try:
@@ -2421,6 +2533,39 @@ def send_imessage(recipient: str, message: str) -> dict:
         return {"error": str(e)}
 
 
+def _query_imessage_db(db_path: "pathlib.Path", contact_q: str, limit: int) -> list[dict]:
+    """Query chat.db read-only and return a list of message dicts (newest first)."""
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+    conn.row_factory = _sqlite3.Row
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            m.text,
+            m.is_from_me,
+            datetime(m.date / 1000000000 + strftime('%s','2001-01-01'), 'unixepoch', 'localtime') AS sent_at,
+            h.id AS handle
+        FROM message m
+        JOIN chat_message_join cmj ON cmj.message_id = m.rowid
+        JOIN chat c ON c.rowid = cmj.chat_id
+        JOIN chat_handle_join chj ON chj.chat_id = c.rowid
+        JOIN handle h ON h.rowid = chj.handle_id
+        WHERE h.id LIKE ?
+          AND m.text IS NOT NULL AND m.text != ''
+        ORDER BY m.date DESC
+        LIMIT ?
+        """,
+        (contact_q, limit),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [
+        {"from": "me" if r["is_from_me"] else r["handle"], "text": r["text"], "sent_at": r["sent_at"]}
+        for r in rows
+    ]
+
+
 def get_imessage_history(contact: str, limit: int = 20) -> dict:
     """Return recent iMessage/SMS messages for a contact from chat.db."""
     denied = _permission_check("allow_message_history", "get_imessage_history")
@@ -2428,50 +2573,14 @@ def get_imessage_history(contact: str, limit: int = 20) -> dict:
         return denied
     if not IS_MACOS:
         return {"error": "get_imessage_history requires macOS."}
-    import sqlite3 as _sqlite3
 
     db_path = pathlib.Path.home() / "Library" / "Messages" / "chat.db"
     if not db_path.exists():
         return {"error": f"chat.db not found at {db_path}. Full Disk Access may be required."}
 
     limit = max(1, min(limit, 200))
-    contact_q = f"%{contact}%"
-
     try:
-        # Use a copy-on-read approach: open read-only URI to avoid locking
-        conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
-        conn.row_factory = _sqlite3.Row
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT
-                m.text,
-                m.is_from_me,
-                datetime(m.date / 1000000000 + strftime('%s','2001-01-01'), 'unixepoch', 'localtime') AS sent_at,
-                h.id AS handle
-            FROM message m
-            JOIN chat_message_join cmj ON cmj.message_id = m.rowid
-            JOIN chat c ON c.rowid = cmj.chat_id
-            JOIN chat_handle_join chj ON chj.chat_id = c.rowid
-            JOIN handle h ON h.rowid = chj.handle_id
-            WHERE h.id LIKE ?
-              AND m.text IS NOT NULL AND m.text != ''
-            ORDER BY m.date DESC
-            LIMIT ?
-            """,
-            (contact_q, limit),
-        )
-        rows = cur.fetchall()
-        conn.close()
-
-        messages = [
-            {
-                "from": "me" if r["is_from_me"] else r["handle"],
-                "text": r["text"],
-                "sent_at": r["sent_at"],
-            }
-            for r in rows
-        ]
+        messages = _query_imessage_db(db_path, f"%{contact}%", limit)
         return {
             "contact_filter": contact,
             "count": len(messages),
@@ -2684,6 +2793,94 @@ _AIRPORT_PATH = (
     "/Versions/Current/Resources/airport"
 )
 
+def _parse_rssi(sig_noise_str: str) -> int | None:
+    """Parse a ``'-56 dBm / -95 dBm'``-style string from system_profiler to an int RSSI."""
+    if not sig_noise_str:
+        return None
+    try:
+        return int(sig_noise_str.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _scan_wifi_airport(airport_path: str) -> dict | None:
+    """Scan visible Wi-Fi networks using the ``airport`` CLI (macOS ≤ 13).
+
+    Returns a result dict on success, or ``None`` to signal fall-through to the
+    system_profiler path.  Raises ``subprocess.TimeoutExpired`` on timeout so
+    the caller can surface a user-facing error.
+    """
+    proc = subprocess.run(
+        [airport_path, "-s"], capture_output=True, text=True, timeout=20,
+    )
+    if proc.returncode != 0:
+        return None
+
+    networks: list[dict] = []
+    for line in proc.stdout.splitlines()[1:]:
+        if not line.strip():
+            continue
+        try:
+            ssid     = line[:33].strip()
+            rest     = line[33:].split()
+            bssid    = rest[0] if rest else ""
+            rssi     = int(rest[1]) if len(rest) > 1 else None
+            channel  = rest[2] if len(rest) > 2 else ""
+            security = rest[6] if len(rest) > 6 else (rest[-1] if rest else "")
+            networks.append({
+                "ssid": ssid, "bssid": bssid,
+                "rssi_dbm": rssi, "channel": channel,
+                "security": security,
+            })
+        except (IndexError, ValueError):
+            continue
+
+    networks.sort(key=lambda n: n.get("rssi_dbm") or -999, reverse=True)
+    return {"source": "airport", "networks": networks, "count": len(networks)}
+
+
+def _scan_wifi_system_profiler() -> dict:
+    """Scan Wi-Fi networks via ``system_profiler SPAirPortDataType`` (macOS 14+)."""
+    proc = subprocess.run(
+        ["system_profiler", "SPAirPortDataType", "-json"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        return {"error": proc.stderr.strip() or "system_profiler failed."}
+
+    data     = json.loads(proc.stdout)
+    sp_wifi  = data.get("SPAirPortDataType", [])
+    networks: list[dict] = []
+
+    for entry in sp_wifi:
+        interfaces = entry.get("spairport_airport_interfaces", [])
+        for iface in interfaces:
+            cur = iface.get("spairport_current_network_information", {})
+            if cur:
+                networks.append({
+                    "ssid":     cur.get("_name", ""),
+                    "phy_mode": cur.get("spairport_network_phymode", ""),
+                    "channel":  str(cur.get("spairport_network_channel", "")),
+                    "security": cur.get("spairport_security_mode", ""),
+                    "rssi_dbm": _parse_rssi(cur.get("spairport_signal_noise", "")),
+                    "connected": True,
+                })
+            others = iface.get("spairport_airport_other_local_wireless_networks", [])
+            if isinstance(others, list):
+                for net in others:
+                    sn = net.get("spairport_signal_noise", "")
+                    networks.append({
+                        "ssid":     net.get("_name", ""),
+                        "phy_mode": net.get("spairport_network_phymode", ""),
+                        "channel":  str(net.get("spairport_network_channel", "")),
+                        "security": net.get("spairport_security_mode", ""),
+                        "rssi_dbm": _parse_rssi(sn) if sn else None,
+                        "connected": False,
+                    })
+
+    return {"source": "system_profiler", "networks": networks, "count": len(networks)}
+
+
 def get_wifi_networks() -> dict:
     """
     Return information about nearby / available Wi-Fi networks.
@@ -2697,30 +2894,9 @@ def get_wifi_networks() -> dict:
     airport = pathlib.Path(_AIRPORT_PATH)
     if airport.exists():
         try:
-            proc = subprocess.run(
-                [str(airport), "-s"],
-                capture_output=True, text=True, timeout=20,
-            )
-            if proc.returncode == 0:
-                lines = proc.stdout.splitlines()
-                networks = []
-                for line in lines[1:]:
-                    if not line.strip():
-                        continue
-                    try:
-                        ssid = line[:33].strip()
-                        rest = line[33:].split()
-                        bssid = rest[0] if rest else ""
-                        rssi = int(rest[1]) if len(rest) > 1 else None
-                        channel = rest[2] if len(rest) > 2 else ""
-                        security = rest[6] if len(rest) > 6 else rest[-1] if rest else ""
-                        networks.append({"ssid": ssid, "bssid": bssid,
-                                         "rssi_dbm": rssi, "channel": channel,
-                                         "security": security})
-                    except (IndexError, ValueError):
-                        continue
-                networks.sort(key=lambda n: n.get("rssi_dbm") or -999, reverse=True)
-                return {"source": "airport", "networks": networks, "count": len(networks)}
+            result = _scan_wifi_airport(str(airport))
+            if result is not None:
+                return result
         except subprocess.TimeoutExpired:
             return {"error": "Wi-Fi scan timed out (20s). Enable Wi-Fi and try again."}
         except Exception:
@@ -2728,59 +2904,11 @@ def get_wifi_networks() -> dict:
 
     # ── Fallback: system_profiler SPAirPortDataType (macOS 14+) ─────────────
     try:
-        proc = subprocess.run(
-            ["system_profiler", "SPAirPortDataType", "-json"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if proc.returncode != 0:
-            return {"error": proc.stderr.strip() or "system_profiler failed."}
-        data = json.loads(proc.stdout)
-        sp_wifi = data.get("SPAirPortDataType", [])
-        networks = []
-
-        def _parse_rssi(sig_noise_str: str) -> int | None:
-            """Parse '-56 dBm / -95 dBm' → -56."""
-            if not sig_noise_str:
-                return None
-            try:
-                return int(sig_noise_str.split()[0])
-            except (ValueError, IndexError):
-                return None
-
-        for entry in sp_wifi:
-            # interfaces is a list of dicts, each with _name = interface identifier
-            interfaces = entry.get("spairport_airport_interfaces", [])
-            for iface in interfaces:
-                # Current connected network — flat dict with _name as SSID
-                cur = iface.get("spairport_current_network_information", {})
-                if cur:
-                    networks.append({
-                        "ssid": cur.get("_name", ""),
-                        "phy_mode": cur.get("spairport_network_phymode", ""),
-                        "channel": str(cur.get("spairport_network_channel", "")),
-                        "security": cur.get("spairport_security_mode", ""),
-                        "rssi_dbm": _parse_rssi(cur.get("spairport_signal_noise", "")),
-                        "connected": True,
-                    })
-                # Other visible networks — list of dicts, each with _name as SSID
-                others = iface.get("spairport_airport_other_local_wireless_networks", [])
-                if isinstance(others, list):
-                    for net in others:
-                        sn = net.get("spairport_signal_noise", "")
-                        networks.append({
-                            "ssid": net.get("_name", ""),
-                            "phy_mode": net.get("spairport_network_phymode", ""),
-                            "channel": str(net.get("spairport_network_channel", "")),
-                            "security": net.get("spairport_security_mode", ""),
-                            "rssi_dbm": _parse_rssi(sn) if sn else None,
-                            "connected": False,
-                        })
-
-        return {"source": "system_profiler", "networks": networks, "count": len(networks)}
+        return _scan_wifi_system_profiler()
     except subprocess.TimeoutExpired:
         return {"error": "system_profiler timed out (30s)."}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 # ── File tools ────────────────────────────────────────────────────────────────
@@ -2930,6 +3058,25 @@ def run_shell_command(command: str, timeout: int = 30) -> dict:
 
 # ── Calendar tool ─────────────────────────────────────────────────────────────
 
+def _parse_calendar_items(raw_output: str) -> list[dict]:
+    """Parse the pipe-delimited osascript output from the Calendar AppleScript."""
+    events: list[dict] = []
+    for item in raw_output.split("||"):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.split("|")
+        if len(parts) >= 4:
+            events.append({
+                "calendar": parts[0],
+                "title":    parts[1],
+                "start":    parts[2],
+                "end":      parts[3],
+                "location": parts[4] if len(parts) > 4 else "",
+            })
+    return events
+
+
 def get_calendar_events(lookahead_days: int = 7) -> dict:
     """Return upcoming calendar events from macOS Calendar.app via AppleScript."""
     denied = _permission_check("allow_calendar", "get_calendar_events")
@@ -2975,27 +3122,8 @@ return resultList as string
                 "error": err or "Calendar access denied.",
                 "hint": "Grant Calendar access to Terminal in System Settings → Privacy & Security → Calendars.",
             }
-        raw_output = proc.stdout.strip()
-        events = []
-        if raw_output:
-            for item in raw_output.split("||"):
-                item = item.strip()
-                if not item:
-                    continue
-                parts = item.split("|")
-                if len(parts) >= 4:
-                    events.append({
-                        "calendar": parts[0],
-                        "title": parts[1],
-                        "start": parts[2],
-                        "end": parts[3],
-                        "location": parts[4] if len(parts) > 4 else "",
-                    })
-        return {
-            "lookahead_days": lookahead_days,
-            "event_count": len(events),
-            "events": events,
-        }
+        events = _parse_calendar_items(proc.stdout.strip())
+        return {"lookahead_days": lookahead_days, "event_count": len(events), "events": events}
     except subprocess.TimeoutExpired:
         return {"error": "Calendar query timed out. Calendar.app may be unresponsive."}
     except Exception as e:
@@ -3003,6 +3131,21 @@ return resultList as string
 
 
 # ── Contacts tool ─────────────────────────────────────────────────────────────
+
+def _parse_contact_items(raw_output: str) -> list[dict]:
+    """Parse the pipe-delimited osascript output from the Contacts AppleScript."""
+    contacts: list[dict] = []
+    for item in raw_output.split("||"):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.split("|")
+        person_name = parts[0] if parts else ""
+        phones = [p for p in (parts[1].split(";") if len(parts) > 1 else []) if p]
+        emails = [e for e in (parts[2].split(";") if len(parts) > 2 else []) if e]
+        contacts.append({"name": person_name, "phones": phones, "emails": emails})
+    return contacts
+
 
 def get_contact(name: str) -> dict:
     """Search macOS Contacts.app for a person by name and return their details."""
@@ -3049,27 +3192,8 @@ return resultList as string
                 "error": err or "Contacts access denied.",
                 "hint": "Grant Contacts access to Terminal in System Settings → Privacy & Security → Contacts.",
             }
-        raw_output = proc.stdout.strip()
-        contacts = []
-        if raw_output:
-            for item in raw_output.split("||"):
-                item = item.strip()
-                if not item:
-                    continue
-                parts = item.split("|")
-                person_name = parts[0] if parts else ""
-                phones = [p for p in (parts[1].split(";") if len(parts) > 1 else []) if p]
-                emails = [e for e in (parts[2].split(";") if len(parts) > 2 else []) if e]
-                contacts.append({
-                    "name": person_name,
-                    "phones": phones,
-                    "emails": emails,
-                })
-        return {
-            "query": name,
-            "count": len(contacts),
-            "contacts": contacts,
-        }
+        contacts = _parse_contact_items(proc.stdout.strip())
+        return {"query": name, "count": len(contacts), "contacts": contacts}
     except subprocess.TimeoutExpired:
         return {"error": "Contacts query timed out."}
     except Exception as e:
@@ -3267,6 +3391,132 @@ def append_memory_note(note: str) -> dict:
     return {"saved": note.strip(), "timestamp": timestamp}
 
 
+def _validate_tool_code(
+    name: str, description: str, implementation: str, server_text: str,
+) -> tuple[str, str, list[str]] | dict:
+    """Validate a new tool's name, description, and implementation source code.
+
+    Returns:
+        On success: ``(func_name, fn_lambda, security_warnings)`` triple.
+        On failure: an error dict suitable for returning directly from the tool.
+    """
+    if not name or not re.match(r"^[a-z][a-z0-9_]*$", name):
+        return {
+            "error": (
+                "Tool name must start with a lowercase letter and contain only "
+                "lowercase letters, digits, and underscores (e.g. 'get_spotify_track')."
+            )
+        }
+    if f'"{name}":' in server_text:
+        return {"error": f"A tool named '{name}' already exists. Choose a different name."}
+    if not description.strip():
+        return {"error": "description is required."}
+    if not implementation.strip():
+        return {"error": "implementation is required."}
+
+    try:
+        tree = ast.parse(implementation)
+    except SyntaxError as exc:
+        return {"error": f"Syntax error in implementation: {exc}"}
+
+    func_defs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    if not func_defs:
+        return {"error": "implementation must define at least one function (def ...)."}
+
+    func_name   = func_defs[0].name
+    func_params = [a.arg for a in func_defs[0].args.args if a.arg != "self"]
+
+    # Security scan (non-blocking — warns but does not block).
+    _DANGEROUS        = ["eval(", "exec(", "__import__(", "compile(", "os.system("]
+    security_warnings = [d for d in _DANGEROUS if d in implementation]
+
+    if func_params:
+        param_str = ", ".join(f'args.get("{p}")' for p in func_params)
+        fn_lambda = f"lambda args: {func_name}({param_str})"
+    else:
+        fn_lambda = f"lambda _: {func_name}()"
+
+    return func_name, fn_lambda, security_warnings
+
+
+def _inject_tool(
+    name: str, description: str, implementation: str,
+    schema: dict, fn_lambda: str, server_text: str,
+) -> str | dict:
+    """Inject the function and TOOLS entry into *server_text*.
+
+    Returns:
+        Updated server source text on success, or an error dict on failure.
+    """
+    schema_str = json.dumps(schema)
+
+    fn_section = (
+        f"\n\n{_USER_TOOL_FN_MARKER} {name} "
+        + "\u2500" * max(1, 74 - len(name))
+        + f"\n\n{implementation.rstrip()}\n"
+    )
+    tools_dict_start = "\nTOOLS = {"
+    if tools_dict_start not in server_text:
+        return {"error": "Could not locate 'TOOLS = {' in server.py. The file may be malformed."}
+    server_text = server_text.replace(tools_dict_start, fn_section + tools_dict_start, 1)
+
+    tools_entry = (
+        f'    "{name}": {{\n'
+        f'        "description": {json.dumps(description)},\n'
+        f'        "inputSchema": {schema_str},\n'
+        f'        "fn": {fn_lambda},\n'
+        f'    }},\n'
+        f'    {_USER_TOOL_REG_MARKER}\n'
+    )
+    if _USER_TOOL_REG_MARKER not in server_text:
+        return {
+            "error": "Could not locate TOOLS insertion anchor. The registry marker may be missing."
+        }
+    server_text = server_text.replace(f"    {_USER_TOOL_REG_MARKER}\n", tools_entry, 1)
+
+    try:
+        compile(server_text, str(_SERVER_FILE), "exec")
+    except SyntaxError as exc:
+        return {"error": f"Generated code has a syntax error (not written): {exc}"}
+
+    try:
+        _SERVER_FILE.write_text(server_text)
+    except Exception as exc:
+        return {"error": f"Failed to write server.py: {exc}"}
+
+    return server_text
+
+
+def _update_prompt_json(name: str, description: str, prompt_doc: str) -> bool:
+    """Append *name*/*description*/*prompt_doc* to prompt.json.  Best-effort only."""
+    if not prompt_doc.strip():
+        return False
+    try:
+        with open(_PROMPT_FILE) as fh:
+            pdata = json.load(fh)
+        p         = pdata["system_prompt"]["prompt"]
+        qr_marker = "\u2550" * 55 + "\n## TOOL SELECTION QUICK-REFERENCE"
+        if qr_marker in p:
+            tool_doc = (
+                f"\n**{name}** (user-defined)\n"
+                f"  Description: {description}\n"
+                f"  Usage: {prompt_doc}\n\n"
+            )
+            p = p.replace(qr_marker, tool_doc + qr_marker)
+            list_row = "| List user-installed custom tools"
+            if list_row in p:
+                p = p.replace(
+                    list_row,
+                    f"| {description[:52]:<52} | {name:<27} |\n{list_row}",
+                )
+        pdata["system_prompt"]["prompt"] = p
+        with open(_PROMPT_FILE, "w") as fh:
+            json.dump(pdata, fh, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False  # prompt.json update is best-effort; don't fail the whole call
+
+
 def create_tool(
     name:               str,
     description:        str,
@@ -3279,133 +3529,30 @@ def create_tool(
 
     Requires allow_tool_creation: true in ~/.syscontrol/config.json.
     """
-    # ── Frozen bundle gate ─────────────────────────────────────────────────────
     if _FROZEN:
-        return {"error": "create_tool is not available in the bundled .app — the bundle is read-only."}
+        return {
+            "error": (
+                "create_tool is not available in the bundled .app — "
+                "the bundle is read-only."
+            )
+        }
 
-    # ── Permission gate ────────────────────────────────────────────────────────
     denied = _permission_check("allow_tool_creation", "create_tool")
     if denied:
         return denied
 
-    # ── Input validation ───────────────────────────────────────────────────────
-    if not name or not re.match(r"^[a-z][a-z0-9_]*$", name):
-        return {
-            "error": (
-                "Tool name must start with a lowercase letter and contain only "
-                "lowercase letters, digits, and underscores (e.g. 'get_spotify_track')."
-            )
-        }
-
     server_text = _SERVER_FILE.read_text()
-    if f'"{name}":' in server_text:
-        return {"error": f"A tool named '{name}' already exists. Choose a different name."}
+    validation  = _validate_tool_code(name, description, implementation, server_text)
+    if isinstance(validation, dict):
+        return validation  # error dict
+    func_name, fn_lambda, security_warnings = validation
 
-    if not description.strip():
-        return {"error": "description is required."}
-    if not implementation.strip():
-        return {"error": "implementation is required."}
+    schema  = parameters_schema or {"type": "object", "properties": {}, "required": []}
+    updated = _inject_tool(name, description, implementation, schema, fn_lambda, server_text)
+    if isinstance(updated, dict):
+        return updated  # error dict
 
-    # ── Syntax validation ──────────────────────────────────────────────────────
-    try:
-        tree = ast.parse(implementation)
-    except SyntaxError as exc:
-        return {"error": f"Syntax error in implementation: {exc}"}
-
-    # ── Extract function info from AST ─────────────────────────────────────────
-    func_defs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
-    if not func_defs:
-        return {"error": "implementation must define at least one function (def ...)."}
-    func_name   = func_defs[0].name
-    func_params = [a.arg for a in func_defs[0].args.args if a.arg != "self"]
-
-    # ── Security scan (non-blocking — warns but does not block) ───────────────
-    _DANGEROUS = ["eval(", "exec(", "__import__(", "compile(", "os.system("]
-    security_warnings = [d for d in _DANGEROUS if d in implementation]
-
-    # ── Build fn lambda ────────────────────────────────────────────────────────
-    if func_params:
-        param_str = ", ".join(f'args.get("{p}")' for p in func_params)
-        fn_lambda = f"lambda args: {func_name}({param_str})"
-    else:
-        fn_lambda = f"lambda _: {func_name}()"
-
-    # ── Build schema ───────────────────────────────────────────────────────────
-    schema = parameters_schema or {"type": "object", "properties": {}, "required": []}
-    # Inline schema on one line for clean source output
-    schema_str = json.dumps(schema)
-
-    # ── Insert function into server.py (before the TOOLS dict) ──────────────────
-    fn_section = (
-        f"\n\n{_USER_TOOL_FN_MARKER} {name} "
-        + "\u2500" * max(1, 74 - len(name))
-        + f"\n\n{implementation.rstrip()}\n"
-    )
-    # Use "\nTOOLS = {" as the insertion anchor — it is unique in the file and
-    # does not appear in any error message strings within this function.
-    tools_dict_start = "\nTOOLS = {"
-    if tools_dict_start not in server_text:
-        return {"error": "Could not locate 'TOOLS = {' in server.py. The file may be malformed."}
-    server_text = server_text.replace(tools_dict_start, fn_section + tools_dict_start, 1)
-
-    # ── Insert TOOLS entry before the registry anchor comment ─────────────────
-    tools_entry = (
-        f'    "{name}": {{\n'
-        f'        "description": {json.dumps(description)},\n'
-        f'        "inputSchema": {schema_str},\n'
-        f'        "fn": {fn_lambda},\n'
-        f'    }},\n'
-        f'    {_USER_TOOL_REG_MARKER}\n'
-    )
-    if _USER_TOOL_REG_MARKER not in server_text:
-        return {"error": "Could not locate TOOLS insertion anchor. The registry marker may be missing."}
-    server_text = server_text.replace(
-        f"    {_USER_TOOL_REG_MARKER}\n",
-        tools_entry,
-        1,
-    )
-
-    # ── Validate new source compiles cleanly (syntax check) ───────────────────
-    try:
-        compile(server_text, str(_SERVER_FILE), "exec")
-    except SyntaxError as exc:
-        return {"error": f"Generated code has a syntax error (not written): {exc}"}
-
-    # ── Write server.py — rollback to original on any failure ─────────────────
-    try:
-        _SERVER_FILE.write_text(server_text)
-    except Exception as exc:
-        return {"error": f"Failed to write server.py: {exc}"}
-
-    # ── Optionally update prompt.json ─────────────────────────────────────────
-    prompt_updated = False
-    if prompt_doc.strip():
-        try:
-            with open(_PROMPT_FILE) as f:
-                pdata = json.load(f)
-            p = pdata["system_prompt"]["prompt"]
-            # Insert tool doc just before the QUICK-REFERENCE section
-            qr_marker = "\u2550" * 55 + "\n## TOOL SELECTION QUICK-REFERENCE"
-            if qr_marker in p:
-                tool_doc = (
-                    f"\n**{name}** (user-defined)\n"
-                    f"  Description: {description}\n"
-                    f"  Usage: {prompt_doc}\n\n"
-                )
-                p = p.replace(qr_marker, tool_doc + qr_marker)
-                # Add a quick-reference table row (insert before "List user-installed" row)
-                list_row = "| List user-installed custom tools"
-                if list_row in p:
-                    p = p.replace(
-                        list_row,
-                        f"| {description[:52]:<52} | {name:<27} |\n{list_row}",
-                    )
-            pdata["system_prompt"]["prompt"] = p
-            with open(_PROMPT_FILE, "w") as f:
-                json.dump(pdata, f, indent=2, ensure_ascii=False)
-            prompt_updated = True
-        except Exception:
-            pass  # prompt.json update is best-effort; don't fail the whole call
+    prompt_updated = _update_prompt_json(name, description, prompt_doc)
 
     return {
         "success":           True,

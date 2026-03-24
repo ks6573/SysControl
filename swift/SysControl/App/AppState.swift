@@ -10,10 +10,12 @@ final class AppState {
     var selectedSavedChat: SavedChat?
     var selectedSavedChatContent: String = ""
 
-    var isConnected: Bool = false
+    var backendStatus: BackendStatus = .connecting
     var toolCount: Int = 0
     var modelName: String = ""
     var connectionError: String?
+
+    var needsOnboarding: Bool = false
 
     var providerConfiguration: ProviderConfiguration
 
@@ -22,13 +24,23 @@ final class AppState {
     private let history = ChatHistoryManager()
     private let providerStore = ProviderConfigStore()
     private var pendingSavedChatRefreshWorkItem: DispatchWorkItem?
+    private var reconnectAttempt = 0
+
+    /// Backward-compatible computed property used by ChatView's InputBar disable check.
+    var isConnected: Bool {
+        if case .ready = backendStatus { return true }
+        return false
+    }
 
     var activeSession: ChatSession? {
         sessions.first { $0.id == activeSessionID }
     }
 
     init() {
-        providerConfiguration = providerStore.load() ?? .localDefault
+        let savedConfig = providerStore.load()
+        providerConfiguration = savedConfig ?? .localDefault
+        needsOnboarding = (savedConfig == nil)
+
         sessions = persistence.loadSessions()
         if sessions.isEmpty {
             let session = ChatSession()
@@ -39,6 +51,13 @@ final class AppState {
             activeSessionID = sessions.first?.id
         }
         refreshSavedChats()
+    }
+
+    // MARK: - Onboarding
+
+    func completeOnboarding(_ config: ProviderConfiguration) {
+        applyProviderConfiguration(config)
+        needsOnboarding = false
     }
 
     // MARK: - Session Management
@@ -147,10 +166,11 @@ final class AppState {
         let service = BackendService()
         service.onReady = { [weak self] toolCount, model in
             Task { @MainActor in
-                self?.isConnected = true
+                self?.backendStatus = .ready(toolCount: toolCount)
                 self?.toolCount = toolCount
                 self?.modelName = model
                 self?.connectionError = nil
+                self?.reconnectAttempt = 0
             }
         }
         service.onConfigured = { [weak self] model in
@@ -191,8 +211,7 @@ final class AppState {
         }
         service.onDisconnected = { [weak self] in
             Task { @MainActor in
-                self?.isConnected = false
-                self?.connectionError = "Backend disconnected"
+                self?.scheduleReconnect()
             }
         }
 
@@ -233,6 +252,31 @@ final class AppState {
         backend = nil
     }
 
+    // MARK: - Auto Reconnect
+
+    private func scheduleReconnect() {
+        guard reconnectAttempt < 5 else {
+            backendStatus = .failed(message: "Could not connect to backend")
+            connectionError = "Could not connect to backend"
+            return
+        }
+        let delay = min(30.0, pow(2.0, Double(reconnectAttempt)))
+        reconnectAttempt += 1
+        backendStatus = .reconnecting(attempt: reconnectAttempt)
+        backend = nil
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(delay))
+            startBackend()
+        }
+    }
+
+    func retryConnection() {
+        reconnectAttempt = 0
+        backendStatus = .connecting
+        backend = nil
+        startBackend()
+    }
+
     // MARK: - Auto Save
 
     func autoSaveActiveSession() {
@@ -264,4 +308,13 @@ final class AppState {
         "done", "close", "end", "stop", ":q", "q", "adios", "adieu",
         "ttyl", "ttfn", "night", "goodnight", "good night",
     ]
+}
+
+// MARK: - BackendStatus
+
+enum BackendStatus: Equatable {
+    case connecting
+    case ready(toolCount: Int)
+    case reconnecting(attempt: Int)
+    case failed(message: String)
 }

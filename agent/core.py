@@ -76,6 +76,16 @@ class MCPClient:
     """Minimal JSON-RPC client that talks to mcp/server.py over stdio."""
 
     def __init__(self) -> None:
+        """Spawn the MCP server subprocess and perform the JSON-RPC handshake.
+
+        In a frozen PyInstaller bundle the executable re-invokes itself with
+        ``--mcp-server`` so the entry-point can dispatch to mcp/server.py.
+        Otherwise the server is launched directly via ``sys.executable``.
+
+        Raises:
+            RuntimeError: If the subprocess fails to start or the handshake
+                times out / returns an unexpected response.
+        """
         # In a frozen PyInstaller bundle sys.executable is the app binary,
         # not a Python interpreter.  Re-invoke ourselves with a flag so the
         # main entry-point can dispatch to the MCP server.
@@ -185,14 +195,24 @@ class MCPClientPool:
     extras are spawned only when a parallel batch actually needs them.
     """
 
-    def __init__(self, primary: MCPClient, pool_size: int = POOL_SIZE):
+    def __init__(self, primary: MCPClient, pool_size: int = POOL_SIZE) -> None:
+        """Initialise the pool with a pre-created primary client.
+
+        Args:
+            primary: The eagerly-created MCP client placed at index 0.
+                The pool takes ownership and will close it on ``close_all()``.
+            pool_size: Maximum number of concurrent MCP clients.  Extra clients
+                are spawned lazily when a parallel batch actually needs them.
+        """
         self._clients: dict[int, MCPClient] = {0: primary}
         self._pool_size = pool_size
         self._pool_lock = threading.Lock()
         self._parallel_safe: set[str] | None = None  # lazily populated
 
     def _get_or_create(self, index: int) -> MCPClient:
-        assert 0 <= index < self._pool_size, f"Pool index {index} out of range [0, {self._pool_size})"
+        assert 0 <= index < self._pool_size, (
+            f"Pool index {index} out of range [0, {self._pool_size})"
+        )
 
         # Fast path — already created.
         with self._pool_lock:
@@ -477,6 +497,161 @@ class TurnCallbacks:
     on_error: Callable[[str, str], None] = field(default=lambda: (lambda _c, _m: None))
 
 
+def _create_llm_stream(
+    llm: OpenAI,
+    model: str,
+    tools: list[dict],
+    messages: list[dict],
+    system_message: dict,
+    callbacks: TurnCallbacks,
+) -> object | None:
+    """Open a streaming chat-completion request, mapping API errors to callbacks.
+
+    Returns the raw stream iterator on success, or ``None`` if an API error
+    occurred (the error callback is invoked before returning ``None``).
+    """
+    try:
+        return llm.chat.completions.create(
+            model=model,
+            max_tokens=MAX_TOKENS,
+            tools=tools,
+            messages=[system_message] + messages,
+            stream=True,
+        )
+    except openai.APITimeoutError as exc:
+        callbacks.on_error("Timeout", f"LLM request timed out ({exc})")
+    except openai.APIConnectionError as exc:
+        callbacks.on_error("Connection", f"Cannot reach LLM endpoint: {exc}")
+    except openai.AuthenticationError as exc:
+        callbacks.on_error("Auth", f"Invalid API key: {exc}")
+    except openai.APIStatusError as exc:
+        callbacks.on_error("API", f"LLM error {exc.status_code}: {exc.message}")
+    except openai.OpenAIError as exc:
+        callbacks.on_error("LLM", f"LLM error: {exc}")
+    return None
+
+
+def _accumulate_stream_chunks(
+    stream: object, callbacks: TurnCallbacks,
+) -> tuple[str, list[dict], str | None]:
+    """Consume a stream and return (content, tool_calls, finish_reason).
+
+    Calls ``callbacks.on_token`` for every text chunk received.
+    """
+    content_parts: list[str]  = []
+    tool_calls: list[dict]    = []
+    finish_reason: str | None = None
+
+    for chunk in stream:
+        choice = chunk.choices[0] if chunk.choices else None
+        if choice is None:
+            continue
+        delta = choice.delta
+
+        if delta.content:
+            content_parts.append(delta.content)
+            callbacks.on_token(delta.content)
+
+        if delta.tool_calls:
+            for tc in delta.tool_calls:
+                while len(tool_calls) <= tc.index:
+                    tool_calls.append(
+                        {"id": "", "function": {"name": "", "arguments": ""}}
+                    )
+                entry = tool_calls[tc.index]
+                if tc.id:
+                    entry["id"] = tc.id
+                if tc.function and tc.function.name:
+                    entry["function"]["name"] += tc.function.name
+                if tc.function and tc.function.arguments:
+                    entry["function"]["arguments"] += tc.function.arguments
+
+        if choice.finish_reason:
+            finish_reason = choice.finish_reason
+
+    return "".join(content_parts), tool_calls, finish_reason
+
+
+def _stream_llm_response(
+    llm: OpenAI,
+    model: str,
+    tools: list[dict],
+    messages: list[dict],
+    system_message: dict,
+    callbacks: TurnCallbacks,
+) -> tuple[str, list[dict], str | None] | tuple[None, None, str]:
+    """Open a streaming request and collect content + tool-call fragments.
+
+    Returns ``(content, tool_calls, finish_reason)`` on success, or
+    ``(None, None, "error")`` if an API error was raised (callback already invoked).
+    """
+    stream = _create_llm_stream(llm, model, tools, messages, system_message, callbacks)
+    if stream is None:
+        return None, None, "error"
+    return _accumulate_stream_chunks(stream, callbacks)
+
+
+def _execute_tool_calls(
+    tool_calls: list[dict],
+    content: str,
+    pool: MCPClientPool,
+    messages: list[dict],
+    callbacks: TurnCallbacks,
+    start_time: float,
+) -> str | None:
+    """Execute a batch of tool calls in parallel and append results to messages.
+
+    Args:
+        tool_calls: Assembled tool-call dicts from the streaming response.
+        content: Any text content emitted alongside the tool calls (may be empty).
+        pool: MCP client pool for parallel execution.
+        messages: Mutable conversation history — assistant + tool msgs appended.
+        callbacks: ``on_tool_started``, ``on_tool_finished``, ``on_error`` used.
+        start_time: ``time.monotonic()`` value from the start of the turn.
+
+    Returns:
+        ``None`` on success (caller should continue the loop).
+        ``"error"`` if tool execution failed (error callback already invoked).
+    """
+    messages.append({
+        "role": "assistant",
+        "content": content or None,
+        "tool_calls": [
+            {
+                "id": tc["id"],
+                "type": "function",
+                "function": {
+                    "name": tc["function"]["name"],
+                    "arguments": tc["function"]["arguments"],
+                },
+            }
+            for tc in tool_calls
+        ],
+    })
+
+    names = [tc["function"]["name"] for tc in tool_calls]
+    callbacks.on_tool_started(names)
+
+    try:
+        results = pool.call_tools_parallel(tool_calls)
+    except RuntimeError as exc:
+        callbacks.on_error("MCP", f"MCP server crashed or closed: {exc}")
+        return "error"
+    except Exception as exc:
+        callbacks.on_error("Tool", f"Tool execution failed: {exc}")
+        return "error"
+
+    for tc_id, name, result in results:
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc_id,
+            "content": result,
+        })
+        callbacks.on_tool_finished(name, result)
+
+    return None  # continue loop
+
+
 def run_streaming_turn(
     llm: OpenAI,
     pool: MCPClientPool,
@@ -508,124 +683,35 @@ def run_streaming_turn(
     start_time = time.monotonic()
 
     for _round in range(MAX_TOOL_ROUNDS):
-        # Trim history to prevent context-window overflow.
         messages[:] = prune_history(messages)
 
-        # ── Stream LLM response ───────────────────────────────────────────
-        try:
-            stream = llm.chat.completions.create(
-                model=model,
-                max_tokens=MAX_TOKENS,
-                tools=tools,
-                messages=[system_message] + messages,
-                stream=True,
-            )
-        except openai.APITimeoutError as exc:
-            callbacks.on_error("Timeout", f"LLM request timed out ({exc})")
-            return "error", time.monotonic() - start_time
-        except openai.APIConnectionError as exc:
-            callbacks.on_error("Connection", f"Cannot reach LLM endpoint: {exc}")
-            return "error", time.monotonic() - start_time
-        except openai.AuthenticationError as exc:
-            callbacks.on_error("Auth", f"Invalid API key: {exc}")
-            return "error", time.monotonic() - start_time
-        except openai.APIStatusError as exc:
-            callbacks.on_error("API", f"LLM error {exc.status_code}: {exc.message}")
-            return "error", time.monotonic() - start_time
-        except openai.OpenAIError as exc:
-            callbacks.on_error("LLM", f"LLM error: {exc}")
+        content, tool_calls, finish_reason = _stream_llm_response(
+            llm, model, tools, messages, system_message, callbacks,
+        )
+
+        if finish_reason == "error":
             return "error", time.monotonic() - start_time
 
-        # Accumulate streamed content.
-        content_parts: list[str] = []
-        tool_calls: list[dict] = []
-        finish_reason: str | None = None
-
-        for chunk in stream:
-            choice = chunk.choices[0] if chunk.choices else None
-            if choice is None:
-                continue
-            delta = choice.delta
-
-            # Text tokens
-            if delta.content:
-                content_parts.append(delta.content)
-                callbacks.on_token(delta.content)
-
-            # Tool-call fragments (streaming JSON)
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    while len(tool_calls) <= tc.index:
-                        tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
-                    entry = tool_calls[tc.index]
-                    if tc.id:
-                        entry["id"] = tc.id
-                    if tc.function and tc.function.name:
-                        entry["function"]["name"] += tc.function.name
-                    if tc.function and tc.function.arguments:
-                        entry["function"]["arguments"] += tc.function.arguments
-
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-
-        content = "".join(content_parts)
-
-        # ── Handle finish reason ──────────────────────────────────────────
         if finish_reason in ("stop", None) and not tool_calls:
             messages.append({"role": "assistant", "content": content})
-            elapsed = time.monotonic() - start_time
-            return finish_reason or "stop", elapsed
+            return finish_reason or "stop", time.monotonic() - start_time
 
-        elif finish_reason == "tool_calls":
-            # Record assistant message with tool-call metadata.
-            messages.append({
-                "role": "assistant",
-                "content": content or None,
-                "tool_calls": [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["function"]["name"],
-                            "arguments": tc["function"]["arguments"],
-                        },
-                    }
-                    for tc in tool_calls
-                ],
-            })
-
-            names = [tc["function"]["name"] for tc in tool_calls]
-            callbacks.on_tool_started(names)
-
-            try:
-                results = pool.call_tools_parallel(tool_calls)
-            except RuntimeError as exc:
-                callbacks.on_error("MCP", f"MCP server crashed or closed: {exc}")
+        if finish_reason == "tool_calls":
+            err = _execute_tool_calls(
+                tool_calls, content, pool, messages, callbacks, start_time,
+            )
+            if err == "error":
                 return "error", time.monotonic() - start_time
-            except Exception as exc:
-                callbacks.on_error("Tool", f"Tool execution failed: {exc}")
-                return "error", time.monotonic() - start_time
-
-            for tc_id, name, result in results:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": result,
-                })
-                callbacks.on_tool_finished(name, result)
-
             # Continue loop — model will process tool results on next iteration.
 
         else:
             # max_tokens, content_filter, etc.
             messages.append({"role": "assistant", "content": content})
-            elapsed = time.monotonic() - start_time
-            return finish_reason or "unknown", elapsed
+            return finish_reason or "unknown", time.monotonic() - start_time
 
-    # for/else: loop exhausted MAX_TOOL_ROUNDS without a terminal finish_reason.
-    else:
-        callbacks.on_error(
-            "Loop", f"Exceeded {MAX_TOOL_ROUNDS} tool-call rounds — aborting turn"
-        )
-        return "error", time.monotonic() - start_time
+    # Loop exhausted MAX_TOOL_ROUNDS without a terminal finish_reason.
+    callbacks.on_error(
+        "Loop", f"Exceeded {MAX_TOOL_ROUNDS} tool-call rounds — aborting turn"
+    )
+    return "error", time.monotonic() - start_time
 

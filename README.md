@@ -22,13 +22,25 @@ A native SwiftUI app with streaming chat, Markdown rendering, chat history sideb
 
 ### Download
 
-Run this in Terminal to download, build, and open the app:
+**Option A — Pre-built DMG** (no Xcode required):
+
+Download the latest `SysControl.dmg` from [GitHub Releases](https://github.com/ks6573/SyscontrolMCP/releases), drag to Applications, then bypass Gatekeeper on first launch (the app is ad-hoc signed, not notarized):
+
+```bash
+xattr -r -d com.apple.quarantine /Applications/SysControl.app
+```
+
+Or right-click the app → **Open** → **Open** the first time.
+
+**Option B — Install from source** (compiles locally, bypasses Gatekeeper automatically):
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"
 ```
 
-Or build manually:
+To uninstall: re-run with `--uninstall`.
+
+**Option C — Build manually:**
 
 ```bash
 git clone https://github.com/ks6573/SysControl.git
@@ -37,7 +49,7 @@ cd SysControl/swift
 open .build/SysControl.app
 ```
 
-> **Requires:** macOS 14+ and Xcode Command Line Tools (`xcode-select --install`).
+> **Requires:** macOS 14 (Sonoma) or later. Options B and C also require Xcode Command Line Tools (`xcode-select --install`).
 
 ### Features
 
@@ -49,10 +61,13 @@ open .build/SysControl.app
 
 ### First Launch
 
-1. Open the app
-2. Click **Settings** (gear icon)
-3. Choose **Local** (requires [Ollama](https://ollama.com) running) or **Cloud** (enter your API key)
-4. Start chatting
+On first launch an onboarding sheet appears automatically:
+
+1. Choose **Local (Ollama)** — requires [Ollama](https://ollama.com) running locally, no API key needed
+2. Or choose **Cloud** — enter your API key
+3. Click **Done** and start chatting
+
+To change providers later, open **Settings** (⌘,).
 
 > Chat history is saved as Markdown in `~/.syscontrol/chat_history/` — view, edit, or delete freely.
 

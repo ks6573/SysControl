@@ -50,6 +50,11 @@ final class BackendService: @unchecked Sendable {
         let pythonPath = "\(projectRoot)/.venv/bin/python3"
         let bridgePath = "\(projectRoot)/agent/bridge.py"
 
+        guard FileManager.default.fileExists(atPath: bridgePath) else {
+            onError?("Startup", "Agent bridge not found at \(bridgePath). Please reinstall.")
+            return
+        }
+
         // Fallback: try system python if venv doesn't exist
         let actualPython = FileManager.default.fileExists(atPath: pythonPath) ? pythonPath : "/usr/bin/python3"
 

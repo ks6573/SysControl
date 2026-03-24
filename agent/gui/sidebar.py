@@ -111,7 +111,6 @@ class ChatHistorySidebar(QFrame):
         super().__init__(parent)
         self._palette = palette
         self.setAcceptDrops(True)
-
         self.setStyleSheet(f"""
             ChatHistorySidebar {{
                 background-color: {palette["sidebar_bg"]};
@@ -123,20 +122,24 @@ class ChatHistorySidebar(QFrame):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        root.addWidget(self._setup_header(palette))
+        root.addWidget(self._setup_list(palette), 1)
 
-        # ── Header ────────────────────────────────────────────────────────
+    def _setup_header(self, palette: dict[str, str]) -> QWidget:
+        """Build the 'Other Chats' title row with a close button."""
         header = QWidget()
         header.setFixedHeight(44)
         header.setStyleSheet("background: transparent;")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(14, 0, 8, 0)
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(14, 0, 8, 0)
 
         title = QLabel("Other Chats")
         title.setFont(QFont(".AppleSystemUIFont", 13, QFont.Weight.DemiBold))
-        title.setStyleSheet(f"color: {palette['sidebar_title']}; background: transparent;")
-        header_layout.addWidget(title)
-
-        header_layout.addStretch()
+        title.setStyleSheet(
+            f"color: {palette['sidebar_title']}; background: transparent;"
+        )
+        layout.addWidget(title)
+        layout.addStretch()
 
         close_btn = QToolButton()
         close_btn.setText("\u2715")  # ✕
@@ -156,16 +159,18 @@ class ChatHistorySidebar(QFrame):
         """)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.clicked.connect(self._on_close)
-        header_layout.addWidget(close_btn)
+        layout.addWidget(close_btn)
+        return header
 
-        root.addWidget(header)
-
-        # ── Scroll area for chat items ────────────────────────────────────
+    def _setup_list(self, palette: dict[str, str]) -> QScrollArea:
+        """Build the scrollable chat list container and empty-state label."""
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet(f"background: {palette['sidebar_bg']}; border: none;")
+        self._scroll.setStyleSheet(
+            f"background: {palette['sidebar_bg']}; border: none;"
+        )
 
         self._list_container = QWidget()
         self._list_layout = QVBoxLayout(self._list_container)
@@ -173,16 +178,19 @@ class ChatHistorySidebar(QFrame):
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
 
-        self._scroll.setWidget(self._list_container)
-        root.addWidget(self._scroll, 1)
-
-        # ── Empty state ───────────────────────────────────────────────────
-        self._empty_label = QLabel("No past chats.\nSave something and\nI'll pick up from there!")
+        self._empty_label = QLabel(
+            "No past chats.\nSave something and\nI'll pick up from there!"
+        )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setFont(QFont(".AppleSystemUIFont", 12))
-        self._empty_label.setStyleSheet(f"color: {palette['sidebar_empty']}; background: transparent;")
+        self._empty_label.setStyleSheet(
+            f"color: {palette['sidebar_empty']}; background: transparent;"
+        )
         self._empty_label.setWordWrap(True)
         self._list_layout.insertWidget(0, self._empty_label)
+
+        self._scroll.setWidget(self._list_container)
+        return self._scroll
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -230,7 +238,7 @@ class ChatHistorySidebar(QFrame):
         imported = 0
         for url in event.mimeData().urls():
             local = url.toLocalFile()
-            if local.endswith(".md"):
+            if local and local.endswith(".md"):
                 result = import_chat(Path(local))
                 if result:
                     imported += 1
@@ -257,18 +265,22 @@ class ChatViewerDialog(QDialog):
         self.setModal(True)
 
         bg = palette["window_bg"]
-        fg = palette["asst_bubble_text"]
-        accent = palette["accent"]
-        border = palette["border"]
-        code_bg = palette.get("code_bg", "#222020")
-
         self.setStyleSheet(f"QDialog {{ background-color: {bg}; }}")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        layout.addWidget(self._setup_viewer(chat_path, palette), 1)
+        layout.addWidget(self._setup_close_row(palette))
 
-        # ── Content browser ───────────────────────────────────────────────
+    def _setup_viewer(self, chat_path: Path, palette: dict[str, str]) -> QTextBrowser:
+        """Build and populate the read-only content browser."""
+        bg      = palette["window_bg"]
+        fg      = palette["asst_bubble_text"]
+        accent  = palette["accent"]
+        border  = palette["border"]
+        code_bg = palette.get("code_bg", "#222020")
+
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
         browser.setFrameShape(QFrame.Shape.NoFrame)
@@ -284,7 +296,7 @@ class ChatViewerDialog(QDialog):
 
         content = read_chat(chat_path)
         if _HAS_MARKDOWN:
-            html = md.markdown(content, extensions=["fenced_code", "tables", "nl2br"])
+            html   = md.markdown(content, extensions=["fenced_code", "tables", "nl2br"])
             styled = f"""
             <style>
                 body {{
@@ -316,15 +328,19 @@ class ChatViewerDialog(QDialog):
         else:
             browser.setPlainText(content)
 
-        layout.addWidget(browser, 1)
+        return browser
 
-        # ── Close button row ──────────────────────────────────────────────
+    def _setup_close_row(self, palette: dict[str, str]) -> QWidget:
+        """Build the bottom row containing the Close button."""
+        bg     = palette["window_bg"]
+        fg     = palette["asst_bubble_text"]
+        border = palette["border"]
+
         btn_row = QWidget()
         btn_row.setStyleSheet(f"background-color: {bg};")
-        btn_layout = QHBoxLayout(btn_row)
-        btn_layout.setContentsMargins(16, 8, 16, 12)
+        layout = QHBoxLayout(btn_row)
+        layout.setContentsMargins(16, 8, 16, 12)
 
-        btn_layout.addStretch()
         close_btn = QPushButton("Close")
         close_btn.setFixedWidth(80)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -342,6 +358,7 @@ class ChatViewerDialog(QDialog):
             }}
         """)
         close_btn.clicked.connect(self.accept)
-        btn_layout.addWidget(close_btn)
 
-        layout.addWidget(btn_row)
+        layout.addStretch()
+        layout.addWidget(close_btn)
+        return btn_row

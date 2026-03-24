@@ -135,6 +135,7 @@ _http = httpx.Client(timeout=30)
 
 def _post(url: str, *, headers: dict | None = None, params: dict | None = None,
           payload: dict) -> httpx.Response:
+    """Send a synchronous HTTP POST with JSON payload via the shared httpx client."""
     return _http.post(url, headers=headers or {}, params=params or {}, json=payload)
 
 
@@ -154,6 +155,7 @@ def _telegram_send(chat_id: int | str, text: str, token: str) -> None:
 
 
 def _whatsapp_send(phone: str, text: str, cfg: dict) -> None:
+    """Send a WhatsApp message via the Meta Cloud API (text type, max 4096 chars)."""
     _post(
         f"https://graph.facebook.com/v21.0/{cfg['phone_number_id']}/messages",
         headers={"Authorization": f"Bearer {cfg['access_token']}"},
@@ -167,6 +169,7 @@ def _whatsapp_send(phone: str, text: str, cfg: dict) -> None:
 
 
 def _messenger_send(psid: str, text: str, token: str) -> None:
+    """Send a Facebook Messenger message to *psid* (max 2000 chars)."""
     _post(
         "https://graph.facebook.com/v21.0/me/messages",
         params={"access_token": token},
@@ -180,6 +183,46 @@ def _messenger_send(psid: str, text: str, token: str) -> None:
 # ── Core agent runner ─────────────────────────────────────────────────────────
 # This mirrors run_turn() from agent/cli.py but captures output as a string
 # instead of printing, and uses non-streaming for simpler thread safety.
+
+def _process_remote_tool_calls(
+    session: list[dict],
+    pool: MCPClientPool,
+    msg: object,
+    response_parts: list[str],
+) -> None:
+    """Record assistant tool-call turn, execute tools, append results to session."""
+    session.append({
+        "role":    "assistant",
+        "content": msg.content or None,  # type: ignore[union-attr]
+        "tool_calls": [
+            {
+                "id":   tc.id,
+                "type": "function",
+                "function": {
+                    "name":      tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            for tc in msg.tool_calls  # type: ignore[union-attr]
+        ],
+    })
+
+    tool_dicts = []
+    names: list[str] = []
+    for tc in msg.tool_calls:  # type: ignore[union-attr]
+        tool_dicts.append({
+            "id": tc.id,
+            "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+        })
+        names.append(tc.function.name)
+    log.info("Tool calls: %s", ", ".join(names))
+
+    results = pool.call_tools_parallel(tool_dicts)
+    for tc_id, _name, result in results:
+        session.append({"role": "tool", "tool_call_id": tc_id, "content": result})
+
+    response_parts.append(f"⚙ {', '.join(names)}")
+
 
 def run_agent(
     user_text: str,
@@ -211,49 +254,7 @@ def run_agent(
         finish  = choice.finish_reason
 
         if finish == "tool_calls" and msg.tool_calls:
-            # Record assistant turn with tool call metadata
-            session.append({
-                "role":    "assistant",
-                "content": content or None,
-                "tool_calls": [
-                    {
-                        "id":   tc.id,
-                        "type": "function",
-                        "function": {
-                            "name":      tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ],
-            })
-
-            # Build the list for the pool (single pass)
-            tool_dicts = []
-            names = []
-            for tc in msg.tool_calls:
-                tool_dicts.append({
-                    "id": tc.id,
-                    "function": {
-                        "name":      tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                })
-                names.append(tc.function.name)
-            log.info("Tool calls: %s", ", ".join(names))
-
-            # Execute in parallel via pool
-            results = pool.call_tools_parallel(tool_dicts)
-            for tc_id, _name, result in results:
-                session.append({
-                    "role":        "tool",
-                    "tool_call_id": tc_id,
-                    "content":     result,
-                })
-
-            # Surface tool names used (helpful context in the reply)
-            response_parts.append(f"⚙ {', '.join(names)}")
-
+            _process_remote_tool_calls(session, pool, msg, response_parts)
         else:
             session.append({"role": "assistant", "content": content})
             if content:
@@ -315,6 +316,11 @@ _client:  OpenAI | None = None
 
 
 def _is_allowed(platform: str, chat_id: str) -> bool:
+    """Return True iff *chat_id* appears in the allow-list for *platform*.
+
+    An empty allow-list rejects everyone and logs the sender's ID so the
+    operator can copy it into the config without enabling open access.
+    """
     allowed = _cfg.get("allowed_chat_ids", {}).get(platform, [])
     if not allowed:
         # Allow-list is empty → reject all messages and log the sender so the
@@ -477,6 +483,15 @@ def _register_telegram(webhook_url: str) -> None:
 
 
 def main() -> None:
+    """CLI entry point: optionally register the Telegram webhook, then start uvicorn.
+
+    Subcommands
+    -----------
+    ``--register-telegram TUNNEL_URL``
+        Register the Telegram bot webhook and exit (no server started).
+    ``(default)``
+        Ensure config exists, then start the FastAPI server on ``--host``/``--port``.
+    """
     import argparse
 
     parser = argparse.ArgumentParser(

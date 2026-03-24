@@ -13,12 +13,15 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$SCRIPT_DIR/.build"
 APP_NAME="SysControl"
 BUNDLE_ID="com.syscontrol.app"
+VERSION=$(cat "$PROJECT_ROOT/VERSION" 2>/dev/null || echo "1.0.0")
+# Trim whitespace/newlines
+VERSION="${VERSION//[$'\t\r\n ']}"
 
 MODE="${1:-debug}"
 
 echo "══════════════════════════════════════════"
 echo " SysControl Build Script"
-echo " Mode: $MODE"
+echo " Version: $VERSION  Mode: $MODE"
 echo "══════════════════════════════════════════"
 
 # ── Step 1: Build Swift binary ────────────────────────────────────────────────
@@ -68,9 +71,9 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>$VERSION</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>$VERSION</string>
     <key>CFBundleExecutable</key>
     <string>$APP_NAME</string>
     <key>CFBundlePackageType</key>

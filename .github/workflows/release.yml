@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: macos-15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Set up Python backend
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv sync
+
+      - name: Build DMG
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd swift
+          ./build.sh release
+
+      - name: Read version
+        id: version
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "SysControl v${{ steps.version.outputs.version }}"
+          files: swift/.build/SysControl.dmg
+          body: |
+            ## SysControl v${{ steps.version.outputs.version }}
+
+            ### Installation
+
+            1. Download `SysControl.dmg` below
+            2. Open the DMG and drag **SysControl.app** to your Applications folder
+            3. **First launch — Gatekeeper bypass** (required since the app is not notarized):
+               - Right-click the app icon → **Open**, then click **Open** in the dialog, **or**
+               - Run once in Terminal:
+                 ```
+                 xattr -r -d com.apple.quarantine /Applications/SysControl.app
+                 ```
+               - Then double-click as normal
+
+            ### Install from source (alternative)
+            ```bash
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"
+            ```
+
+            ### Requirements
+            - macOS 14 (Sonoma) or later
+            - For cloud providers: API key from your provider
+            - For local (Ollama): [Ollama](https://ollama.com) installed and running

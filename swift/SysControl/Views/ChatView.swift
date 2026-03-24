@@ -18,6 +18,12 @@ struct ChatView: View {
                 }
             }
 
+            if case .ready = appState.backendStatus { } else {
+                ConnectionStatusBanner(status: appState.backendStatus) {
+                    appState.retryConnection()
+                }
+            }
+
             Divider()
 
             // Input bar
@@ -141,6 +147,65 @@ struct ChatView: View {
             return true
         }
         return latestAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+// MARK: - Connection Status Banner
+
+private struct ConnectionStatusBanner: View {
+    let status: BackendStatus
+    let onRetry: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(dotColor)
+                .frame(width: 7, height: 7)
+            Text(statusText)
+                .font(.system(size: 12))
+                .foregroundStyle(.primary.opacity(0.8))
+            Spacer()
+            if case .failed = status {
+                Button("Retry") { onRetry() }
+                    .font(.system(size: 12))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 7)
+        .background(bannerColor.opacity(0.12))
+    }
+
+    private var dotColor: Color {
+        switch status {
+        case .connecting:    return .yellow
+        case .ready:         return .green
+        case .reconnecting:  return .orange
+        case .failed:        return .red
+        }
+    }
+
+    private var bannerColor: Color {
+        switch status {
+        case .connecting:    return .yellow
+        case .ready:         return .green
+        case .reconnecting:  return .orange
+        case .failed:        return .red
+        }
+    }
+
+    private var statusText: String {
+        switch status {
+        case .connecting:
+            return "Connecting to backend..."
+        case .ready:
+            return "Connected"
+        case .reconnecting(let attempt):
+            return "Reconnecting... (attempt \(attempt)/5)"
+        case .failed(let message):
+            return message
+        }
     }
 }
 

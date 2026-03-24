@@ -4,12 +4,46 @@
 #
 # Usage:
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"
+#
+# Flags:
+#   --uninstall   Remove SysControl from Applications (and optionally ~/.syscontrol)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 APP_NAME="SysControl"
 REPO_URL="https://github.com/ks6573/SyscontrolMCP.git"
 INSTALL_DIR="$HOME/.syscontrol/build"
+LOG_FILE="$HOME/.syscontrol/install.log"
+DEST="/Applications/$APP_NAME.app"
+MIN_MACOS_MAJOR=14
+
+# ── Uninstall flag ────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--uninstall" ]]; then
+    echo ""
+    echo "══════════════════════════════════════════"
+    echo " SysControl Uninstaller"
+    echo "══════════════════════════════════════════"
+    echo ""
+
+    if [ -d "$DEST" ]; then
+        rm -rf "$DEST"
+        echo "✓ Removed $DEST"
+    else
+        echo "  $DEST not found — skipping"
+    fi
+
+    echo ""
+    read -r -p "  Also remove ~/.syscontrol (config, logs, build)? [y/N] " answer
+    if [[ "${answer:-n}" =~ ^[Yy]$ ]]; then
+        rm -rf "$HOME/.syscontrol"
+        echo "✓ Removed ~/.syscontrol"
+    fi
+
+    echo ""
+    echo "✓ Uninstall complete."
+    echo ""
+    exit 0
+fi
 
 echo ""
 echo "══════════════════════════════════════════"
@@ -17,18 +51,29 @@ echo " SysControl Installer"
 echo "══════════════════════════════════════════"
 echo ""
 
-# ── Preflight checks ─────────────────────────────────────────────────────────
+# ── [1/5] Requirements ────────────────────────────────────────────────────────
+echo "[1/5] Checking requirements..."
 
 if [ "$(uname)" != "Darwin" ]; then
     echo "✗ SysControl requires macOS."
     exit 1
 fi
 
+# Check macOS version >= 14
+MACOS_VERSION=$(sw_vers -productVersion)
+MACOS_MAJOR=$(echo "$MACOS_VERSION" | cut -d. -f1)
+if [ "$MACOS_MAJOR" -lt "$MIN_MACOS_MAJOR" ]; then
+    echo "✗ SysControl requires macOS $MIN_MACOS_MAJOR (Sonoma) or later."
+    echo "  Detected: macOS $MACOS_VERSION"
+    exit 1
+fi
+echo "  macOS $MACOS_VERSION — OK"
+
 if ! xcode-select -p &>/dev/null; then
-    echo "Xcode Command Line Tools not found. Installing..."
+    echo "  Xcode Command Line Tools not found. Installing..."
     xcode-select --install
     echo ""
-    echo "After installation completes, re-run this script."
+    echo "  After installation completes, re-run this script."
     exit 1
 fi
 
@@ -37,76 +82,83 @@ if ! command -v swift &>/dev/null; then
     echo "  xcode-select --install"
     exit 1
 fi
+echo "  Swift $(swift --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) — OK"
 
-# ── Clone or update ──────────────────────────────────────────────────────────
+# ── [2/5] Download ────────────────────────────────────────────────────────────
+echo ""
+echo "[2/5] Downloading SysControl..."
+
+# Create ~/.syscontrol early so we can write the log
+mkdir -p "$HOME/.syscontrol"
 
 if [ -d "$INSTALL_DIR" ]; then
-    echo "► Updating existing installation..."
+    echo "  Updating existing installation..."
     cd "$INSTALL_DIR"
-    git pull --ff-only 2>/dev/null || {
+    git pull --ff-only 2>>"$LOG_FILE" || {
         echo "  Could not fast-forward — re-cloning..."
         cd /
         rm -rf "$INSTALL_DIR"
-        git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+        git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" 2>>"$LOG_FILE"
         cd "$INSTALL_DIR"
     }
 else
-    echo "► Downloading SysControl..."
     mkdir -p "$(dirname "$INSTALL_DIR")"
-    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" 2>>"$LOG_FILE"
     cd "$INSTALL_DIR"
 fi
 
-# ── Set up Python venv ───────────────────────────────────────────────────────
+VERSION=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "1.0.0")
+echo "  Version: $VERSION"
 
+# ── [3/5] Python backend ──────────────────────────────────────────────────────
 echo ""
-echo "► Setting up Python backend..."
+echo "[3/5] Setting up Python backend..."
 
+cd "$INSTALL_DIR"
 if command -v uv &>/dev/null; then
-    uv sync 2>&1 | tail -1
+    uv sync >>"$LOG_FILE" 2>&1
 else
     echo "  uv not found — installing..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null
+    curl -LsSf https://astral.sh/uv/install.sh | sh >>"$LOG_FILE" 2>&1
     export PATH="$HOME/.local/bin:$PATH"
-    uv sync 2>&1 | tail -1
+    uv sync >>"$LOG_FILE" 2>&1
 fi
+echo "  Python backend ready"
 
-# ── Build ────────────────────────────────────────────────────────────────────
-
+# ── [4/5] Build app ───────────────────────────────────────────────────────────
 echo ""
-echo "► Building app (this may take a minute on first run)..."
-cd swift
-./build.sh release 2>&1 | grep -E "^[✓✗►]|^  App|^  DMG|Build complete"
+echo "[4/5] Building app (first run ~2 min)...   [log: $LOG_FILE]"
+
+cd "$INSTALL_DIR/swift"
+./build.sh release >>"$LOG_FILE" 2>&1
 
 APP_PATH="$INSTALL_DIR/swift/.build/$APP_NAME.app"
-DEST="/Applications/$APP_NAME.app"
 
 if [ ! -d "$APP_PATH" ]; then
     echo ""
-    echo "✗ Build failed. Check the output above for errors."
+    echo "✗ Build failed. Check the log:"
+    echo "  $LOG_FILE"
     exit 1
 fi
+echo "  Build complete"
 
-# ── Install to /Applications ─────────────────────────────────────────────────
-
+# ── [5/5] Install ─────────────────────────────────────────────────────────────
 echo ""
-echo "► Installing to /Applications..."
+echo "[5/5] Installing to /Applications..."
 
 if [ -d "$DEST" ]; then
     rm -rf "$DEST"
 fi
 cp -R "$APP_PATH" "$DEST"
+echo "  Installed: $DEST"
 
-echo "✓ Installed: $DEST"
-
-# ── Launch ───────────────────────────────────────────────────────────────────
-
+# ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════"
-echo " ✓ SysControl installed!"
+echo " ✓ SysControl v$VERSION installed!"
 echo ""
-echo " Opening the app now..."
-echo " Configure your provider in Settings."
+echo " Opening now. Press ⌘, in the app"
+echo " to configure your AI provider."
 echo "══════════════════════════════════════════"
 echo ""
 

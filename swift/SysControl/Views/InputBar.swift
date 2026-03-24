@@ -16,8 +16,8 @@ struct InputBar: View {
                     Text("Message SysControl…")
                         .foregroundStyle(.tertiary)
                         .font(.system(size: 14))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 9)
+                        .padding(.leading, 5)
+                        .padding(.top, 8)
                         .allowsHitTesting(false)
                 }
 

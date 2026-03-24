@@ -21,6 +21,12 @@ struct ContentView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
+        .sheet(isPresented: Binding(
+            get: { appState.needsOnboarding },
+            set: { _ in }  // non-dismissable until user completes setup
+        )) {
+            OnboardingView().environment(appState)
+        }
         .onAppear {
             appState.startBackend()
         }

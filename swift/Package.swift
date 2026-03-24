@@ -28,6 +28,7 @@ let package = Package(
                 "Views/LazyMarkdownText.swift",
                 "Views/InputBar.swift",
                 "Views/SettingsView.swift",
+                "Views/OnboardingView.swift",
             ]
         ),
     ]

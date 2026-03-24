@@ -48,6 +48,9 @@ class MessageBubble(QFrame):
         palette: dict[str, str],
         parent: QWidget | None = None,
     ) -> None:
+        assert role in ("user", "assistant"), (
+            f"MessageBubble: invalid role {role!r} — expected 'user' or 'assistant'"
+        )
         super().__init__(parent)
         self._role = role
         self._palette = palette

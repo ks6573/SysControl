@@ -99,17 +99,9 @@ def get_palette(dark: bool = True) -> dict[str, str]:
     return DARK if dark else LIGHT
 
 
-def load_stylesheet(dark: bool = True) -> str:
-    """Return a QSS stylesheet string for the given mode."""
-    c = get_palette(dark)
+def _toolbar_styles(c: dict[str, str]) -> str:
+    """Return QSS for the toolbar and its child widgets."""
     return f"""
-    QMainWindow, QDialog {{
-        background-color: {c["window_bg"]};
-    }}
-    QWidget {{
-        font-family: '.AppleSystemUIFont', 'Helvetica Neue', sans-serif;
-    }}
-
     /* ── Toolbar ─────────────────────────────────────── */
     QToolBar {{
         background-color: {c["toolbar_bg"]};
@@ -134,7 +126,12 @@ def load_stylesheet(dark: bool = True) -> str:
         font-size: 13px;
         font-weight: 600;
     }}
+    """
 
+
+def _statusbar_styles(c: dict[str, str]) -> str:
+    """Return QSS for the status bar."""
+    return f"""
     /* ── Status bar ──────────────────────────────────── */
     QStatusBar {{
         background-color: {c["status_bg"]};
@@ -147,7 +144,12 @@ def load_stylesheet(dark: bool = True) -> str:
         padding: 0 4px;
         font-size: 11px;
     }}
+    """
 
+
+def _scrollbar_styles(c: dict[str, str]) -> str:
+    """Return QSS for the chat scroll area and scrollbar."""
+    return f"""
     /* ── Scroll area (chat) ──────────────────────────── */
     QScrollArea {{
         background-color: {c["chat_bg"]};
@@ -175,3 +177,17 @@ def load_stylesheet(dark: bool = True) -> str:
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
     """
+
+
+def load_stylesheet(dark: bool = True) -> str:
+    """Return a QSS stylesheet string for the given mode."""
+    c = get_palette(dark)
+    base = f"""
+    QMainWindow, QDialog {{
+        background-color: {c["window_bg"]};
+    }}
+    QWidget {{
+        font-family: '.AppleSystemUIFont', 'Helvetica Neue', sans-serif;
+    }}
+    """
+    return base + _toolbar_styles(c) + _statusbar_styles(c) + _scrollbar_styles(c)
