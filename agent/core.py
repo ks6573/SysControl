@@ -7,18 +7,20 @@ CLI (agent/cli.py) and the remote bridge (agent/remote.py).
 """
 
 import json
+import os
 import re
+import select
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import lru_cache
-from pathlib import Path
-from collections.abc import Callable
+from typing import IO
 
 try:
     import fcntl as fcntl_mod  # noqa: F401 — re-exported for cli.py / server.py
@@ -84,6 +86,49 @@ MAGENTA = "\033[35m" if _USE_COLOR else ""   # used for inline code
 
 # ── MCP Client ────────────────────────────────────────────────────────────────
 
+_STDERR_READ_TIMEOUT = 2.0   # seconds to wait for stderr output on crash
+_STDERR_MAX_BYTES    = 4096  # cap stderr reads to avoid memory bloat
+
+
+def _read_stderr_safe(
+    pipe: IO[str] | IO[bytes] | None,
+    timeout: float = _STDERR_READ_TIMEOUT,
+) -> str:
+    """Read available stderr output without blocking indefinitely.
+
+    Uses ``select()`` on Unix to check readability before reading.
+    Falls back to an empty string if nothing is available within *timeout*.
+
+    Args:
+        pipe: Stderr pipe from a subprocess (text or binary mode), or ``None``.
+        timeout: Maximum seconds to wait for data.  Defaults to 2.0.
+
+    Returns:
+        Stripped stderr text, or empty string if unavailable or on error.
+    """
+    if pipe is None:
+        return ""
+    try:
+        fd = pipe.fileno()
+    except (ValueError, OSError):
+        return ""
+    try:
+        ready, _, _ = select.select([fd], [], [], timeout)
+    except (ValueError, OSError):
+        return ""
+    if not ready:
+        return ""
+    try:
+        # Read at the fd level (raw bytes) rather than through the TextIOWrapper.
+        # This is intentional: on crash paths the wrapper's internal buffer may
+        # be in an inconsistent state, and the process is torn down immediately
+        # after this read — so wrapper coherence does not matter.
+        data = os.read(fd, _STDERR_MAX_BYTES)
+        return data.decode("utf-8", errors="replace").strip()
+    except (OSError, ValueError):
+        return ""
+
+
 class MCPClient:
     """Minimal JSON-RPC client that talks to mcp/server.py over stdio."""
 
@@ -124,7 +169,28 @@ class MCPClient:
         self._id += 1
         return self._id
 
-    def _send(self, method: str, params: dict | None = None) -> dict:
+    def _send(
+        self,
+        method: str,
+        params: dict | None = None,
+        _read_timeout: float | None = None,
+    ) -> dict:
+        """Send a JSON-RPC request and return the parsed response.
+
+        Args:
+            method: JSON-RPC method name.
+            params: Optional parameters dict.
+            _read_timeout: If set, wait at most this many seconds for the
+                server to produce a response line.  ``None`` (default) blocks
+                indefinitely — suitable for normal tool calls where the server
+                is known-healthy.  Used by ``_initialize`` to enforce a
+                startup deadline.
+
+        Raises:
+            RuntimeError: If the server crashes or closes its pipe.
+            TimeoutError: If *_read_timeout* is set and the server does not
+                respond in time.
+        """
         with self._lock:
             msg: dict = {"jsonrpc": "2.0", "id": self._next_id(), "method": method}
             if params:
@@ -133,14 +199,30 @@ class MCPClient:
                 self.proc.stdin.write(json.dumps(msg) + "\n")
                 self.proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
-                err = (self.proc.stderr.read() if self.proc.stderr else "").strip()
+                err = _read_stderr_safe(self.proc.stderr)
                 raise RuntimeError(
                     f"MCP server crashed."
                     f"{(' Server error: ' + err) if err else ''}"
                 ) from exc
+
+            # Gate the blocking readline() behind select() when a timeout is
+            # requested, so callers (e.g. _initialize) cannot hang forever.
+            if _read_timeout is not None:
+                try:
+                    ready, _, _ = select.select(
+                        [self.proc.stdout], [], [], _read_timeout,
+                    )
+                except (ValueError, OSError):
+                    ready = []
+                if not ready:
+                    raise TimeoutError(
+                        f"MCP server did not respond to '{method}' within "
+                        f"{_read_timeout:.1f}s — is mcp/server.py healthy?"
+                    )
+
             raw = self.proc.stdout.readline()
             if not raw:
-                err = (self.proc.stderr.read() if self.proc.stderr else "").strip()
+                err = _read_stderr_safe(self.proc.stderr)
                 raise RuntimeError(
                     f"MCP server closed unexpectedly."
                     f"{(' Server error: ' + err) if err else ''}"
@@ -154,18 +236,39 @@ class MCPClient:
                 self.proc.stdin.write(json.dumps(msg) + "\n")
                 self.proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
-                err = (self.proc.stderr.read() if self.proc.stderr else "").strip()
+                err = _read_stderr_safe(self.proc.stderr)
                 raise RuntimeError(
                     f"MCP server crashed during notification '{method}'."
                     f"{(' Server error: ' + err) if err else ''}"
                 ) from exc
 
-    def _initialize(self) -> None:
+    def _initialize(self, timeout: float = 10.0) -> None:
+        """Perform the JSON-RPC handshake with a deadline.
+
+        Args:
+            timeout: Maximum seconds to wait for the server to respond.
+
+        Raises:
+            RuntimeError: If the server process exits before responding.
+            TimeoutError: If the server does not respond within *timeout* seconds.
+        """
+        # Detect early exit before attempting the handshake — gives a clearer
+        # error than a BrokenPipeError from _send.
+        if self.proc.poll() is not None:
+            err = _read_stderr_safe(self.proc.stderr)
+            raise RuntimeError(
+                f"MCP server exited before handshake (code {self.proc.returncode})."
+                f"{(' Server error: ' + err) if err else ''}"
+            )
+
+        # _read_timeout gates the blocking readline() inside _send with
+        # select(), so this call cannot hang beyond the deadline.
         self._send("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities":    {},
             "clientInfo":      {"name": "syscontrol-agent", "version": "1.0"},
-        })
+        }, _read_timeout=timeout)
+
         self._notify("initialized")
 
     def list_tools(self) -> list[dict]:
@@ -179,7 +282,11 @@ class MCPClient:
         return content[0].get("text", "") if content else "[no content returned]"
 
     def close(self) -> None:
-        """Gracefully shut down the subprocess: close stdin → wait → kill."""
+        """Gracefully shut down the subprocess: close stdin → terminate → kill.
+
+        Each step is guarded so a failure at any stage does not prevent the
+        next attempt.  A final ``wait()`` confirms the process is reaped.
+        """
         pid = self.proc.pid
         try:
             self.proc.stdin.close()
@@ -188,12 +295,14 @@ class MCPClient:
         try:
             self.proc.terminate()
             self.proc.wait(timeout=2)
+            return  # clean exit — no need to escalate
         except Exception as exc:
             sys.stderr.write(f"[syscontrol] MCPClient.close terminate (pid={pid}): {exc}\n")
         try:
             self.proc.kill()
+            self.proc.wait(timeout=2)  # reap to avoid zombie
         except Exception:
-            pass  # expected if already terminated
+            pass  # best-effort — process may already be gone
 
 
 # ── MCP Client Pool ───────────────────────────────────────────────────────────
@@ -267,9 +376,9 @@ class MCPClientPool:
 
     # Sentinel: distinguishes "server unreachable, allow everything" from a
     # legitimately loaded (but possibly empty) set of safe tool names.
-    _FALLBACK: frozenset = frozenset()
+    _FALLBACK: frozenset[str] = frozenset()
 
-    def _get_parallel_safe(self) -> frozenset | set[str]:
+    def _get_parallel_safe(self) -> frozenset[str] | set[str]:
         """Return the set of tool names that are safe to run concurrently.
 
         Lazily fetches the tool list from the primary MCP client on first call

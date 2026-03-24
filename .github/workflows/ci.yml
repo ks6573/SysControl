@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  lint-and-type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv sync --extra dev
+
+      - name: Ruff lint
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run ruff check .
+
+      - name: Mypy type check
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run mypy agent/ mcp/
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv sync --extra dev
+
+      - name: Run tests
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run pytest --tb=short -q
+
+  swift-build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Swift app
+        run: cd swift && swift build

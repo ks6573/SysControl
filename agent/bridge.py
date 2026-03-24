@@ -24,21 +24,24 @@ Protocol (bridge → stdout):
 from __future__ import annotations
 
 import json
+import os
+import select
 import sys
 import threading
 from typing import IO
 
+from openai import OpenAI
+
 from agent.core import (
+    RESPONSE_STYLE_GUIDANCE,
     MCPClient,
     MCPClientPool,
-    RESPONSE_STYLE_GUIDANCE,
     TurnCallbacks,
     load_memory,
     load_system_prompt,
     mcp_to_openai_tools,
     run_streaming_turn,
 )
-from openai import OpenAI
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -52,8 +55,42 @@ def _emit(event: dict) -> None:
         sys.stdout.flush()
 
 
+_PARENT_PID = os.getppid()  # captured once at startup as baseline for orphan detection
+_STDIN_TIMEOUT = 30.0       # seconds between orphan checks when stdin is idle
+
+
+def _parent_alive() -> bool:
+    """Check if the original parent process is still alive.
+
+    Compares the current parent PID against the one captured at startup.
+    When the parent dies, the OS re-parents this process to ``launchd``
+    (PID 1 on macOS) or ``init``, causing ``getppid()`` to change.  This
+    is more reliable than ``os.kill(pid, 0)`` which can false-positive on
+    PID reuse after long uptimes.
+
+    Returns:
+        ``True`` if our parent PID has not changed since startup.
+    """
+    return os.getppid() == _PARENT_PID
+
+
 def _read_command() -> dict | None:
-    """Read one JSON command from stdin.  Returns None on EOF."""
+    """Read one JSON command from stdin, with orphan detection.
+
+    Returns:
+        Parsed command dict on success, empty ``{}`` on idle timeout with a
+        live parent (signals the event loop to continue without dispatching),
+        or ``None`` on EOF / orphan detection (signals clean shutdown).
+    """
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], _STDIN_TIMEOUT)
+    except (ValueError, OSError):
+        return None
+    if not ready:
+        # Timed out — check if parent is still alive.
+        if not _parent_alive():
+            return None  # orphaned — trigger clean shutdown
+        return {}  # no command yet; keep looping (intentional no-op in _event_loop)
     line = sys.stdin.readline()
     if not line:
         return None
@@ -216,8 +253,6 @@ def main() -> None:
     Starts the MCP client pool, emits a ``ready`` event, then delegates
     to :func:`_event_loop` for command processing.
     """
-    import os
-
     log = sys.stderr
 
     try:
