@@ -66,6 +66,16 @@ struct SettingsView: View {
                 }
             }
 
+            Section("About & Updates") {
+                LabeledContent("Version", value: appState.updateService.currentVersion)
+
+                HStack {
+                    updateStatusLabel
+                    Spacer()
+                    updateActionButtons
+                }
+            }
+
             Section {
                 Button("Apply & Reconnect") {
                     apply()
@@ -74,11 +84,90 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 360)
+        .frame(width: 500, height: 480)
         .navigationTitle("Settings")
         .onAppear {
             loadCurrentConfiguration()
             Task { await refreshLocalModels() }
+        }
+    }
+
+    @ViewBuilder
+    private var updateStatusLabel: some View {
+        switch appState.updateService.status {
+        case .idle:
+            Text("Not checked yet")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView()
+                    .scaleEffect(0.5)
+                    .frame(width: 10, height: 10)
+                Text("Checking...")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .upToDate:
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.caption)
+                Text("Up to date")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .available(let version, _):
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .foregroundStyle(.blue)
+                    .font(.caption)
+                Text("v\(version) available")
+                    .font(.caption)
+                    .foregroundStyle(.blue)
+            }
+        case .updating:
+            HStack(spacing: 6) {
+                ProgressView()
+                    .scaleEffect(0.5)
+                    .frame(width: 10, height: 10)
+                Text("Updating...")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .failed(let message):
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var updateActionButtons: some View {
+        let status = appState.updateService.status
+
+        switch status {
+        case .checking, .updating:
+            EmptyView()
+        case .available:
+            HStack(spacing: 8) {
+                Button(appState.updateService.isSourceInstall ? "Update Now" : "Download") {
+                    appState.updateService.performUpdate()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        default:
+            Button("Check Now") {
+                Task { await appState.updateService.checkForUpdates(force: true) }
+            }
+            .controlSize(.small)
         }
     }
 

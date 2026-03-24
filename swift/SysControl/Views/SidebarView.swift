@@ -15,6 +15,7 @@ struct SidebarView: View {
             header
             Divider()
             connectionStatus
+            updateBanner
             Divider()
             sidebarList
         }
@@ -93,6 +94,32 @@ struct SidebarView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 6)
+        }
+    }
+
+    @ViewBuilder
+    private var updateBanner: some View {
+        if case .available(let version, _) = appState.updateService.status {
+            Button {
+                appState.updateService.performUpdate()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(.blue)
+                        .font(.system(size: 12))
+                    Text("v\(version) available")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                    Spacer()
+                    Text(appState.updateService.isSourceInstall ? "Update" : "Download")
+                        .font(.caption)
+                        .foregroundStyle(.blue.opacity(0.8))
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
     }
 

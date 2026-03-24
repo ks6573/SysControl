@@ -13,6 +13,13 @@ struct SysControlApp: App {
         .windowStyle(.titleBar)
         .defaultSize(width: 1100, height: 750)
         .commands {
+            CommandGroup(after: .appInfo) {
+                let updateService = appState.updateService
+                Button("Check for Updates...") {
+                    Task { await updateService.checkForUpdates(force: true) }
+                }
+                .keyboardShortcut("u", modifiers: [.command, .shift])
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Chat") {
                     appState.createNewSession()

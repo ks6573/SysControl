@@ -18,6 +18,7 @@ let package = Package(
                 "Models/ProviderConfiguration.swift",
                 "Models/SavedChat.swift",
                 "Services/BackendService.swift",
+                "Services/UpdateService.swift",
                 "Storage/ChatHistoryManager.swift",
                 "Storage/PersistenceManager.swift",
                 "Storage/ProviderConfigStore.swift",

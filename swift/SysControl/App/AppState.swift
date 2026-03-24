@@ -19,6 +19,8 @@ final class AppState {
 
     var providerConfiguration: ProviderConfiguration
 
+    let updateService = UpdateService()
+
     private(set) var backend: BackendService?
     private let persistence = PersistenceManager()
     private let history = ChatHistoryManager()
@@ -171,6 +173,14 @@ final class AppState {
                 self?.modelName = model
                 self?.connectionError = nil
                 self?.reconnectAttempt = 0
+
+                // Auto-check for updates after backend is ready
+                if let updateService = self?.updateService {
+                    Task {
+                        try? await Task.sleep(for: .seconds(3))
+                        await updateService.checkForUpdates()
+                    }
+                }
             }
         }
         service.onConfigured = { [weak self] model in
