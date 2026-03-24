@@ -77,7 +77,7 @@ def _render(size: int) -> Image.Image:
             try:
                 font = ImageFont.truetype(path, font_size)
                 break
-            except (OSError, IOError):
+            except OSError:
                 continue
         if font is None:
             font = ImageFont.load_default(size=font_size)

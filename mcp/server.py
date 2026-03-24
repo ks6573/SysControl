@@ -6,6 +6,7 @@ Exposes tools for querying CPU, RAM, GPU, disk, network, and process info.
 
 import ast
 import base64
+import contextlib
 import datetime
 import heapq
 import io
@@ -22,7 +23,6 @@ import platform
 import plistlib
 import re
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -897,10 +898,8 @@ def get_network_connections() -> dict:
     # a new psutil.Process object for every connection (O(n) not O(n·k)).
     pid_to_name: dict[int, str] = {}
     for p in psutil.process_iter(["pid", "name"]):
-        try:
+        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
             pid_to_name[p.info["pid"]] = p.info["name"] or ""
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
 
     connections = [
         {
@@ -1243,8 +1242,10 @@ def _parse_reminder_time(s: str) -> datetime.datetime | None:
     if m:
         hour, minute = int(m.group(1)), int(m.group(2) or 0)
         period = m.group(3)
-        if period == "pm" and hour < 12: hour += 12
-        if period == "am" and hour == 12: hour = 0
+        if period == "pm" and hour < 12:
+            hour += 12
+        if period == "am" and hour == 12:
+            hour = 0
         return (now + datetime.timedelta(days=1)).replace(
             hour=hour, minute=minute, second=0, microsecond=0
         )
@@ -1254,8 +1255,10 @@ def _parse_reminder_time(s: str) -> datetime.datetime | None:
     if m:
         hour, minute = int(m.group(1)), int(m.group(2) or 0)
         period = m.group(3)
-        if period == "pm" and hour < 12: hour += 12
-        if period == "am" and hour == 12: hour = 0
+        if period == "pm" and hour < 12:
+            hour += 12
+        if period == "am" and hour == 12:
+            hour = 0
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
             target += datetime.timedelta(days=1)
@@ -1516,7 +1519,7 @@ def get_weather(location: str = "", units: str = "imperial") -> dict:
             },
             "clothing_suggestions": clothing,
         }
-    except (urllib.error.URLError, socket.timeout, OSError) as exc:
+    except (TimeoutError, urllib.error.URLError, OSError) as exc:
         return {"error": f"Network error: {exc}. Check your internet connection."}
     except (KeyError, ValueError, json.JSONDecodeError) as exc:
         return {"error": f"Failed to parse weather data: {exc}"}
@@ -1812,7 +1815,7 @@ def track_package(tracking_number: str) -> dict:
         with urllib.request.urlopen(req, timeout=12) as r:
             resp = json.loads(r.read().decode())
         return _parse_17track_response(resp, tracking_number, carrier)
-    except (urllib.error.URLError, socket.timeout, OSError) as e:
+    except (TimeoutError, urllib.error.URLError, OSError) as e:
         return {"tracking_number": tracking_number, "error": f"Network error: {str(e)}"}
     except (json.JSONDecodeError, KeyError, ValueError) as e:
         return {"tracking_number": tracking_number, "error": f"Failed to parse tracking response: {str(e)}"}
@@ -1953,10 +1956,8 @@ def network_latency_check() -> dict:
         for lbl, h in targets.items()
     ]
     for f in futures:
-        try:
+        with contextlib.suppress(Exception):
             f.result(timeout=20)
-        except Exception:
-            pass
 
     return {"targets": results, "diagnosis": _diagnose_latency(gateway, results)}
 
@@ -2129,10 +2130,8 @@ def get_time_machine_status() -> dict:
         _METRICS_EXECUTOR.submit(_tmutil_dest,   result, lock),
     ]
     for f in futures:
-        try:
+        with contextlib.suppress(Exception):
             f.result(timeout=15)
-        except Exception:
-            pass
 
     return result
 
@@ -2146,7 +2145,7 @@ def _tail_macos_log(lines: int, filter_str: str) -> dict:
         cmd += ["--predicate", f'eventMessage CONTAINS[c] "{safe}"']
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        all_lines = [l for l in proc.stdout.splitlines() if l.strip()]
+        all_lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
         tail = all_lines[-lines:]
         return {
             "platform": "macOS",
@@ -2186,8 +2185,8 @@ def _tail_linux_log(lines: int, filter_str: str) -> dict:
         try:
             all_lines = syslog.read_text(errors="replace").splitlines()
             tail = [
-                l for l in all_lines
-                if not filter_str or filter_str.lower() in l.lower()
+                ln for ln in all_lines
+                if not filter_str or filter_str.lower() in ln.lower()
             ][-lines:]
             return {
                 "platform": "Linux", "source": "/var/log/syslog",
@@ -2351,7 +2350,7 @@ def web_fetch(url: str, max_chars: int = 8000) -> dict:
         }
     except urllib.error.HTTPError as e:
         return {"url": url, "error": f"HTTP {e.code}: {e.reason}"}
-    except (urllib.error.URLError, socket.timeout, OSError) as e:
+    except (TimeoutError, urllib.error.URLError, OSError) as e:
         return {"url": url, "error": f"Network error: {e}"}
 
 
@@ -2773,10 +2772,8 @@ def take_screenshot(path: str = "") -> tuple:
     except Exception as e:
         return {"error": str(e)}, ""
     finally:
-        try:
+        with contextlib.suppress(Exception):
             pathlib.Path(tmp_path).unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
 # ── App control tools ─────────────────────────────────────────────────────────
@@ -3398,7 +3395,7 @@ def toggle_do_not_disturb(enabled: bool) -> dict:
 
     # Fallback: try direct osascript Focus toggle (macOS 12+)
     try:
-        script = f'do shell script "shortcuts run \'Focus\'"'
+        script = 'do shell script "shortcuts run \'Focus\'"'
         proc2 = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True, text=True, timeout=10,
@@ -3480,18 +3477,17 @@ def append_memory_note(note: str) -> dict:
         return {"error": "Note is empty — nothing saved."}
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     entry = f"\n- [{timestamp}] {note.strip()}\n"
-    with _MEMORY_LOCK:
-        with _MEMORY_FILE.open("a", encoding="utf-8") as fh:
+    with _MEMORY_LOCK, _MEMORY_FILE.open("a", encoding="utf-8") as fh:
+        if _HAS_FCNTL:
+            _fcntl.flock(fh, _fcntl.LOCK_EX)
+        try:
+            fh.seek(0, 2)
+            if fh.tell() == 0:
+                fh.write("# SysControl Memory\n\n")
+            fh.write(entry)
+        finally:
             if _HAS_FCNTL:
-                _fcntl.flock(fh, _fcntl.LOCK_EX)
-            try:
-                fh.seek(0, 2)
-                if fh.tell() == 0:
-                    fh.write("# SysControl Memory\n\n")
-                fh.write(entry)
-            finally:
-                if _HAS_FCNTL:
-                    _fcntl.flock(fh, _fcntl.LOCK_UN)
+                _fcntl.flock(fh, _fcntl.LOCK_UN)
     return {"saved": note.strip(), "timestamp": timestamp}
 
 

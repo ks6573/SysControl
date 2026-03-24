@@ -27,12 +27,31 @@ from typing import NamedTuple
 from openai import OpenAI
 
 from agent.core import (
-    BLUE, BOLD, CLOUD_BASE_URL, CLOUD_MODEL, CYAN, DIM, EXIT_PHRASES, GREEN,
-    HAS_FCNTL, LOCAL_API_KEY, LOCAL_BASE_URL, LOCAL_MODEL, MAX_TOKENS,
-    RESET, SERVER_PATH, YELLOW,
-    MCPClient, MCPClientPool, TurnCallbacks,
-    colorize, fcntl_mod, fetch_ollama_models, load_memory, load_system_prompt,
-    mcp_to_openai_tools, prune_history, run_streaming_turn,
+    BLUE,
+    BOLD,
+    CLOUD_BASE_URL,
+    CLOUD_MODEL,
+    CYAN,
+    DIM,
+    EXIT_PHRASES,
+    GREEN,
+    HAS_FCNTL,
+    LOCAL_API_KEY,
+    LOCAL_BASE_URL,
+    LOCAL_MODEL,
+    RESET,
+    SERVER_PATH,
+    YELLOW,
+    MCPClient,
+    MCPClientPool,
+    TurnCallbacks,
+    colorize,
+    fcntl_mod,
+    fetch_ollama_models,
+    load_memory,
+    load_system_prompt,
+    mcp_to_openai_tools,
+    run_streaming_turn,
 )
 from agent.paths import MEMORY_FILE
 
@@ -104,8 +123,8 @@ def _append_memory_note(note: str) -> None:
 def print_banner() -> None:
     """Print the startup banner and memory-file status to stdout."""
     print(f"\n{BOLD}{CYAN}┌─────────────────────────────────────────────────────┐")
-    print(f"│               SysControl Agent                      │")
-    print(f"│     Your AI system monitoring assistant             │")
+    print("│               SysControl Agent                      │")
+    print("│     Your AI system monitoring assistant             │")
     print(f"└─────────────────────────────────────────────────────┘{RESET}")
     if load_memory() is not None:
         print(f"{DIM}  Memory file found — agent can recall past sessions via read_memory.{RESET}")
