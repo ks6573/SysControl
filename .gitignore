@@ -71,6 +71,7 @@ agent/REMOTE_SETUP.md
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
 .claude/
+CLAUDE.md
 
 # ── PyInstaller build resources (generated) ──────────────────────────────────
 build_resources/SysControl.icns
