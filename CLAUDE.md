@@ -36,10 +36,26 @@ VERSION                ← Single source of truth for app version
 - **Swift app → Python:** `BackendService` spawns `agent/bridge.py` via `Process()`, JSON-over-stdio IPC
 - **Bridge → MCP:** `agent/core.py` MCPClient connects to `mcp/server.py` via JSON-RPC over stdio
 - **Streaming loop:** `run_streaming_turn()` in `core.py` handles the LLM ↔ tool-call loop with `TurnCallbacks` for UI events
+- **Chart images:** MCP tools return `(data, base64_png)` tuples → `call_tool()` saves PNG to temp file → bridge emits `chart_image` event → Swift renders inline via `ChartImageView`
+
+### Bridge protocol events (bridge → Swift)
+
+| Event | Fields | Purpose |
+|---|---|---|
+| `ready` | `tool_count`, `model` | Backend initialized |
+| `configured` | `model` | Provider reconfigured |
+| `token` | `text` | Streaming LLM token |
+| `tool_started` | `names` | Tool execution began |
+| `tool_finished` | `name` | Tool execution done |
+| `chart_image` | `path` | Chart PNG saved to temp file |
+| `turn_done` | `finish_reason`, `elapsed` | LLM turn complete |
+| `error` | `category`, `message` | Categorized error |
 
 ### MCP protocol
 
 JSON-RPC 2.0 over stdio. Supported methods: `initialize`, `tools/list`, `tools/call`, `ping`. Notifications (no `id`) are acknowledged silently. Error codes: `-32700` (parse), `-32601` (method not found), `-32603` (internal). Tools are registered in the `TOOLS` dict at line ~3677 of `server.py` with keys: `description`, `parallel`, `inputSchema`, `fn`.
+
+When a tool returns a `(data_dict, base64_png)` tuple, the MCP response contains two content items: `{"type": "text", ...}` and `{"type": "image", "data": ..., "mimeType": "image/png"}`. `MCPClient.call_tool()` extracts both, saves images to `/tmp/syscontrol_chart_*.png`, and appends `[chart_image:/path]` markers to the text result.
 
 ---
 
@@ -78,6 +94,8 @@ Established through 5 rounds of NASA-style code reviews:
 - macOS 14+ minimum (`.macOS(.v14)`)
 - `@Observable` pattern (not `ObservableObject`/`@Published`)
 - `AppState` is central state, passed via `.environment(appState)`
+- Tables use SwiftUI `Grid` (not `HStack`) for proper column alignment — see `MarkdownTableView` in `LazyMarkdownText.swift`
+- Chart images rendered via `ChartImageView` in `MessageBubble.swift` using `NSImage(contentsOfFile:)`
 
 ---
 
@@ -87,6 +105,16 @@ Established through 5 rounds of NASA-style code reviews:
 - **Source-installed:** Cloned to `~/.syscontrol/build/`, has `.git`. Updates = `syscontrol-update` or in-app auto-update.
 
 Detection: `~/.syscontrol/build/.git` exists → source install.
+
+### DMG build: relocatable venv
+
+`build.sh` copies `.venv` into the `.app` bundle and makes it relocatable:
+1. Replaces symlinked `python3` with the real binary (copied from the build machine)
+2. Copies Python stdlib into the venv (uv keeps it external)
+3. Patches `pyvenv.cfg` to point at the bundled `bin/`
+4. Validates imports (`psutil`, `openai`) at build time
+
+`BackendService.swift` uses `isExecutableFile(atPath:)` to detect broken venvs and falls back to `/usr/bin/python3`. It also captures stderr to surface `ImportError`/`ModuleNotFoundError` to the UI.
 
 ---
 
@@ -105,6 +133,7 @@ Detection: `~/.syscontrol/build/.git` exists → source install.
 1. Add the tool function to `mcp/server.py`
 2. Register in the `TOOLS` dict (same file) with `description`, `parallel`, `inputSchema`, `fn`
 3. Update tool count in `README.md` if changed
+4. For chart tools: return `(data_dict, base64_png)` tuple, use `_style_chart_dark()` + `_fig_to_b64()` helpers
 
 ### Adding a new Swift file
 1. Create file under `swift/SysControl/`
@@ -120,8 +149,11 @@ uv run agent.py                      # CLI
 
 ### Releasing
 1. Update `VERSION` file
-2. Push a `v*` tag (e.g., `git tag v1.1.0 && git push origin v1.1.0`)
-3. GitHub Actions builds DMG and creates release automatically
+2. Commit and push to master
+3. Push a `v*` tag (e.g., `git tag v1.1.0 && git push origin v1.1.0`)
+4. GitHub Actions builds DMG and creates release automatically
+
+**Note:** `softprops/action-gh-release` has no v3 — use `@v2`. `actions/checkout@v5` is current.
 
 ### Code quality
 ```bash
