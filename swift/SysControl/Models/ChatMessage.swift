@@ -8,6 +8,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     let timestamp: Date
     var toolNames: [String]?
     var isError: Bool
+    var chartImagePaths: [String]?
 
     enum Role: String, Codable {
         case user

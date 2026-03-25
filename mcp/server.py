@@ -381,11 +381,28 @@ def _use_case_analysis(use_case: str, cpu_pct: float, ram_pct: float) -> dict:
     }
 
 
+_CHART_TEXT_COLOR = "#cccccc"
+_CHART_SPINE_COLOR = "#555555"
+
+
+def _style_chart_dark(fig: plt.Figure, ax: plt.Axes) -> None:
+    """Apply dark-mode styling: transparent background, light text."""
+    fig.patch.set_alpha(0)
+    ax.set_facecolor("none")
+    ax.tick_params(colors=_CHART_TEXT_COLOR)
+    ax.xaxis.label.set_color(_CHART_TEXT_COLOR)
+    ax.yaxis.label.set_color(_CHART_TEXT_COLOR)
+    ax.title.set_color("#ffffff")
+    for spine in ax.spines.values():
+        spine.set_color(_CHART_SPINE_COLOR)
+
+
 def _fig_to_b64(fig: plt.Figure) -> str:
     """Serialize a matplotlib figure to a base64 PNG string and close it."""
     try:
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", dpi=110)
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=144,
+                    transparent=True)
         buf.seek(0)
         return base64.b64encode(buf.read()).decode()
     finally:
@@ -611,14 +628,18 @@ def _cpu_with_chart() -> tuple[dict, str]:
 
     fig, ax = plt.subplots(figsize=(7, max(3, n * 0.4)))
     colors = ["#e74c3c" if v >= 80 else "#e67e22" if v >= 60 else "#2ecc71" for v in cores]
-    ax.barh([f"Core {i}" for i in range(n)], cores, color=colors, height=0.6)
+    labels = [f"Core {i}" for i in range(n)]
+    ax.barh(labels, cores, color=colors, height=0.6)
     ax.axvline(data["total_percent"], color="#3498db", linestyle="--", linewidth=1.5,
                label=f'Total: {data["total_percent"]}%')
     ax.set_xlim(0, 100)
     ax.set_xlabel("Usage %")
     ax.set_title("CPU Usage per Core")
-    ax.legend(loc="lower right", fontsize=8)
+    ax.legend(loc="lower right", fontsize=8, facecolor="#2a2a2a", edgecolor="#555",
+              labelcolor=_CHART_TEXT_COLOR)
     ax.xaxis.set_major_formatter(mticker.PercentFormatter())
+    ax.set_yticklabels(labels, color=_CHART_TEXT_COLOR)
+    _style_chart_dark(fig, ax)
     fig.tight_layout()
     return data, _fig_to_b64(fig)
 
@@ -629,18 +650,22 @@ def _ram_with_chart() -> tuple[dict, str]:
     swap = data["swap"]
 
     fig, ax = plt.subplots(figsize=(7, 2.5))
+    labels = ["RAM", "Swap"]
     ax.barh(["RAM"],  [ram["used_gb"]],                                    color="#e74c3c", label="Used")
     ax.barh(["RAM"],  [ram["available_gb"]], left=[ram["used_gb"]],         color="#2ecc71", label="Available")
     ax.barh(["Swap"], [swap["used_gb"]],                                    color="#e67e22")
     ax.barh(["Swap"], [swap["total_gb"] - swap["used_gb"]], left=[swap["used_gb"]], color="#95a5a6")
     ax.set_xlabel("GB")
     ax.set_title("Memory Usage")
-    ax.legend(loc="lower right", fontsize=8)
+    ax.legend(loc="lower right", fontsize=8, facecolor="#2a2a2a", edgecolor="#555",
+              labelcolor=_CHART_TEXT_COLOR)
+    ax.set_yticklabels(labels, color=_CHART_TEXT_COLOR)
     for bar in ax.patches:
         w = bar.get_width()
         if w > 0.3:
             ax.text(bar.get_x() + w / 2, bar.get_y() + bar.get_height() / 2,
                     f"{w:.1f} GB", ha="center", va="center", fontsize=7, color="white")
+    _style_chart_dark(fig, ax)
     fig.tight_layout()
     return data, _fig_to_b64(fig)
 
@@ -660,11 +685,13 @@ def _gpu_with_chart() -> dict | tuple[dict, str]:
         ax.bar([i      for i in x], [g.get("memory_percent") or 0 for g in gpus], width=w, label="VRAM %",  color="#9b59b6")
         ax.bar([i + w  for i in x], [g.get("temperature_c") or 0  for g in gpus], width=w, label="Temp °C", color="#e74c3c")
         ax.set_xticks(x)
-        ax.set_xticklabels([g["name"] for g in gpus], fontsize=8)
+        ax.set_xticklabels([g["name"] for g in gpus], fontsize=8, color=_CHART_TEXT_COLOR)
         ax.set_ylim(0, 110)
         ax.set_ylabel("% / °C")
         ax.set_title("GPU Metrics")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=8, facecolor="#2a2a2a", edgecolor="#555",
+                  labelcolor=_CHART_TEXT_COLOR)
+        _style_chart_dark(fig, ax)
         fig.tight_layout()
         return data, _fig_to_b64(fig)
     except Exception as exc:

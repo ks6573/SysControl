@@ -582,14 +582,30 @@ private struct MarkdownTableView: View {
 
     private let headerBackground = Color.primary.opacity(0.08)
     private let rowBackground = Color.primary.opacity(0.03)
+    private let altRowBackground = Color.primary.opacity(0.05)
     private let borderColor = Color.primary.opacity(0.12)
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: true) {
-            VStack(spacing: 0) {
-                rowView(cells: table.headers, isHeader: true)
-                ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
-                    rowView(cells: row, isHeader: false)
+            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                // Header row
+                GridRow {
+                    ForEach(Array(table.headers.enumerated()), id: \.offset) { _, header in
+                        cellView(text: header, isHeader: true)
+                    }
+                }
+                .background(headerBackground)
+
+                Divider().gridCellUnsizedAxes(.horizontal)
+
+                // Data rows
+                ForEach(Array(table.rows.enumerated()), id: \.offset) { rowIdx, row in
+                    GridRow {
+                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                            cellView(text: cell, isHeader: false)
+                        }
+                    }
+                    .background(rowIdx.isMultiple(of: 2) ? rowBackground : altRowBackground)
                 }
             }
             .overlay(
@@ -597,21 +613,6 @@ private struct MarkdownTableView: View {
                     .stroke(borderColor, lineWidth: 1)
             )
             .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-    }
-
-    @ViewBuilder
-    private func rowView(cells: [String], isHeader: Bool) -> some View {
-        HStack(spacing: 0) {
-            ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
-                cellView(text: cell, isHeader: isHeader)
-            }
-        }
-        .background(isHeader ? headerBackground : rowBackground)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(borderColor)
-                .frame(height: 1)
         }
     }
 
@@ -625,13 +626,18 @@ private struct MarkdownTableView: View {
         Text(parsed)
             .font(.system(size: 13, weight: isHeader ? .semibold : .regular))
             .foregroundStyle(.primary.opacity(isHeader ? 0.98 : 0.92))
-            .frame(minWidth: 180, alignment: .leading)
-            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .overlay(alignment: .trailing) {
                 Rectangle()
                     .fill(borderColor)
                     .frame(width: 1)
+            }
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(borderColor)
+                    .frame(height: 1)
             }
     }
 }

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import sys
 import threading
@@ -104,6 +105,16 @@ def _read_command() -> dict | None:
         return {}
 
 
+_CHART_IMAGE_RE = re.compile(r"\[chart_image:(.+?)\]")
+
+
+def _emit_tool_finished(name: str, result: str) -> None:
+    """Emit tool_finished event and any chart_image events found in the result."""
+    _emit({"type": "tool_finished", "name": name})
+    for match in _CHART_IMAGE_RE.finditer(result):
+        _emit({"type": "chart_image", "path": match.group(1)})
+
+
 # ── Bridge helpers ────────────────────────────────────────────────────────────
 
 def _initialise_agent() -> tuple[MCPClientPool, list[dict], dict]:
@@ -175,11 +186,7 @@ def _handle_user_message(
         on_tool_started=lambda names: _emit(
             {"type": "tool_started", "names": names}
         ),
-        # UI only needs completion signal; omit bulky tool output payload.
-        on_tool_finished=lambda name, _result: _emit({
-            "type": "tool_finished",
-            "name": name,
-        }),
+        on_tool_finished=lambda name, result: _emit_tool_finished(name, result),
         on_error=lambda cat, msg: _emit(
             {"type": "error", "category": cat, "message": msg}
         ),

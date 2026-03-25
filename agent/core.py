@@ -6,12 +6,15 @@ Provides the MCP client, client pool, and shared helpers used by both the
 CLI (agent/cli.py) and the remote bridge (agent/remote.py).
 """
 
+import base64
+import hashlib
 import json
 import os
 import re
 import select
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -276,10 +279,30 @@ class MCPClient:
         return resp.get("result", {}).get("tools", [])
 
     def call_tool(self, name: str, arguments: dict | None = None) -> str:
-        """Execute a tool by name and return the text result."""
-        resp    = self._send("tools/call", {"name": name, "arguments": arguments or {}})
+        """Execute a tool by name and return the text result.
+
+        When the tool produces an image (e.g. chart), the image is saved to
+        a temp file and a markdown reference is appended to the text result.
+        """
+        resp = self._send("tools/call", {"name": name, "arguments": arguments or {}})
         content = resp.get("result", {}).get("content", [])
-        return content[0].get("text", "") if content else "[no content returned]"
+        if not content:
+            return "[no content returned]"
+
+        text_parts: list[str] = []
+        for item in content:
+            if item.get("type") == "text":
+                text_parts.append(item.get("text", ""))
+            elif item.get("type") == "image":
+                img_data = item.get("data", "")
+                if img_data:
+                    digest = hashlib.md5(img_data[:64].encode()).hexdigest()[:10]  # noqa: S324
+                    path = os.path.join(tempfile.gettempdir(), f"syscontrol_chart_{digest}.png")
+                    with open(path, "wb") as f:
+                        f.write(base64.b64decode(img_data))
+                    text_parts.append(f"\n[chart_image:{path}]")
+
+        return "\n".join(text_parts) if text_parts else "[no content returned]"
 
     def close(self) -> None:
         """Gracefully shut down the subprocess: close stdin → terminate → kill.

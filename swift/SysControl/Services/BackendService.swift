@@ -9,6 +9,7 @@ final class BackendService: @unchecked Sendable {
     var onToken: ((String) -> Void)?
     var onToolStarted: (([String]) -> Void)?
     var onToolFinished: ((String, String) -> Void)  // (name, result)
+    var onChartImage: ((String) -> Void)?           // (filePath)
     var onTurnDone: ((String, Double) -> Void)?     // (finishReason, elapsed)
     var onError: ((String, String) -> Void)?         // (category, message)
     var onDisconnected: (() -> Void)?
@@ -200,6 +201,11 @@ final class BackendService: @unchecked Sendable {
             let name = json["name"] as? String ?? ""
             let result = json["result"] as? String ?? ""
             onToolFinished(name, result)
+
+        case "chart_image":
+            if let path = json["path"] as? String {
+                onChartImage?(path)
+            }
 
         case "turn_done":
             let reason = json["finish_reason"] as? String ?? "stop"

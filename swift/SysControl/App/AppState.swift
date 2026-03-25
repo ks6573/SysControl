@@ -204,6 +204,11 @@ final class AppState {
                 self?.activeSession?.toolFinished(name, result: result)
             }
         }
+        service.onChartImage = { [weak self] path in
+            Task { @MainActor in
+                self?.activeSession?.appendChartImage(path)
+            }
+        }
         service.onTurnDone = { [weak self] _, elapsed in
             Task { @MainActor in
                 self?.activeSession?.finishStreaming(elapsed: elapsed)

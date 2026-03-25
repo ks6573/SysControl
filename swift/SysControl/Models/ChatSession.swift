@@ -78,6 +78,22 @@ final class ChatSession: Identifiable, Codable {
         activeToolNames = []
     }
 
+    func appendChartImage(_ path: String) {
+        // Attach chart to the current streaming message, or create a new one
+        if let sid = _streamingMessageID,
+           let idx = messages.lastIndex(where: { $0.id == sid }) {
+            if messages[idx].chartImagePaths == nil {
+                messages[idx].chartImagePaths = [path]
+            } else {
+                messages[idx].chartImagePaths?.append(path)
+            }
+        } else {
+            var msg = ChatMessage(role: .assistant, content: "")
+            msg.chartImagePaths = [path]
+            messages.append(msg)
+        }
+    }
+
     func appendError(_ message: String) {
         messages.append(ChatMessage(role: .assistant, content: message, isError: true))
     }

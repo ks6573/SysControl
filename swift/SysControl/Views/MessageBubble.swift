@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// A single message bubble — styled by role (user, assistant, tool).
@@ -88,6 +89,13 @@ struct MessageBubble: View {
                     }
                 }
 
+                // Chart images
+                if let paths = message.chartImagePaths {
+                    ForEach(paths, id: \.self) { path in
+                        ChartImageView(path: path)
+                    }
+                }
+
                 // Copy button (visible on hover via overlay)
                 if !isStreaming && !message.content.isEmpty && !message.isError {
                     Button {
@@ -134,5 +142,21 @@ struct MessageBubble: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 1)
+    }
+}
+
+/// Displays a chart image from a file path.
+private struct ChartImageView: View {
+    let path: String
+
+    var body: some View {
+        if let nsImage = NSImage(contentsOfFile: path) {
+            Image(nsImage: nsImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: 500)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.vertical, 4)
+        }
     }
 }
