@@ -55,18 +55,42 @@ final class BackendService: @unchecked Sendable {
             return
         }
 
-        // Fallback: try system python if venv doesn't exist
-        let actualPython = FileManager.default.fileExists(atPath: pythonPath) ? pythonPath : "/usr/bin/python3"
+        // Prefer bundled venv python; fall back to system python
+        let actualPython: String
+        if FileManager.default.isExecutableFile(atPath: pythonPath) {
+            actualPython = pythonPath
+        } else {
+            actualPython = "/usr/bin/python3"
+        }
 
         proc.executableURL = URL(fileURLWithPath: actualPython)
         proc.arguments = ["-u", bridgePath]  // -u = unbuffered stdout
         proc.currentDirectoryURL = URL(fileURLWithPath: projectRoot)
-        proc.environment = ProcessInfo.processInfo.environment
+
+        // Ensure bundled packages are importable even with fallback python
+        var env = ProcessInfo.processInfo.environment
+        let extraPaths = [projectRoot]
+        if let existing = env["PYTHONPATH"] {
+            env["PYTHONPATH"] = extraPaths.joined(separator: ":") + ":" + existing
+        } else {
+            env["PYTHONPATH"] = extraPaths.joined(separator: ":")
+        }
+        proc.environment = env
         proc.standardInput = stdin
         proc.standardOutput = stdout
         proc.standardError = stderr
 
-        proc.terminationHandler = { [weak self] _ in
+        proc.terminationHandler = { [weak self] proc in
+            // Surface actionable errors from stderr when the bridge crashes
+            let stderrData = stderr.fileHandleForReading.availableData
+            if let stderrText = String(data: stderrData, encoding: .utf8),
+               !stderrText.isEmpty {
+                if stderrText.contains("ModuleNotFoundError") || stderrText.contains("ImportError") {
+                    self?.onError?("Startup",
+                        "Missing Python dependency. Please reinstall from the latest DMG or use the source installer: "
+                        + String(stderrText.prefix(300)))
+                }
+            }
             self?.onDisconnected?()
         }
 

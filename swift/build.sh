@@ -119,6 +119,52 @@ if [ -d "$PROJECT_ROOT/.venv" ]; then
     else
         cp -R "$PROJECT_ROOT/.venv" "$RESOURCES/.venv"
     fi
+
+    # ── Make venv relocatable ──────────────────────────────────────────
+    echo "  Making venv relocatable..."
+    VENV_DIR="$RESOURCES/.venv"
+
+    # 1. Resolve the real Python binary (follow all symlinks)
+    REAL_PYTHON="$(python3 -c "import os; print(os.path.realpath('$VENV_DIR/bin/python3'))")"
+
+    if [ -f "$REAL_PYTHON" ]; then
+        # 2. Replace symlinks with the actual binary
+        rm -f "$VENV_DIR/bin/python3" "$VENV_DIR/bin/python"
+        cp "$REAL_PYTHON" "$VENV_DIR/bin/python3"
+        ln -s python3 "$VENV_DIR/bin/python"
+
+        # 3. Copy Python stdlib — uv keeps it outside the venv
+        PYTHON_HOME="$(dirname "$REAL_PYTHON")/.."
+        PYTHON_LIB="$(find "$PYTHON_HOME/lib" -maxdepth 1 -name 'python3.*' -type d 2>/dev/null | head -1)"
+        VENV_LIB="$(find "$VENV_DIR/lib" -maxdepth 1 -name 'python3.*' -type d 2>/dev/null | head -1)"
+
+        if [ -n "$PYTHON_LIB" ] && [ -n "$VENV_LIB" ]; then
+            echo "  Copying Python stdlib from $PYTHON_LIB..."
+            rsync -a --copy-links \
+                --exclude 'site-packages/' \
+                --exclude '__pycache__/' \
+                --exclude '*.pyc' \
+                "$PYTHON_LIB/" "$VENV_LIB/"
+        fi
+
+        # 4. Patch pyvenv.cfg to point at the bundled bin/
+        if [ -f "$VENV_DIR/pyvenv.cfg" ]; then
+            sed -i '' "s|^home = .*|home = $VENV_DIR/bin|" "$VENV_DIR/pyvenv.cfg"
+        fi
+
+        echo "  ✓ Venv made relocatable"
+    else
+        echo "  ⚠ Warning: could not resolve real Python binary at $REAL_PYTHON"
+    fi
+
+    # 5. Validate the bundled venv
+    echo "  Validating bundled Python..."
+    if "$VENV_DIR/bin/python3" -c "import psutil, openai; print('  ✓ Bundled Python validated (psutil, openai importable)')" 2>/dev/null; then
+        :
+    else
+        echo "  ⚠ Warning: Bundled Python cannot import required modules"
+        echo "    DMG users may experience 'Could not connect to backend' errors"
+    fi
 fi
 
 # Ad-hoc code sign

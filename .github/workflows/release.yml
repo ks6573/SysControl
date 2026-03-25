@@ -25,6 +25,14 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           uv sync
 
+      - name: Verify venv Python
+        run: |
+          echo "Venv python3 symlink target:"
+          python3 -c "import os; print(os.path.realpath('.venv/bin/python3'))"
+          echo "File type:"
+          file "$(python3 -c "import os; print(os.path.realpath('.venv/bin/python3'))")"
+          .venv/bin/python3 -c "import psutil, openai; print('Venv deps OK')"
+
       - name: Build DMG
         run: |
           export PATH="$HOME/.local/bin:$PATH"
