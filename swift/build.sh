@@ -157,7 +157,16 @@ if [ -d "$PROJECT_ROOT/.venv" ]; then
         echo "  ⚠ Warning: could not resolve real Python binary at $REAL_PYTHON"
     fi
 
-    # 5. Validate the bundled venv
+    # 5. Ad-hoc sign all shared libraries in the venv so macOS
+    #    does not block them with "library load disallowed by system policy"
+    echo "  Signing bundled shared libraries..."
+    SIGN_COUNT=0
+    while IFS= read -r -d '' lib; do
+        codesign --force --sign - "$lib" 2>/dev/null && SIGN_COUNT=$((SIGN_COUNT + 1))
+    done < <(find "$VENV_DIR" \( -name '*.so' -o -name '*.dylib' \) -print0)
+    echo "  ✓ Signed $SIGN_COUNT shared libraries"
+
+    # 6. Validate the bundled venv
     echo "  Validating bundled Python..."
     if "$VENV_DIR/bin/python3" -c "import psutil, openai; print('  ✓ Bundled Python validated (psutil, openai importable)')" 2>/dev/null; then
         :
@@ -167,8 +176,8 @@ if [ -d "$PROJECT_ROOT/.venv" ]; then
     fi
 fi
 
-# Ad-hoc code sign
-echo "  Code signing..."
+# Ad-hoc code sign the entire app bundle
+echo "  Code signing app bundle..."
 codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || true
 
 echo "✓ App bundle: $APP_DIR"
