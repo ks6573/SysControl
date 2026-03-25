@@ -24,7 +24,7 @@ A native SwiftUI app with streaming chat, Markdown rendering, chat history sideb
 
 **Option A — Pre-built DMG** (no Xcode required):
 
-Download the latest `SysControl.dmg` from [GitHub Releases](https://github.com/ks6573/SyscontrolMCP/releases), drag to Applications, then bypass Gatekeeper on first launch (the app is ad-hoc signed, not notarized):
+Download the latest `SysControl.dmg` from [GitHub Releases](https://github.com/ks6573/Syscontrol/releases), drag to Applications, then bypass Gatekeeper on first launch (the app is ad-hoc signed, not notarized):
 
 ```bash
 xattr -r -d com.apple.quarantine /Applications/SysControl.app
@@ -35,7 +35,7 @@ Or right-click the app → **Open** → **Open** the first time.
 **Option B — Install from source** (compiles locally, bypasses Gatekeeper automatically):
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/Syscontrol/master/swift/install.sh)"
 ```
 
 To update later: use **Check for Updates** in the app (⇧⌘U), or run `syscontrol-update` from Terminal.
@@ -87,8 +87,8 @@ To change providers later, open **Settings** (⌘,).
 ## Installation (CLI only)
 
 ```bash
-git clone https://github.com/ks6573/SyscontrolMCP.git
-cd SyscontrolMCP
+git clone https://github.com/ks6573/Syscontrol.git
+cd Syscontrol
 
 # Install uv if needed
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -191,7 +191,7 @@ Each disabled tool returns an error with the exact flag needed to enable it.
   "mcpServers": {
     "system-monitor": {
       "command": "/path/to/uv",
-      "args": ["run", "/absolute/path/to/SyscontrolMCP/mcp/server.py"],
+      "args": ["run", "/absolute/path/to/Syscontrol/mcp/server.py"],
       "env": {}
     }
   }
