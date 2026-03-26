@@ -7,6 +7,8 @@ CLI (agent/cli.py) and the remote bridge (agent/remote.py).
 """
 
 import base64
+import binascii
+import contextlib
 import hashlib
 import json
 import os
@@ -53,6 +55,8 @@ MAX_TOKENS         = 16384
 POOL_SIZE          = 4          # max parallel MCP worker processes
 MAX_PARALLEL_TOOLS = POOL_SIZE  # batch size capped to pool capacity
 MAX_TOOL_ROUNDS    = 15         # circuit-breaker for runaway tool-call loops
+_MAX_CHART_BYTES   = 10 * 1024 * 1024  # 10 MB cap on decoded chart images
+_CHART_FILE_PREFIX = "syscontrol_chart_"
 
 RESPONSE_STYLE_GUIDANCE: str = (
     "\n\n---\n\n# Response Style\n\n"
@@ -166,6 +170,7 @@ class MCPClient:
         assert self.proc.stdout is not None, "Popen stdout must be a pipe"
         self._id   = 0
         self._lock = threading.Lock()   # serialise writes/reads on this pipe
+        self._chart_files: list[str] = []
         self._initialize()
 
     def _next_id(self) -> int:
@@ -282,7 +287,16 @@ class MCPClient:
         """Execute a tool by name and return the text result.
 
         When the tool produces an image (e.g. chart), the image is saved to
-        a temp file and a markdown reference is appended to the text result.
+        a temp file and a ``[chart_image:/path]`` marker is appended.  Temp
+        files are tracked in ``_chart_files`` and cleaned up by ``close()``.
+
+        Args:
+            name: MCP tool name to invoke.
+            arguments: Tool arguments dict, or ``None`` for no arguments.
+
+        Returns:
+            Combined text content from the tool, with ``[chart_image:...]``
+            markers appended for any image content items.
         """
         resp = self._send("tools/call", {"name": name, "arguments": arguments or {}})
         content = resp.get("result", {}).get("content", [])
@@ -295,12 +309,25 @@ class MCPClient:
                 text_parts.append(item.get("text", ""))
             elif item.get("type") == "image":
                 img_data = item.get("data", "")
-                if img_data:
-                    digest = hashlib.md5(img_data[:64].encode()).hexdigest()[:10]  # noqa: S324
-                    path = os.path.join(tempfile.gettempdir(), f"syscontrol_chart_{digest}.png")
-                    with open(path, "wb") as f:
-                        f.write(base64.b64decode(img_data))
-                    text_parts.append(f"\n[chart_image:{path}]")
+                if not img_data:
+                    continue
+                try:
+                    decoded = base64.b64decode(img_data, validate=True)
+                except (binascii.Error, ValueError):
+                    text_parts.append("[chart image: decode error]")
+                    continue
+                if len(decoded) > _MAX_CHART_BYTES:
+                    text_parts.append("[chart image: exceeds size limit]")
+                    continue
+                digest = hashlib.md5(img_data[:64].encode()).hexdigest()[:10]  # noqa: S324
+                path = os.path.join(
+                    tempfile.gettempdir(),
+                    f"{_CHART_FILE_PREFIX}{digest}.png",
+                )
+                with open(path, "wb") as f:
+                    f.write(decoded)
+                self._chart_files.append(path)
+                text_parts.append(f"\n[chart_image:{path}]")
 
         return "\n".join(text_parts) if text_parts else "[no content returned]"
 
@@ -309,7 +336,14 @@ class MCPClient:
 
         Each step is guarded so a failure at any stage does not prevent the
         next attempt.  A final ``wait()`` confirms the process is reaped.
+        Chart temp files created by ``call_tool()`` are cleaned up here.
         """
+        # Clean up chart temp files
+        for path in self._chart_files:
+            with contextlib.suppress(OSError):
+                os.remove(path)
+        self._chart_files.clear()
+
         pid = self.proc.pid
         try:
             self.proc.stdin.close()

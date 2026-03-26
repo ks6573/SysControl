@@ -28,6 +28,7 @@ import os
 import re
 import select
 import sys
+import tempfile
 import threading
 from typing import IO
 
@@ -111,8 +112,14 @@ _CHART_IMAGE_RE = re.compile(r"\[chart_image:(.+?)\]")
 def _emit_tool_finished(name: str, result: str) -> None:
     """Emit tool_finished event and any chart_image events found in the result."""
     _emit({"type": "tool_finished", "name": name})
+    tmp_dir = tempfile.gettempdir()
     for match in _CHART_IMAGE_RE.finditer(result):
-        _emit({"type": "chart_image", "path": match.group(1)})
+        path = match.group(1)
+        # Validate: must be inside the system temp dir with expected prefix
+        resolved = os.path.realpath(path)
+        if not resolved.startswith(tmp_dir + os.sep) or "syscontrol_chart_" not in os.path.basename(resolved):
+            continue
+        _emit({"type": "chart_image", "path": resolved})
 
 
 # ── Bridge helpers ────────────────────────────────────────────────────────────

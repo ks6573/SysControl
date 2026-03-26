@@ -87,12 +87,17 @@ final class BackendService: @unchecked Sendable {
             if let stderrText = String(data: stderrData, encoding: .utf8),
                !stderrText.isEmpty {
                 if stderrText.contains("ModuleNotFoundError") || stderrText.contains("ImportError") {
-                    self?.onError?("Startup",
-                        "Missing Python dependency. Please reinstall from the latest DMG or use the source installer: "
-                        + String(stderrText.prefix(300)))
+                    let snippet = String(stderrText.prefix(300))
+                    DispatchQueue.main.async {
+                        self?.onError?("Startup",
+                            "Missing Python dependency. Please reinstall from the latest DMG or use the source installer: "
+                            + snippet)
+                    }
                 }
             }
-            self?.onDisconnected?()
+            DispatchQueue.main.async {
+                self?.onDisconnected?()
+            }
         }
 
         do {
@@ -145,7 +150,8 @@ final class BackendService: @unchecked Sendable {
               let data = try? JSONSerialization.data(withJSONObject: dict),
               var json = String(data: data, encoding: .utf8) else { return }
         json += "\n"
-        pipe.fileHandleForWriting.write(json.data(using: .utf8)!)
+        guard let payload = json.data(using: .utf8) else { return }
+        pipe.fileHandleForWriting.write(payload)
     }
 
     private func readLoop(_ pipe: Pipe) {
