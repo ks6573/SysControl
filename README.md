@@ -2,7 +2,7 @@
 
 An AI agent for your Mac that answers questions about your system — and can extend itself with new tools on the fly.
 
-59 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, shell, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
+64 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, shell, spreadsheets, Word documents, deep web research, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
 Three ways to run it — pick whichever fits your workflow:
 
@@ -169,7 +169,8 @@ Sensitive tools are **disabled by default**. Enable them in `~/.syscontrol/confi
   "allow_calendar":        true,
   "allow_contacts":        true,
   "allow_accessibility":   true,
-  "allow_tool_creation":   true
+  "allow_tool_creation":   true,
+  "allow_deep_research":   true
 }
 ```
 
@@ -228,7 +229,7 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 
 ---
 
-## Tools (59 total)
+## Tools (64 total)
 
 ### Monitoring
 
@@ -321,6 +322,10 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 |---|---|
 | `read_file` | Read a text file (up to 16,000 chars) |
 | `write_file` | Write text to any path, creating directories as needed |
+| `read_spreadsheet` | Read cells from `.xlsx` or `.csv` — supports sheet selection and cell ranges |
+| `edit_spreadsheet` | Write cells (A1 notation) or append rows to `.xlsx` / `.csv`. Create new files. |
+| `read_document` | Read paragraphs from `.docx`, `.txt`, or `.md` with word count |
+| `edit_document` | Find/replace text, overwrite paragraphs, or append to `.docx` files |
 | `run_shell_command` | Execute a bash command and return stdout/stderr. **Disabled by default.** |
 
 ### Calendar, Contacts & Logs
@@ -351,6 +356,12 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 |---|---|
 | `read_memory` | Read the persistent memory file — facts and notes saved across sessions |
 | `append_memory_note` | Append a concise note to the memory file for future recall |
+
+### Research
+
+| Tool | What it does |
+|---|---|
+| `deep_research` | Multi-step web research agent: plans subquestions, searches multiple sources, extracts and cross-verifies claims, returns a citation-backed answer. Takes 1-3 minutes. |
 
 ### Self-Extension
 
@@ -388,8 +399,9 @@ SysControl/
 │   ├── paths.py             # Frozen-app-aware path resolution
 │   └── remote.py            # Telegram / WhatsApp / Messenger webhook bridge
 ├── mcp/
-│   ├── server.py            # MCP tool server (59 tools + self-extension)
+│   ├── server.py            # MCP tool server (64 tools + self-extension)
 │   └── prompt.json          # System prompt for the agent
+├── deep_research/           # Deep research agent (iterative web research with citation verification)
 ├── swift/
 │   ├── Package.swift         # SwiftPM package definition
 │   ├── build.sh              # Build + bundle script
@@ -417,7 +429,7 @@ SysControl/
 └────────┬─────────────┘
          │  JSON-RPC (stdio)
 ┌────────▼─────────────┐
-│    MCP Server        │   59 tools, self-extension, permission checks
+│    MCP Server        │   64 tools, self-extension, permission checks
 │  (mcp/server.py)     │   Concurrent tool execution via client pool
 └──────────────────────┘
 ```

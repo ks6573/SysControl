@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 import matplotlib
+from openai import OpenAI
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -60,6 +61,20 @@ except Exception as exc:
     GPU_BACKEND = None
 
 GPU_AVAILABLE = GPU_BACKEND is not None
+
+# Optional spreadsheet support via openpyxl.
+try:
+    import openpyxl
+    _HAS_OPENPYXL = True
+except ImportError:
+    _HAS_OPENPYXL = False
+
+# Optional Word document support via python-docx.
+try:
+    from docx import Document as _DocxDocument
+    _HAS_DOCX = True
+except ImportError:
+    _HAS_DOCX = False
 
 # ── Platform constants (computed once at startup) ─────────────────────────────
 _SYSTEM  = platform.system()
@@ -3088,6 +3103,339 @@ def write_file(path: str, content: str, overwrite: bool = True) -> dict:
         return {"error": str(e)}
 
 
+# ── Spreadsheet tools ─────────────────────────────────────────────────────────
+
+_MAX_SPREADSHEET_ROWS = 200
+
+
+def read_spreadsheet(
+    path: str,
+    sheet: str | None = None,
+    cell_range: str | None = None,
+    max_rows: int = 200,
+) -> dict:
+    """Read rows from a spreadsheet file (.xlsx or .csv)."""
+    denied = _permission_check("allow_file_read", "read_spreadsheet")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    max_rows = max(1, min(max_rows, _MAX_SPREADSHEET_ROWS))
+    try:
+        p = pathlib.Path(path).expanduser().resolve()
+        if not p.exists():
+            return {"error": f"File not found: {p}"}
+        if not p.is_file():
+            return {"error": f"Not a file: {p}"}
+
+        suffix = p.suffix.lower()
+        if suffix == ".csv":
+            import csv as _csv
+            with p.open(newline="", encoding="utf-8", errors="replace") as fh:
+                reader = _csv.reader(fh)
+                all_rows = [row for row in reader]
+            rows = all_rows[:max_rows]
+            headers = rows[0] if rows else []
+            return {
+                "path": str(p),
+                "sheet": None,
+                "headers": headers,
+                "rows": rows,
+                "row_count": len(rows),
+                "truncated": len(all_rows) > max_rows,
+            }
+
+        if suffix != ".xlsx":
+            return {"error": f"Unsupported file type '{suffix}'. Supported: .xlsx, .csv"}
+        if not _HAS_OPENPYXL:
+            return {"error": "openpyxl is not installed. Run: uv add openpyxl"}
+
+        wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+        ws = wb[sheet] if sheet else wb.active
+        if ws is None:
+            return {"error": f"Sheet '{sheet}' not found. Available: {wb.sheetnames}"}
+
+        if cell_range:
+            cells = ws[cell_range]
+            # ws[range] returns a tuple of tuples
+            if not isinstance(cells, tuple):
+                cells = ((cells,),)
+            rows = [[c.value for c in row] for row in cells]
+        else:
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                rows.append(list(row))
+                if len(rows) >= max_rows:
+                    break
+
+        wb.close()
+        headers = rows[0] if rows else []
+        return {
+            "path": str(p),
+            "sheet": ws.title,
+            "headers": headers,
+            "rows": rows,
+            "row_count": len(rows),
+        }
+    except KeyError as e:
+        return {"error": f"Sheet not found: {e}"}
+    except PermissionError:
+        return {"error": f"Permission denied: {path}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def edit_spreadsheet(
+    path: str,
+    sheet: str | None = None,
+    updates: list | None = None,
+    append_rows: list | None = None,
+    create_if_missing: bool = False,
+) -> dict:
+    """Write cells or append rows to a spreadsheet (.xlsx or .csv)."""
+    denied = _permission_check("allow_file_write", "edit_spreadsheet")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    if not updates and not append_rows:
+        return {"error": "Provide 'updates' (cell changes) or 'append_rows', or both."}
+
+    try:
+        p = pathlib.Path(path).expanduser().resolve()
+        suffix = p.suffix.lower()
+
+        if suffix == ".csv":
+            import csv as _csv
+            existing: list = []
+            if p.exists():
+                with p.open(newline="", encoding="utf-8", errors="replace") as fh:
+                    existing = list(_csv.reader(fh))
+            if updates:
+                for upd in updates:
+                    cell_ref = upd.get("cell", "")
+                    if not cell_ref:
+                        continue
+                    col_letter = "".join(c for c in cell_ref if c.isalpha()).upper()
+                    row_str = "".join(c for c in cell_ref if c.isdigit())
+                    if not col_letter or not row_str:
+                        continue
+                    col_idx = sum(
+                        (ord(ch) - ord("A") + 1) * (26 ** i)
+                        for i, ch in enumerate(reversed(col_letter))
+                    ) - 1
+                    row_idx = int(row_str) - 1
+                    while len(existing) <= row_idx:
+                        existing.append([])
+                    while len(existing[row_idx]) <= col_idx:
+                        existing[row_idx].append("")
+                    existing[row_idx][col_idx] = upd.get("value", "")
+            cells_updated = len(updates) if updates else 0
+            rows_appended = 0
+            if append_rows:
+                existing.extend(list(r) for r in append_rows)
+                rows_appended = len(append_rows)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open("w", newline="", encoding="utf-8") as fh:
+                _csv.writer(fh).writerows(existing)
+            return {"status": "ok", "path": str(p), "cells_updated": cells_updated,
+                    "rows_appended": rows_appended}
+
+        if suffix != ".xlsx":
+            return {"error": f"Unsupported file type '{suffix}'. Supported: .xlsx, .csv"}
+        if not _HAS_OPENPYXL:
+            return {"error": "openpyxl is not installed. Run: uv add openpyxl"}
+
+        if p.exists():
+            wb = openpyxl.load_workbook(str(p))
+        elif create_if_missing:
+            wb = openpyxl.Workbook()
+        else:
+            return {"error": f"File not found: {p}. Pass create_if_missing=true to create it."}
+
+        ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
+        cells_updated = 0
+        if updates:
+            for upd in updates:
+                cell_ref = upd.get("cell")
+                if not cell_ref:
+                    continue
+                ws[cell_ref] = upd.get("value")
+                cells_updated += 1
+
+        rows_appended = 0
+        if append_rows:
+            for row in append_rows:
+                ws.append(list(row))
+                rows_appended += 1
+
+        p.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(str(p))
+        return {"status": "ok", "path": str(p), "sheet": ws.title,
+                "cells_updated": cells_updated, "rows_appended": rows_appended}
+    except PermissionError:
+        return {"error": f"Permission denied: {path}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Document tools ─────────────────────────────────────────────────────────────
+
+_MAX_DOC_PARAGRAPHS = 500
+
+
+def read_document(path: str) -> dict:
+    """Read paragraphs from a Word document (.docx) or plain text file."""
+    denied = _permission_check("allow_file_read", "read_document")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    try:
+        p = pathlib.Path(path).expanduser().resolve()
+        if not p.exists():
+            return {"error": f"File not found: {p}"}
+        if not p.is_file():
+            return {"error": f"Not a file: {p}"}
+
+        suffix = p.suffix.lower()
+        if suffix == ".docx":
+            if not _HAS_DOCX:
+                return {"error": "python-docx is not installed. Run: uv add python-docx"}
+            doc = _DocxDocument(str(p))
+            paragraphs = [
+                {"index": i, "text": para.text}
+                for i, para in enumerate(doc.paragraphs)
+                if para.text.strip()
+            ][:_MAX_DOC_PARAGRAPHS]
+        elif suffix in {".txt", ".md", ".rst", ".text"}:
+            lines = p.read_text(errors="replace").splitlines()
+            paragraphs = [
+                {"index": i, "text": line}
+                for i, line in enumerate(lines)
+                if line.strip()
+            ][:_MAX_DOC_PARAGRAPHS]
+        else:
+            return {"error": f"Unsupported file type '{suffix}'. Supported: .docx, .txt, .md"}
+
+        word_count = sum(len(para["text"].split()) for para in paragraphs)
+        return {"path": str(p), "paragraphs": paragraphs, "word_count": word_count}
+    except PermissionError:
+        return {"error": f"Permission denied: {path}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def edit_document(
+    path: str,
+    replacements: list | None = None,
+    append_paragraphs: list | None = None,
+    set_paragraph: dict | None = None,
+) -> dict:
+    """Edit a Word document (.docx): find/replace text, append paragraphs, or overwrite a paragraph."""
+    denied = _permission_check("allow_file_write", "edit_document")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    if not replacements and not append_paragraphs and not set_paragraph:
+        return {"error": "Provide at least one of: replacements, append_paragraphs, set_paragraph."}
+
+    try:
+        p = pathlib.Path(path).expanduser().resolve()
+        if not p.exists():
+            return {"error": f"File not found: {p}"}
+
+        suffix = p.suffix.lower()
+        if suffix != ".docx":
+            return {"error": f"Unsupported file type '{suffix}'. edit_document supports .docx only."}
+        if not _HAS_DOCX:
+            return {"error": "python-docx is not installed. Run: uv add python-docx"}
+
+        doc = _DocxDocument(str(p))
+        replacements_made = 0
+
+        if replacements:
+            for rep in replacements:
+                find_text = rep.get("find", "")
+                replace_text = rep.get("replace", "")
+                if not find_text:
+                    continue
+                for para in doc.paragraphs:
+                    if find_text in para.text:
+                        # Preserve runs by doing a full-text replace on the first run
+                        for run in para.runs:
+                            if find_text in run.text:
+                                run.text = run.text.replace(find_text, replace_text, 1)
+                                replacements_made += 1
+                                break
+
+        if set_paragraph:
+            idx = set_paragraph.get("index")
+            new_text = set_paragraph.get("text", "")
+            if idx is not None and 0 <= idx < len(doc.paragraphs):
+                para = doc.paragraphs[idx]
+                # Clear all runs and set text on the first run
+                if para.runs:
+                    para.runs[0].text = new_text
+                    for run in para.runs[1:]:
+                        run.text = ""
+                else:
+                    para.add_run(new_text)
+
+        paragraphs_appended = 0
+        if append_paragraphs:
+            for text in append_paragraphs:
+                doc.add_paragraph(str(text))
+                paragraphs_appended += 1
+
+        doc.save(str(p))
+        return {
+            "status": "ok",
+            "path": str(p),
+            "replacements_made": replacements_made,
+            "paragraphs_appended": paragraphs_appended,
+        }
+    except PermissionError:
+        return {"error": f"Permission denied: {path}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Deep research ──────────────────────────────────────────────────────────────
+
+
+def _run_deep_research(
+    question: str, max_sources: int = 15, max_loops: int = 5,
+) -> dict:
+    """Execute a deep research investigation and return a cited report."""
+    denied = _permission_check("allow_deep_research", "deep_research")
+    if denied:
+        return denied
+    if not question or not question.strip():
+        return {"error": "question is required."}
+
+    api_key = os.environ.get("SYSCONTROL_API_KEY", "ollama")
+    base_url = os.environ.get("SYSCONTROL_BASE_URL", "http://localhost:11434/v1")
+    model = os.environ.get("SYSCONTROL_MODEL", "qwen3:30b")
+
+    try:
+        from deep_research.orchestrator import orchestrate  # lazy import
+
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+        return orchestrate(
+            question=question.strip(),
+            search_fn=web_search,
+            fetch_fn=web_fetch,
+            llm_client=client,
+            model=model,
+            max_loops=max(1, min(max_loops, 10)),
+            max_sources=max(3, min(max_sources, 25)),
+        )
+    except Exception as e:
+        return {"error": f"Research failed: {e}"}
+
+
 # ── Permission gate ────────────────────────────────────────────────────────────
 #
 # All sensitive tools are disabled until the user explicitly opts in via
@@ -4375,6 +4723,169 @@ TOOLS = {
         },
         "fn": lambda args: write_file(args["path"], args["content"], args.get("overwrite", True)),
     },
+    "read_spreadsheet": {
+        "description": (
+            "Read rows and cells from a spreadsheet file (.xlsx or .csv). "
+            "Returns headers and row data up to max_rows (default 200). "
+            "For .xlsx files, optionally specify a sheet name and/or cell range (e.g. 'A1:D10'). "
+            "Requires allow_file_read in ~/.syscontrol/config.json."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the .xlsx or .csv file (e.g. '~/Desktop/budget.xlsx').",
+                },
+                "sheet": {
+                    "type": "string",
+                    "description": "Sheet name to read (.xlsx only). Defaults to the active sheet.",
+                },
+                "cell_range": {
+                    "type": "string",
+                    "description": "Cell range in A1 notation (e.g. 'A1:D10'). Omit to read all rows.",
+                },
+                "max_rows": {
+                    "type": "integer",
+                    "description": "Maximum rows to return (1–200, default 200).",
+                    "default": 200,
+                },
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: read_spreadsheet(
+            args["path"],
+            args.get("sheet"),
+            args.get("cell_range"),
+            args.get("max_rows", 200),
+        ),
+    },
+    "edit_spreadsheet": {
+        "description": (
+            "Write cells or append rows to a spreadsheet file (.xlsx or .csv). "
+            "'updates' is a list of {cell, value} objects using A1 notation (e.g. {\"cell\": \"B3\", \"value\": 500}). "
+            "'append_rows' is a list of rows (each row is a list of values) to add at the end. "
+            "Set create_if_missing=true to create the file if it does not exist (.xlsx only). "
+            "Requires allow_file_write in ~/.syscontrol/config.json."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the .xlsx or .csv file.",
+                },
+                "sheet": {
+                    "type": "string",
+                    "description": "Sheet name to edit (.xlsx only). Defaults to the active sheet.",
+                },
+                "updates": {
+                    "type": "array",
+                    "description": "List of cell updates: [{\"cell\": \"A1\", \"value\": \"Hello\"}, ...].",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "cell": {"type": "string"},
+                            "value": {},
+                        },
+                        "required": ["cell", "value"],
+                    },
+                },
+                "append_rows": {
+                    "type": "array",
+                    "description": "Rows to append at the end of the sheet: [[\"Q1\", 1000], [\"Q2\", 2000]].",
+                    "items": {"type": "array"},
+                },
+                "create_if_missing": {
+                    "type": "boolean",
+                    "description": "Create the file if it does not exist (.xlsx only). Default false.",
+                    "default": False,
+                },
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: edit_spreadsheet(
+            args["path"],
+            args.get("sheet"),
+            args.get("updates"),
+            args.get("append_rows"),
+            args.get("create_if_missing", False),
+        ),
+    },
+    "read_document": {
+        "description": (
+            "Read paragraphs from a Word document (.docx) or plain text file (.txt, .md). "
+            "Returns a list of non-empty paragraphs with their index, and a total word count. "
+            "Requires allow_file_read in ~/.syscontrol/config.json."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the .docx, .txt, or .md file.",
+                },
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: read_document(args["path"]),
+    },
+    "edit_document": {
+        "description": (
+            "Edit a Word document (.docx): find-and-replace text, overwrite a paragraph by index, "
+            "or append new paragraphs at the end. "
+            "'replacements' is a list of {find, replace} objects. "
+            "'set_paragraph' is {index, text} to overwrite one paragraph. "
+            "'append_paragraphs' is a list of strings to add at the end. "
+            "Requires allow_file_write in ~/.syscontrol/config.json."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the .docx file.",
+                },
+                "replacements": {
+                    "type": "array",
+                    "description": "Find-and-replace pairs: [{\"find\": \"old text\", \"replace\": \"new text\"}, ...].",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "find": {"type": "string"},
+                            "replace": {"type": "string"},
+                        },
+                        "required": ["find", "replace"],
+                    },
+                },
+                "set_paragraph": {
+                    "type": "object",
+                    "description": "Overwrite a paragraph by index: {\"index\": 0, \"text\": \"New text\"}.",
+                    "properties": {
+                        "index": {"type": "integer"},
+                        "text": {"type": "string"},
+                    },
+                    "required": ["index", "text"],
+                },
+                "append_paragraphs": {
+                    "type": "array",
+                    "description": "List of strings to append as new paragraphs at the end of the document.",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: edit_document(
+            args["path"],
+            args.get("replacements"),
+            args.get("append_paragraphs"),
+            args.get("set_paragraph"),
+        ),
+    },
     # ── Shell ─────────────────────────────────────────────────────────────────
     "run_shell_command": {
         "description": (
@@ -4599,6 +5110,43 @@ TOOLS = {
             "required": ["note"],
         },
         "fn": lambda args: append_memory_note(args.get("note", "")),
+    },
+    # ── Deep Research ─────────────────────────────────────────────────────────
+    "deep_research": {
+        "description": (
+            "Conduct deep, multi-step web research on a topic. "
+            "Plans subquestions, searches multiple sources, extracts claims, "
+            "cross-verifies facts, and returns a citation-backed answer. "
+            "Use for questions needing current information, evidence verification, "
+            "or multiple perspectives. Takes 1-3 minutes. "
+            "Requires allow_deep_research in ~/.syscontrol/config.json."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The research question to investigate thoroughly.",
+                },
+                "max_sources": {
+                    "type": "integer",
+                    "description": "Maximum sources to consult (3-25, default 15).",
+                    "default": 15,
+                },
+                "max_loops": {
+                    "type": "integer",
+                    "description": "Maximum research iterations (1-10, default 5).",
+                    "default": 5,
+                },
+            },
+            "required": ["question"],
+        },
+        "fn": lambda args: _run_deep_research(
+            args["question"],
+            args.get("max_sources", 15),
+            args.get("max_loops", 5),
+        ),
     },
     # ── User-Defined Tools (registry) ──────────────────────────────────────────
     # (entries inserted here by create_tool — do not remove this comment)

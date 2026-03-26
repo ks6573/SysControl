@@ -1,7 +1,7 @@
 [project]
 name = "syscontrol"
 version = "1.1.0b1"
-description = "All-In-One AI agent with MCP tool server; Ultron but slightly weaker "
+description = "All-In-One AI agent with MCP tool server; Ultron but slightly weaker and nicer 😉"
 readme = "README.md"
 requires-python = ">=3.11"
 keywords = ["mcp", "system-monitor", "ollama", "ai", "agent"]
@@ -24,6 +24,8 @@ dependencies = [
     "psutil>=5.9.0",
     "matplotlib>=3.7.0",
     "openai>=2.26.0",
+    "openpyxl>=3.1",
+    "python-docx>=1.1",
 ]
 
 [project.scripts]
@@ -47,7 +49,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 # Package layout: root shims + both sub-packages.
-include = ["agent.py", "agent/", "mcp/"]
+include = ["agent.py", "agent/", "mcp/", "deep_research/"]
 
 
 # ── ruff ──────────────────────────────────────────────────────────────────────
@@ -71,7 +73,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["agent", "mcp"]
+known-first-party = ["agent", "mcp", "deep_research"]
 
 # ── mypy ──────────────────────────────────────────────────────────────────────
 [tool.mypy]
