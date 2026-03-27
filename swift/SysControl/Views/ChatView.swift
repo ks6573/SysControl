@@ -1,11 +1,14 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// Main chat area: message list with auto-scroll + input bar at the bottom.
 struct ChatView: View {
     @Environment(AppState.self) private var appState
     @State private var pendingScrollWorkItem: DispatchWorkItem?
     @State private var lastScrollAt: Date = .distantPast
+    @State private var attachedFilePath: String?
+    @State private var isDropTargeted: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,10 +30,18 @@ struct ChatView: View {
             Divider()
 
             // Input bar
-            InputBar { text in
+            InputBar(onSend: { text in
                 appState.sendMessage(text)
-            }
+            }, attachedFilePath: $attachedFilePath)
             .disabled(appState.activeSession?.isStreaming == true || !appState.isConnected)
+        }
+        .overlay {
+            if isDropTargeted {
+                dropOverlay
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers)
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -147,6 +158,48 @@ struct ChatView: View {
             return true
         }
         return latestAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // MARK: - File Drop
+
+    private static let supportedExtensions: Set<String> = [
+        "pdf", "xlsx", "xls", "csv", "docx", "doc", "txt", "md", "rst", "text",
+    ]
+
+    private var dropOverlay: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.ultraThinMaterial)
+            VStack(spacing: 10) {
+                Image(systemName: "arrow.down.doc.fill")
+                    .font(.system(size: 36))
+                    .foregroundStyle(.secondary)
+                Text("Drop file to attach")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                Text("PDF, Word, Excel, CSV, or text files")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(16)
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else {
+            return false
+        }
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+            guard let data = item as? Data,
+                  let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+            let ext = url.pathExtension.lowercased()
+            guard Self.supportedExtensions.contains(ext) else { return }
+            Task { @MainActor in
+                attachedFilePath = url.path
+            }
+        }
+        return true
     }
 }
 
