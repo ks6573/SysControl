@@ -2,7 +2,7 @@
 
 ## What is SysControl?
 
-An AI agent for macOS that answers questions about your system using 65 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
+An AI agent for macOS that answers questions about your system using 83 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
 
 **Repo:** `ks6573/SysControl` on GitHub.
 
@@ -12,7 +12,7 @@ An AI agent for macOS that answers questions about your system using 65 MCP tool
 
 ```
 agent.py               ← CLI entry shim → agent.cli:main()
-mcp/server.py          ← MCP server (~5400 lines, all 65 tools, JSON-RPC over stdio)
+mcp/server.py          ← MCP server (~6200 lines, all 83 tools, JSON-RPC over stdio)
 mcp/prompt.json        ← System prompt injected into all LLM requests
 agent/core.py          ← Shared: MCPClient, MCPClientPool, run_streaming_turn(), TurnCallbacks
 agent/bridge.py        ← JSON-over-stdio bridge for the Swift frontend
@@ -171,7 +171,7 @@ pytest                               # tests (testpaths = ["tests"])
 
 Sensitive tools disabled by default. Enabled via `~/.syscontrol/config.json`:
 
-`allow_shell`, `allow_messaging`, `allow_message_history`, `allow_screenshot`, `allow_file_read`, `allow_file_write`, `allow_calendar`, `allow_contacts`, `allow_accessibility`, `allow_tool_creation`, `allow_deep_research`
+`allow_shell`, `allow_messaging`, `allow_message_history`, `allow_screenshot`, `allow_file_read`, `allow_file_write`, `allow_calendar`, `allow_contacts`, `allow_accessibility`, `allow_tool_creation`, `allow_deep_research`, `allow_email`, `allow_notes`, `allow_brew`
 
 ---
 
@@ -181,7 +181,7 @@ Read specific sections, not entire files:
 
 | File | ~Lines | Notes |
 |---|---|---|
-| `mcp/server.py` | ~5400 | All MCP tools — largest file |
+| `mcp/server.py` | ~6200 | All MCP tools — largest file |
 | `agent/core.py` | ~764 | Shared agent infrastructure |
 | `agent/cli.py` | ~599 | CLI interface |
 | `deep_research/` | ~800 | 12 modules — orchestrator, schemas, LLM steps, retriever, evidence store |

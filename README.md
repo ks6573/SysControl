@@ -2,7 +2,7 @@
 
 An AI agent for your Mac that answers questions about your system — and can extend itself with new tools on the fly.
 
-65 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, shell, spreadsheets, Word documents, PDFs, deep web research, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
+83 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, email, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, Notes, Homebrew, media control, file management, Spotlight search, spreadsheets, Word documents, PDFs, deep web research, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
 Three ways to run it — pick whichever fits your workflow:
 
@@ -170,7 +170,10 @@ Sensitive tools are **disabled by default**. Enable them in `~/.syscontrol/confi
   "allow_contacts":        true,
   "allow_accessibility":   true,
   "allow_tool_creation":   true,
-  "allow_deep_research":   true
+  "allow_deep_research":   true,
+  "allow_email":           true,
+  "allow_notes":           true,
+  "allow_brew":            true
 }
 ```
 
@@ -284,6 +287,9 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 |---|---|
 | `send_imessage` | Send an iMessage or SMS via Messages.app. macOS only. |
 | `get_imessage_history` | Read recent messages from `~/Library/Messages/chat.db`. macOS only. |
+| `read_emails` | Read recent emails from Mail.app (by folder). Requires `allow_email`. macOS only. |
+| `send_email` | Send an email via Mail.app. Requires `allow_email`. macOS only. |
+| `search_emails` | Search emails across all accounts and mailboxes. Requires `allow_email`. macOS only. |
 
 ### Browser & Web
 
@@ -312,6 +318,8 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 | `quit_app` | Gracefully quit (AppleScript) or force-kill an app. macOS only. |
 | `get_volume` | Output, input, and alert volume; mute state |
 | `set_volume` | Set system output volume (0–100) |
+| `get_now_playing` | Currently playing track in Music.app or Spotify (title, artist, album, position). macOS only. |
+| `media_control` | Play, pause, skip, or stop Music.app / Spotify. Auto-detects active player. macOS only. |
 | `get_frontmost_app` | Return the name of the focused application |
 | `toggle_do_not_disturb` | Enable/disable Focus / DnD |
 | `run_shortcut` | Run a named Shortcut via `shortcuts run`. macOS 12+. |
@@ -322,6 +330,12 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 |---|---|
 | `read_file` | Read a text file (up to 16,000 chars) |
 | `write_file` | Write text to any path, creating directories as needed |
+| `list_directory` | List directory contents with name, type, size, and modification time |
+| `move_file` | Move or rename a file or directory |
+| `copy_file` | Copy a file to a new location |
+| `delete_file` | Delete a file or directory (Trash by default on macOS, recoverable) |
+| `create_directory` | Create a directory and any missing parents |
+| `search_files` | Search for files system-wide using macOS Spotlight (mdfind). Instant. macOS only. |
 | `read_spreadsheet` | Read cells from `.xlsx` or `.csv` — supports sheet selection and cell ranges |
 | `edit_spreadsheet` | Write cells (A1 notation) or append rows to `.xlsx` / `.csv`. Create new files. |
 | `read_document` | Read paragraphs from `.docx`, `.txt`, or `.md` with word count |
@@ -335,6 +349,9 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 |---|---|
 | `get_calendar_events` | Upcoming events from Calendar.app for the next N days. macOS only. |
 | `get_contact` | Search Contacts.app by name — phone and email. macOS only. |
+| `list_notes` | List notes from Notes.app with title, folder, and timestamps. Requires `allow_notes`. |
+| `read_note` | Read the full body of a note by title (partial match). Requires `allow_notes`. |
+| `create_note` | Create a new note in Notes.app. Requires `allow_notes`. |
 | `get_startup_items` | Auto-start items (macOS LaunchAgents, Windows Registry, Linux `.desktop`) |
 | `tail_system_logs` | Last N lines of the system log with optional keyword filter |
 
@@ -347,6 +364,10 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 | `cancel_reminder` | Cancel a reminder by ID |
 | `get_weather` | Current weather + clothing recommendations. Auto-detects location from IP. |
 | `check_app_updates` | Homebrew, Mac App Store, and system software updates. macOS only. |
+| `brew_list` | List all installed Homebrew formulae and casks. Requires `allow_brew`. |
+| `brew_install` | Install a Homebrew formula or cask. Requires `allow_brew`. |
+| `brew_upgrade` | Upgrade one or all Homebrew packages. Requires `allow_brew`. |
+| `brew_uninstall` | Uninstall a Homebrew formula or cask. Requires `allow_brew`. |
 | `get_docker_status` | Running containers with live CPU%, memory, image, status, and ports |
 | `get_time_machine_status` | Last backup time, phase and progress if running, destination. macOS only. |
 | `track_package` | Track UPS, USPS, FedEx, or DHL shipments by tracking number |
@@ -400,7 +421,7 @@ SysControl/
 │   ├── paths.py             # Frozen-app-aware path resolution
 │   └── remote.py            # Telegram / WhatsApp / Messenger webhook bridge
 ├── mcp/
-│   ├── server.py            # MCP tool server (64 tools + self-extension)
+│   ├── server.py            # MCP tool server (83 tools + self-extension)
 │   └── prompt.json          # System prompt for the agent
 ├── deep_research/           # Deep research agent (iterative web research with citation verification)
 ├── swift/
@@ -430,7 +451,7 @@ SysControl/
 └────────┬─────────────┘
          │  JSON-RPC (stdio)
 ┌────────▼─────────────┐
-│    MCP Server        │   64 tools, self-extension, permission checks
+│    MCP Server        │   83 tools, self-extension, permission checks
 │  (mcp/server.py)     │   Concurrent tool execution via client pool
 └──────────────────────┘
 ```

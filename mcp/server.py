@@ -1746,6 +1746,163 @@ def check_app_updates() -> dict:
     return results
 
 
+# ── Homebrew management tools ─────────────────────────────────────────────────
+
+_BREW_ENV = {**os.environ, "HOMEBREW_NO_AUTO_UPDATE": "1"}
+_BREW_PKG_RE = re.compile(r"^[\w\-\./@]+$")
+
+
+def brew_list(kind: str = "all") -> dict:
+    """List installed Homebrew packages.
+
+    Args:
+        kind: ``"formulae"``, ``"casks"``, or ``"all"`` (default).
+
+    Returns:
+        ``{"formulae": [...], "casks": [...], "total": int}``
+    """
+    denied = _permission_check("allow_brew", "brew_list")
+    if denied:
+        return denied
+    if not IS_MACOS:
+        return {"error": "Homebrew is macOS only."}
+    if not shutil.which("brew"):
+        return {"error": "Homebrew is not installed. Get it at https://brew.sh"}
+    formulae: list[str] = []
+    casks:    list[str] = []
+    try:
+        if kind in ("formulae", "all"):
+            proc = subprocess.run(
+                ["brew", "list", "--formula"],
+                capture_output=True, text=True, timeout=30, env=_BREW_ENV,
+            )
+            if proc.returncode == 0:
+                formulae = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        if kind in ("casks", "all"):
+            proc = subprocess.run(
+                ["brew", "list", "--cask"],
+                capture_output=True, text=True, timeout=30, env=_BREW_ENV,
+            )
+            if proc.returncode == 0:
+                casks = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    except subprocess.TimeoutExpired:
+        return {"error": "brew list timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+    return {"formulae": formulae, "casks": casks, "total": len(formulae) + len(casks)}
+
+
+def brew_install(package: str) -> dict:
+    """Install a Homebrew formula or cask.
+
+    Args:
+        package: Formula or cask name (e.g. ``"ripgrep"``).
+                 Prefix with ``--cask`` for casks (e.g. ``"--cask firefox"``).
+
+    Returns:
+        ``{"status": "ok"|"already_installed", "package", "output"}``
+    """
+    denied = _permission_check("allow_brew", "brew_install")
+    if denied:
+        return denied
+    if not IS_MACOS:
+        return {"error": "Homebrew is macOS only."}
+    if not package or not package.strip():
+        return {"error": "package is required."}
+    if not shutil.which("brew"):
+        return {"error": "Homebrew is not installed. Get it at https://brew.sh"}
+    pkg = package.strip()
+    # Allow --cask prefix; validate the package name portion.
+    name_part = pkg.lstrip("-").lstrip("cask").strip() if pkg.startswith("--cask") else pkg
+    if not _BREW_PKG_RE.match(name_part):
+        return {"error": f"Invalid package name: {pkg!r}"}
+    cmd = ["brew", "install"] + pkg.split()
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300, env=_BREW_ENV,
+        )
+        combined = (proc.stdout + proc.stderr).strip()
+        if proc.returncode == 0:
+            return {"status": "ok", "package": pkg, "output": combined}
+        if "already installed" in combined.lower():
+            return {"status": "already_installed", "package": pkg, "output": combined}
+        return {"error": combined or f"brew install {pkg} failed.", "package": pkg}
+    except subprocess.TimeoutExpired:
+        return {"error": f"brew install {pkg} timed out (>300s)."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def brew_upgrade(package: str = "") -> dict:
+    """Upgrade one or all installed Homebrew packages.
+
+    Args:
+        package: Package name to upgrade, or empty to upgrade everything.
+
+    Returns:
+        ``{"status", "package": "all"|name, "output"}``
+    """
+    denied = _permission_check("allow_brew", "brew_upgrade")
+    if denied:
+        return denied
+    if not IS_MACOS:
+        return {"error": "Homebrew is macOS only."}
+    if not shutil.which("brew"):
+        return {"error": "Homebrew is not installed. Get it at https://brew.sh"}
+    pkg = package.strip()
+    if pkg and not _BREW_PKG_RE.match(pkg):
+        return {"error": f"Invalid package name: {pkg!r}"}
+    cmd = ["brew", "upgrade"] + ([pkg] if pkg else [])
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300, env=_BREW_ENV,
+        )
+        combined = (proc.stdout + proc.stderr).strip()
+        if proc.returncode == 0 or "already up-to-date" in combined.lower():
+            return {"status": "ok", "package": pkg or "all", "output": combined}
+        return {"error": combined or "brew upgrade failed.", "package": pkg or "all"}
+    except subprocess.TimeoutExpired:
+        return {"error": "brew upgrade timed out (>300s)."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def brew_uninstall(package: str) -> dict:
+    """Uninstall a Homebrew formula or cask.
+
+    Args:
+        package: Formula or cask name to remove.
+
+    Returns:
+        ``{"status": "ok", "package", "output"}``
+    """
+    denied = _permission_check("allow_brew", "brew_uninstall")
+    if denied:
+        return denied
+    if not IS_MACOS:
+        return {"error": "Homebrew is macOS only."}
+    if not package or not package.strip():
+        return {"error": "package is required."}
+    if not shutil.which("brew"):
+        return {"error": "Homebrew is not installed. Get it at https://brew.sh"}
+    pkg = package.strip()
+    if not _BREW_PKG_RE.match(pkg):
+        return {"error": f"Invalid package name: {pkg!r}"}
+    try:
+        proc = subprocess.run(
+            ["brew", "uninstall", pkg],
+            capture_output=True, text=True, timeout=60, env=_BREW_ENV,
+        )
+        combined = (proc.stdout + proc.stderr).strip()
+        if proc.returncode == 0:
+            return {"status": "ok", "package": pkg, "output": combined}
+        return {"error": combined or f"brew uninstall {pkg} failed.", "package": pkg}
+    except subprocess.TimeoutExpired:
+        return {"error": f"brew uninstall {pkg} timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── Package tracking ──────────────────────────────────────────────────────────
 
 def _detect_carrier(tn: str) -> str:
@@ -2736,6 +2893,211 @@ def get_imessage_history(contact: str, limit: int = 20) -> dict:
         }
 
 
+# ── Email tools (Mail.app) ────────────────────────────────────────────────────
+
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+
+def _parse_mail_records(raw: str) -> list[dict]:
+    """Split pipe-delimited Mail.app AppleScript output into message dicts."""
+    messages: list[dict] = []
+    for record in raw.split("||"):
+        record = record.strip()
+        if not record:
+            continue
+        parts = record.split("|")
+        messages.append({
+            "subject": parts[0] if len(parts) > 0 else "",
+            "sender":  parts[1] if len(parts) > 1 else "",
+            "date":    parts[2] if len(parts) > 2 else "",
+            "preview": parts[3] if len(parts) > 3 else "",
+            "is_read": (parts[4] if len(parts) > 4 else "false") == "true",
+        })
+    return messages
+
+
+def read_emails(folder: str = "INBOX", count: int = 10) -> dict:
+    """Return the most recent messages from a Mail.app mailbox.
+
+    Args:
+        folder: Mailbox name (default: ``"INBOX"``).
+        count:  Maximum messages to return (1–50, default 10).
+
+    Returns:
+        ``{"folder", "count", "messages"}`` — each message has ``subject``,
+        ``sender``, ``date``, ``preview`` (first 200 chars), and ``is_read``.
+    """
+    denied = _permission_check("allow_email", "read_emails")
+    if denied:
+        return denied
+    if not IS_MACOS:
+        return {"error": "read_emails requires macOS (Mail.app)."}
+    try:
+        count = max(1, min(int(count), 50))
+    except (TypeError, ValueError):
+        count = 10
+    safe_folder = _escape_applescript(folder)
+    script = f"""
+set output to ""
+tell application "Mail"
+    set msgList to {{}}
+    repeat with acct in every account
+        try
+            set mbox to mailbox "{safe_folder}" of acct
+            set msgList to msgList & (messages of mbox)
+        end try
+    end repeat
+    set total to count of msgList
+    if total = 0 then return ""
+    set lim to {count}
+    if total < lim then set lim to total
+    repeat with i from 1 to lim
+        set msg to item i of msgList
+        set preview to content of msg
+        if (count of characters of preview) > 200 then
+            set preview to (characters 1 through 200 of preview as string) & "..."
+        end if
+        set output to output & (subject of msg) & "|" & (sender of msg) & "|" & ((date received of msg) as string) & "|" & preview & "|" & ((read status of msg) as string) & "||"
+    end repeat
+end tell
+return output
+"""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return {
+                "error": proc.stderr.strip() or "Mail access denied.",
+                "hint": "Grant Mail access in System Settings → Privacy & Security → Automation.",
+            }
+        messages = _parse_mail_records(proc.stdout.strip())
+        return {"folder": folder, "count": len(messages), "messages": messages}
+    except subprocess.TimeoutExpired:
+        return {"error": "Mail.app timed out loading messages."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def send_email(to: str, subject: str, body: str, cc: str = "") -> dict:
+    """Send an email via Mail.app.
+
+    Args:
+        to:      Recipient email address.
+        subject: Email subject line.
+        body:    Plain-text message body.
+        cc:      Optional CC email address.
+
+    Returns:
+        ``{"status": "sent", "to", "subject"}``
+    """
+    denied = _permission_check("allow_email", "send_email")
+    if denied:
+        return denied
+    if not IS_MACOS:
+        return {"error": "send_email requires macOS (Mail.app)."}
+    if not to or not subject or not body:
+        return {"error": "to, subject, and body are required."}
+    to_clean = to.strip()
+    if not _EMAIL_RE.match(to_clean):
+        return {"error": f"Invalid recipient email address: {to!r}"}
+    if cc and not _EMAIL_RE.match(cc.strip()):
+        return {"error": f"Invalid CC email address: {cc!r}"}
+    safe_to      = _escape_applescript(to_clean)
+    safe_subject = _escape_applescript(subject)
+    safe_body    = _escape_applescript(body)
+    cc_line = ""
+    if cc:
+        safe_cc = _escape_applescript(cc.strip())
+        cc_line = f'        make new cc recipient with properties {{address:"{safe_cc}"}}\n'
+    script = (
+        f'tell application "Mail"\n'
+        f'    set newMsg to make new outgoing message with properties '
+        f'{{subject:"{safe_subject}", content:"{safe_body}", visible:false}}\n'
+        f'    tell newMsg\n'
+        f'        make new to recipient with properties {{address:"{safe_to}"}}\n'
+        f'{cc_line}'
+        f'        send\n'
+        f'    end tell\n'
+        f'end tell\n'
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=20,
+        )
+        if proc.returncode != 0:
+            return {
+                "error": proc.stderr.strip() or "Failed to send email.",
+                "hint": "Ensure Mail.app is open and configured with a sending account.",
+            }
+        return {"status": "sent", "to": to_clean, "subject": subject}
+    except subprocess.TimeoutExpired:
+        return {"error": "Mail.app timed out while sending."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def search_emails(query: str, count: int = 20) -> dict:
+    """Search emails in Mail.app across all accounts and mailboxes.
+
+    Args:
+        query: Search term (subject, sender, or body text).
+        count: Maximum results (1–50, default 20).
+
+    Returns:
+        ``{"query", "count", "messages"}``
+    """
+    denied = _permission_check("allow_email", "search_emails")
+    if denied:
+        return denied
+    if not IS_MACOS:
+        return {"error": "search_emails requires macOS (Mail.app)."}
+    if not query:
+        return {"error": "query is required."}
+    try:
+        count = max(1, min(int(count), 50))
+    except (TypeError, ValueError):
+        count = 20
+    safe_query = _escape_applescript(query)
+    script = f"""
+set output to ""
+tell application "Mail"
+    set found to search every mailbox for "{safe_query}"
+    set total to count of found
+    if total = 0 then return ""
+    set lim to {count}
+    if total < lim then set lim to total
+    repeat with i from 1 to lim
+        set msg to item i of found
+        set preview to content of msg
+        if (count of characters of preview) > 200 then
+            set preview to (characters 1 through 200 of preview as string) & "..."
+        end if
+        set output to output & (subject of msg) & "|" & (sender of msg) & "|" & ((date received of msg) as string) & "|" & preview & "|" & ((read status of msg) as string) & "||"
+    end repeat
+end tell
+return output
+"""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return {
+                "error": proc.stderr.strip() or "Mail search failed.",
+                "hint": "Grant Mail access in System Settings → Privacy & Security → Automation.",
+            }
+        messages = _parse_mail_records(proc.stdout.strip())
+        return {"query": query, "count": len(messages), "messages": messages}
+    except subprocess.TimeoutExpired:
+        return {"error": "Mail.app search timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── Clipboard tools ───────────────────────────────────────────────────────────
 
 def get_clipboard() -> dict:
@@ -2923,6 +3285,143 @@ def set_volume(level: int) -> dict:
         if proc.returncode != 0:
             return {"error": proc.stderr.strip()}
         return {"status": "ok", "output_volume": level}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Media control tools ───────────────────────────────────────────────────────
+
+_MEDIA_APPS = ("Music", "Spotify")
+
+
+def _get_media_state(app: str) -> dict | None:
+    """Return playback state for *app* via AppleScript, or None if not running/available."""
+    if app == "Music":
+        script = """
+tell application "Music"
+    if it is not running then return "not_running"
+    set ps to player state
+    if ps is stopped then return "stopped"
+    set t to current track
+    return (ps as string) & "|" & (name of t) & "|" & (artist of t) & "|" & (album of t) & "|" & (player position as string) & "|" & (duration of t as string)
+end tell
+"""
+    else:  # Spotify
+        script = """
+tell application "Spotify"
+    if it is not running then return "not_running"
+    set ps to player state
+    if ps is stopped then return "stopped"
+    set t to current track
+    return (ps as string) & "|" & (name of t) & "|" & (artist of t) & "|" & (album of t) & "|" & (player position as string) & "|" & (duration of t as string)
+end tell
+"""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=5,
+        )
+        raw = proc.stdout.strip()
+        if not raw or raw == "not_running" or proc.returncode != 0:
+            return None
+        if raw == "stopped":
+            return {"app": app, "state": "stopped"}
+        parts = raw.split("|")
+        return {
+            "app":          app,
+            "state":        parts[0] if parts else "unknown",
+            "track":        parts[1] if len(parts) > 1 else "",
+            "artist":       parts[2] if len(parts) > 2 else "",
+            "album":        parts[3] if len(parts) > 3 else "",
+            "position_sec": round(float(parts[4]), 1) if len(parts) > 4 else None,
+            "duration_sec": round(float(parts[5]), 1) if len(parts) > 5 else None,
+        }
+    except Exception:
+        return None
+
+
+def get_now_playing() -> dict:
+    """Return information about the currently playing media track.
+
+    Checks Music.app then Spotify in order, returning whichever is playing.
+    If neither is playing, returns the paused state if found, otherwise
+    ``{"state": "nothing_playing"}``.
+
+    Returns:
+        A dict with ``app``, ``state``, ``track``, ``artist``, ``album``,
+        ``position_sec``, and ``duration_sec``.
+    """
+    if not IS_MACOS:
+        return {"error": "get_now_playing requires macOS."}
+    for app in _MEDIA_APPS:
+        info = _get_media_state(app)
+        if info and info.get("state") == "playing":
+            return info
+    # Fall back to paused state if any app has a track loaded.
+    for app in _MEDIA_APPS:
+        info = _get_media_state(app)
+        if info:
+            return info
+    return {"state": "nothing_playing"}
+
+
+_MEDIA_ACTIONS: dict[str, dict[str, str]] = {
+    "play":       {"Music": "play",           "Spotify": "play"},
+    "pause":      {"Music": "pause",          "Spotify": "pause"},
+    "play_pause": {"Music": "playpause",      "Spotify": "playpause"},
+    "next":       {"Music": "next track",     "Spotify": "next track"},
+    "previous":   {"Music": "previous track", "Spotify": "previous track"},
+    "stop":       {"Music": "stop",           "Spotify": "pause"},
+}
+
+
+def media_control(action: str, app: str = "") -> dict:
+    """Control media playback in Music.app or Spotify.
+
+    Args:
+        action: One of ``"play"``, ``"pause"``, ``"play_pause"``, ``"next"``,
+                ``"previous"``, ``"stop"``.
+        app:    ``"Music"`` or ``"Spotify"`` (default: auto-detect active player).
+
+    Returns:
+        ``{"status": "ok", "action": ..., "app": ...}``
+    """
+    if not IS_MACOS:
+        return {"error": "media_control requires macOS."}
+    action_key = action.lower().strip()
+    if action_key not in _MEDIA_ACTIONS:
+        return {
+            "error": f"Unknown action {action!r}.",
+            "valid_actions": list(_MEDIA_ACTIONS),
+        }
+    if app:
+        target = app.strip().title()
+        if target not in _MEDIA_APPS:
+            return {"error": f"Unknown app {app!r}. Use 'Music' or 'Spotify'."}
+    else:
+        # Auto-detect: prefer whichever app is currently playing or paused.
+        target = "Music"
+        for candidate in _MEDIA_APPS:
+            info = _get_media_state(candidate)
+            if info and info.get("state") in ("playing", "paused"):
+                target = candidate
+                break
+    cmd    = _MEDIA_ACTIONS[action_key][target]
+    script = f'tell application "{target}" to {cmd}'
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=8,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.strip()
+            return {
+                "error": err or f"Could not control {target}.",
+                "hint":  f"Make sure {target} is installed and open.",
+            }
+        return {"status": "ok", "action": action_key, "app": target}
+    except subprocess.TimeoutExpired:
+        return {"error": f"{target} did not respond in time."}
     except Exception as e:
         return {"error": str(e)}
 
@@ -3487,6 +3986,281 @@ def read_pdf(path: str, max_pages: int = _DEFAULT_PDF_PAGES) -> dict:
         return {"error": str(e)}
 
 
+# ── File-management tools ─────────────────────────────────────────────────────
+
+_HOME_DIR = pathlib.Path.home()
+
+
+def list_directory(path: str = "", show_hidden: bool = False) -> dict:
+    """List the contents of a directory with name, type, size, and modification time.
+
+    Args:
+        path:        Directory to list (default: home directory).
+        show_hidden: Include entries whose names start with ``'.'``.
+
+    Returns:
+        A dict with ``path``, ``count``, and ``entries`` (each entry has
+        ``name``, ``type``, ``size_bytes``, and ``modified``).
+    """
+    denied = _permission_check("allow_file_read", "list_directory")
+    if denied:
+        return denied
+    root = pathlib.Path(path).expanduser().resolve() if path else _HOME_DIR
+    if not root.exists():
+        return {"error": f"Path not found: {root}"}
+    if not root.is_dir():
+        return {"error": f"Not a directory: {root}"}
+    entries: list[dict] = []
+    try:
+        for entry in sorted(root.iterdir(), key=lambda e: (e.is_file(), e.name.lower())):
+            if not show_hidden and entry.name.startswith("."):
+                continue
+            try:
+                stat = entry.stat()
+                entries.append({
+                    "name":       entry.name,
+                    "type":       "file" if entry.is_file() else "dir",
+                    "size_bytes": stat.st_size if entry.is_file() else 0,
+                    "modified":   datetime.datetime.fromtimestamp(
+                        stat.st_mtime
+                    ).isoformat(timespec="seconds"),
+                })
+            except OSError:
+                continue
+    except PermissionError:
+        return {"error": f"Permission denied: {root}"}
+    return {"path": str(root), "count": len(entries), "entries": entries}
+
+
+def move_file(src: str, dst: str) -> dict:
+    """Move or rename a file or directory.
+
+    Args:
+        src: Source path (absolute or home-relative).
+        dst: Destination path or target directory.
+
+    Returns:
+        ``{"status": "ok", "src": ..., "dst": ...}``
+    """
+    denied = _permission_check("allow_file_write", "move_file")
+    if denied:
+        return denied
+    if not src or not dst:
+        return {"error": "src and dst are required."}
+    src_path = pathlib.Path(src).expanduser().resolve()
+    dst_path = pathlib.Path(dst).expanduser().resolve()
+    if not src_path.exists():
+        return {"error": f"Source not found: {src_path}"}
+    try:
+        final = shutil.move(str(src_path), str(dst_path))
+        return {"status": "ok", "src": str(src_path), "dst": str(final)}
+    except PermissionError:
+        return {"error": f"Permission denied moving {src_path}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def copy_file(src: str, dst: str, overwrite: bool = False) -> dict:
+    """Copy a file to a destination path or directory.
+
+    Args:
+        src:       Source file path.
+        dst:       Destination file path or directory.
+        overwrite: If False (default), error if the destination already exists.
+
+    Returns:
+        ``{"status": "ok", "src": ..., "dst": ..., "size_bytes": ...}``
+    """
+    denied = _permission_check("allow_file_write", "copy_file")
+    if denied:
+        return denied
+    if not src or not dst:
+        return {"error": "src and dst are required."}
+    src_path = pathlib.Path(src).expanduser().resolve()
+    dst_path = pathlib.Path(dst).expanduser().resolve()
+    if not src_path.exists():
+        return {"error": f"Source not found: {src_path}"}
+    if not src_path.is_file():
+        return {"error": f"Source is not a file: {src_path}"}
+    # If dst is an existing directory, copy into it preserving the filename.
+    if dst_path.is_dir():
+        dst_path = dst_path / src_path.name
+    if dst_path.exists() and not overwrite:
+        return {
+            "error": f"Destination already exists: {dst_path}. Pass overwrite=true to replace it.",
+        }
+    try:
+        shutil.copy2(str(src_path), str(dst_path))
+        return {
+            "status":     "ok",
+            "src":        str(src_path),
+            "dst":        str(dst_path),
+            "size_bytes": dst_path.stat().st_size,
+        }
+    except PermissionError:
+        return {"error": f"Permission denied copying to {dst_path}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def delete_file(path: str, permanent: bool = False) -> dict:
+    """Delete a file or directory, defaulting to Trash on macOS.
+
+    On macOS, ``permanent=False`` (default) moves the item to the Trash via
+    Finder so it can be recovered.  Pass ``permanent=True`` to permanently
+    remove it.  On non-macOS systems the item is always permanently removed.
+
+    Safety: refuses to delete anything outside the user's home directory.
+
+    Args:
+        path:      Path to the file or directory to remove.
+        permanent: If True, bypass the Trash and delete immediately.
+
+    Returns:
+        ``{"status": "ok", "path": ..., "method": "trash"|"permanent"}``
+    """
+    denied = _permission_check("allow_file_write", "delete_file")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    target = pathlib.Path(path).expanduser().resolve()
+    if not target.exists():
+        return {"error": f"Path not found: {target}"}
+    # Safety guard: only allow deletion within the home directory.
+    try:
+        target.relative_to(_HOME_DIR)
+    except ValueError:
+        return {
+            "error": (
+                "For safety, delete_file only removes items inside your home directory. "
+                f"Got: {target}"
+            ),
+        }
+    try:
+        if IS_MACOS and not permanent:
+            safe_path = _escape_applescript(str(target))
+            script = f'tell application "Finder" to delete POSIX file "{safe_path}"'
+            proc = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode != 0:
+                return {"error": proc.stderr.strip() or "Finder could not move item to Trash."}
+            return {"status": "ok", "path": str(target), "method": "trash"}
+        # Permanent deletion (or non-macOS).
+        if target.is_dir():
+            shutil.rmtree(str(target))
+        else:
+            target.unlink()
+        return {"status": "ok", "path": str(target), "method": "permanent"}
+    except PermissionError:
+        return {"error": f"Permission denied: {target}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def create_directory(path: str) -> dict:
+    """Create a directory and any missing parents.
+
+    Args:
+        path: Absolute or home-relative path for the new directory.
+
+    Returns:
+        ``{"status": "ok"|"already_exists", "path": ...}``
+    """
+    denied = _permission_check("allow_file_write", "create_directory")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    target = pathlib.Path(path).expanduser().resolve()
+    if target.exists():
+        if target.is_dir():
+            return {"status": "already_exists", "path": str(target)}
+        return {"error": f"A file already exists at that path: {target}"}
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        return {"status": "ok", "path": str(target)}
+    except PermissionError:
+        return {"error": f"Permission denied: {target}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Spotlight search ──────────────────────────────────────────────────────────
+
+_SPOTLIGHT_KIND_MAP: dict[str, str] = {
+    "document":    "kMDItemContentTypeTree == 'public.text'cd",
+    "pdf":         "kMDItemContentType == 'com.adobe.pdf'",
+    "image":       "kMDItemContentTypeTree == 'public.image'",
+    "video":       "kMDItemContentTypeTree == 'public.movie'",
+    "audio":       "kMDItemContentTypeTree == 'public.audio'",
+    "folder":      "kMDItemContentType == 'public.folder'",
+    "application": "kMDItemContentType == 'com.apple.application-bundle'",
+    "code":        "kMDItemContentTypeTree == 'public.source-code'",
+}
+
+
+def search_files(
+    query: str,
+    scope: str = "~",
+    kind: str = "",
+    limit: int = 50,
+) -> dict:
+    """Search for files using macOS Spotlight (mdfind).
+
+    Args:
+        query: File-name fragment or Spotlight metadata query string.
+        scope: Directory to restrict the search to (default: home directory).
+        kind:  Optional type filter: ``"pdf"``, ``"image"``, ``"video"``,
+               ``"audio"``, ``"folder"``, ``"application"``, ``"code"``,
+               or ``"document"``.
+        limit: Maximum results to return (1–200, default 50).
+
+    Returns:
+        ``{"query", "scope", "kind", "count", "results"}`` — each result has
+        ``path`` and ``name``.
+    """
+    if not IS_MACOS:
+        return {"error": "search_files uses Spotlight (mdfind) which requires macOS."}
+    if not query:
+        return {"error": "query is required."}
+    try:
+        limit = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        limit = 50
+    scope_path = str(pathlib.Path(scope).expanduser().resolve())
+    # Build the mdfind query string.
+    kind = kind.lower().strip()
+    if kind and kind in _SPOTLIGHT_KIND_MAP:
+        kind_pred   = _SPOTLIGHT_KIND_MAP[kind]
+        mdfind_query = f'({kind_pred}) && kMDItemFSName == "*{query}*"cd'
+    else:
+        kind         = ""
+        mdfind_query = query
+    try:
+        proc = subprocess.run(
+            ["mdfind", "-onlyin", scope_path, mdfind_query],
+            capture_output=True, text=True, timeout=10,
+        )
+        paths   = [p for p in proc.stdout.splitlines() if p.strip()][:limit]
+        results = [{"path": p, "name": pathlib.Path(p).name} for p in paths]
+        return {
+            "query":   query,
+            "scope":   scope_path,
+            "kind":    kind or "any",
+            "count":   len(results),
+            "results": results,
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Spotlight search timed out (>10s). Try narrowing the scope."}
+    except FileNotFoundError:
+        return {"error": "mdfind not found. Requires macOS with Spotlight enabled."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── Deep research ──────────────────────────────────────────────────────────────
 
 
@@ -3537,7 +4311,10 @@ def _run_deep_research(
 #     "allow_file_write":      true,
 #     "allow_calendar":        true,
 #     "allow_contacts":        true,
-#     "allow_accessibility":   true
+#     "allow_accessibility":   true,
+#     "allow_email":           true,
+#     "allow_notes":           true,
+#     "allow_brew":            true
 #   }
 
 _SYSCONTROL_CONFIG_FILE = _REMINDER_DIR / "config.json"
@@ -3757,6 +4534,214 @@ return resultList as string
         return {"query": name, "count": len(contacts), "contacts": contacts}
     except subprocess.TimeoutExpired:
         return {"error": "Contacts query timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Apple Notes tools ─────────────────────────────────────────────────────────
+
+
+def list_notes(folder: str = "", count: int = 20) -> dict:
+    """List notes from macOS Notes.app.
+
+    Args:
+        folder: Folder name to restrict results to (default: all folders).
+        count:  Maximum notes to return (1–100, default 20).
+
+    Returns:
+        ``{"count", "notes"}`` — each note has ``id``, ``name``, ``folder``,
+        ``created``, and ``modified``.
+    """
+    denied = _permission_check("allow_notes", "list_notes")
+    if denied:
+        return denied
+    if not IS_MACOS:
+        return {"error": "list_notes requires macOS (Notes.app)."}
+    try:
+        count = max(1, min(int(count), 100))
+    except (TypeError, ValueError):
+        count = 20
+    if folder:
+        safe_folder = _escape_applescript(folder)
+        source      = f'notes of folder "{safe_folder}"'
+    else:
+        source = "notes"
+    script = f"""
+set output to ""
+tell application "Notes"
+    set noteList to {source}
+    set total to count of noteList
+    set lim to {count}
+    if total < lim then set lim to total
+    repeat with i from 1 to lim
+        set n to item i of noteList
+        set nId to id of n
+        set nName to name of n
+        set nCreated to (creation date of n) as string
+        set nModified to (modification date of n) as string
+        try
+            set nFolder to name of container of n
+        on error
+            set nFolder to "Notes"
+        end try
+        set output to output & nId & "|" & nName & "|" & nFolder & "|" & nCreated & "|" & nModified & "||"
+    end repeat
+end tell
+return output
+"""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=20,
+        )
+        if proc.returncode != 0:
+            return {
+                "error": proc.stderr.strip() or "Notes access denied.",
+                "hint": "Grant Notes access in System Settings → Privacy & Security → Automation.",
+            }
+        notes: list[dict] = []
+        for record in proc.stdout.strip().split("||"):
+            record = record.strip()
+            if not record:
+                continue
+            parts = record.split("|")
+            notes.append({
+                "id":       parts[0] if len(parts) > 0 else "",
+                "name":     parts[1] if len(parts) > 1 else "",
+                "folder":   parts[2] if len(parts) > 2 else "",
+                "created":  parts[3] if len(parts) > 3 else "",
+                "modified": parts[4] if len(parts) > 4 else "",
+            })
+        return {"count": len(notes), "notes": notes}
+    except subprocess.TimeoutExpired:
+        return {"error": "Notes.app timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def read_note(name: str) -> dict:
+    """Read the full text of a note from macOS Notes.app.
+
+    Searches for a note whose title contains *name* (case-insensitive) and
+    returns the first match.
+
+    Args:
+        name: Full or partial note title.
+
+    Returns:
+        ``{"id", "name", "folder", "body", "created", "modified"}``
+    """
+    denied = _permission_check("allow_notes", "read_note")
+    if denied:
+        return denied
+    if not IS_MACOS:
+        return {"error": "read_note requires macOS (Notes.app)."}
+    if not name:
+        return {"error": "name is required."}
+    safe_name = _escape_applescript(name)
+    script = f"""
+tell application "Notes"
+    set matches to (every note whose name contains "{safe_name}")
+    if (count of matches) = 0 then return "NOT_FOUND"
+    set n to item 1 of matches
+    try
+        set nFolder to name of container of n
+    on error
+        set nFolder to "Notes"
+    end try
+    return (id of n) & "|" & (name of n) & "|" & nFolder & "|" & ((creation date of n) as string) & "|" & ((modification date of n) as string) & "|" & (body of n)
+end tell
+"""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        raw = proc.stdout.strip()
+        if proc.returncode != 0:
+            return {
+                "error": proc.stderr.strip() or "Notes access denied.",
+                "hint": "Grant Notes access in System Settings → Privacy & Security → Automation.",
+            }
+        if raw == "NOT_FOUND":
+            return {"error": f"No note found matching: {name!r}"}
+        # Body may contain pipe characters — split on first 5 delimiters only.
+        parts = raw.split("|", 5)
+        return {
+            "id":       parts[0] if len(parts) > 0 else "",
+            "name":     parts[1] if len(parts) > 1 else "",
+            "folder":   parts[2] if len(parts) > 2 else "",
+            "created":  parts[3] if len(parts) > 3 else "",
+            "modified": parts[4] if len(parts) > 4 else "",
+            "body":     parts[5] if len(parts) > 5 else "",
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Notes.app timed out reading note."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def create_note(title: str, body: str, folder: str = "") -> dict:
+    """Create a new note in macOS Notes.app.
+
+    Args:
+        title:  Note title.
+        body:   Note body text.
+        folder: Folder name to create the note in (default: default Notes folder).
+
+    Returns:
+        ``{"status": "created", "id", "name", "folder"}``
+    """
+    denied = _permission_check("allow_notes", "create_note")
+    if denied:
+        return denied
+    if not IS_MACOS:
+        return {"error": "create_note requires macOS (Notes.app)."}
+    if not title:
+        return {"error": "title is required."}
+    safe_title = _escape_applescript(title)
+    safe_body  = _escape_applescript(body)
+    if folder:
+        safe_folder    = _escape_applescript(folder)
+        container_open = f'tell folder "{safe_folder}"'
+        container_key  = f'"{safe_folder}"'
+    else:
+        container_open = "tell default account"
+        container_key  = '"Notes"'
+    script = (
+        f'tell application "Notes"\n'
+        f'    {container_open}\n'
+        f'        set newNote to make new note with properties '
+        f'{{name:"{safe_title}", body:"{safe_body}"}}\n'
+        f'        set nId to id of newNote\n'
+        f'        try\n'
+        f'            set nFolder to name of container of newNote\n'
+        f'        on error\n'
+        f'            set nFolder to {container_key}\n'
+        f'        end try\n'
+        f'        return nId & "|" & "{safe_title}" & "|" & nFolder\n'
+        f'    end tell\n'
+        f'end tell\n'
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            return {
+                "error": proc.stderr.strip() or "Could not create note.",
+                "hint": "Grant Notes access in System Settings → Privacy & Security → Automation.",
+            }
+        parts = proc.stdout.strip().split("|", 2)
+        return {
+            "status": "created",
+            "id":     parts[0] if len(parts) > 0 else "",
+            "name":   parts[1] if len(parts) > 1 else title,
+            "folder": parts[2] if len(parts) > 2 else (folder or "Notes"),
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Notes.app timed out creating note."}
     except Exception as e:
         return {"error": str(e)}
 
@@ -4376,6 +5361,84 @@ TOOLS = {
         "inputSchema": {"type": "object", "properties": {}, "required": []},
         "fn": lambda _: check_app_updates(),
     },
+    # ── Homebrew management ───────────────────────────────────────────────────
+    "brew_list": {
+        "description": (
+            "List all installed Homebrew packages (formulae and/or casks). "
+            "Requires allow_brew in ~/.syscontrol/config.json. macOS only."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": "'formulae', 'casks', or 'all' (default).",
+                    "default": "all",
+                },
+            },
+            "required": [],
+        },
+        "fn": lambda args: brew_list(args.get("kind", "all")),
+    },
+    "brew_install": {
+        "description": (
+            "Install a Homebrew formula or cask. "
+            "Prefix with '--cask' for cask installs (e.g. '--cask firefox'). "
+            "May take up to 5 minutes for large packages. "
+            "Requires allow_brew in ~/.syscontrol/config.json. macOS only."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "package": {
+                    "type": "string",
+                    "description": "Package name to install (e.g. 'ripgrep', '--cask firefox').",
+                },
+            },
+            "required": ["package"],
+        },
+        "fn": lambda args: brew_install(args["package"]),
+    },
+    "brew_upgrade": {
+        "description": (
+            "Upgrade one or all installed Homebrew packages. "
+            "Leave package empty to upgrade everything. "
+            "Requires allow_brew in ~/.syscontrol/config.json. macOS only."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "package": {
+                    "type": "string",
+                    "description": "Package name to upgrade, or empty to upgrade all (default: all).",
+                    "default": "",
+                },
+            },
+            "required": [],
+        },
+        "fn": lambda args: brew_upgrade(args.get("package", "")),
+    },
+    "brew_uninstall": {
+        "description": (
+            "Uninstall a Homebrew formula or cask. "
+            "Requires allow_brew in ~/.syscontrol/config.json. macOS only."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "package": {
+                    "type": "string",
+                    "description": "Package name to uninstall.",
+                },
+            },
+            "required": ["package"],
+        },
+        "fn": lambda args: brew_uninstall(args["package"]),
+    },
     "track_package": {
         "description": (
             "Track a package by tracking number. Auto-detects the carrier (UPS, USPS, FedEx, DHL). "
@@ -4622,6 +5685,81 @@ TOOLS = {
         },
         "fn": lambda args: get_imessage_history(args["contact"], args.get("limit", 20)),
     },
+    # ── Email ─────────────────────────────────────────────────────────────────
+    "read_emails": {
+        "description": (
+            "Return recent emails from a Mail.app mailbox. "
+            "Returns subject, sender, date, and a short preview for each message. "
+            "Requires allow_email in ~/.syscontrol/config.json. macOS only."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folder": {
+                    "type": "string",
+                    "description": "Mailbox name (default: 'INBOX').",
+                    "default": "INBOX",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Maximum messages to return (1–50, default 10).",
+                    "default": 10,
+                },
+            },
+            "required": [],
+        },
+        "fn": lambda args: read_emails(args.get("folder", "INBOX"), args.get("count", 10)),
+    },
+    "send_email": {
+        "description": (
+            "Send an email via Mail.app. "
+            "Requires a configured sending account in Mail.app and allow_email in config. "
+            "macOS only."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "to":      {"type": "string", "description": "Recipient email address."},
+                "subject": {"type": "string", "description": "Email subject line."},
+                "body":    {"type": "string", "description": "Plain-text message body."},
+                "cc": {
+                    "type": "string",
+                    "description": "Optional CC email address.",
+                    "default": "",
+                },
+            },
+            "required": ["to", "subject", "body"],
+        },
+        "fn": lambda args: send_email(
+            args["to"], args["subject"], args["body"], args.get("cc", ""),
+        ),
+    },
+    "search_emails": {
+        "description": (
+            "Search emails across all Mail.app accounts and mailboxes. "
+            "Matches against subject, sender, and body text. "
+            "Requires allow_email in ~/.syscontrol/config.json. macOS only."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search term (subject, sender name, or body text).",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Maximum results (1–50, default 20).",
+                    "default": 20,
+                },
+            },
+            "required": ["query"],
+        },
+        "fn": lambda args: search_emails(args["query"], args.get("count", 20)),
+    },
     # ── Clipboard ─────────────────────────────────────────────────────────────
     "get_clipboard": {
         "description": (
@@ -4743,6 +5881,42 @@ TOOLS = {
             "required": ["level"],
         },
         "fn": lambda args: set_volume(args["level"]),
+    },
+    # ── Media ─────────────────────────────────────────────────────────────────
+    "get_now_playing": {
+        "description": (
+            "Return the currently playing track in Music.app or Spotify. "
+            "Shows track name, artist, album, playback position, and duration. "
+            "Returns 'nothing_playing' if no media app is active. macOS only."
+        ),
+        "parallel": True,
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": lambda _: get_now_playing(),
+    },
+    "media_control": {
+        "description": (
+            "Control media playback in Music.app or Spotify. "
+            "Actions: play, pause, play_pause, next, previous, stop. "
+            "Auto-detects the active player if app is not specified. macOS only."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "Playback action: 'play', 'pause', 'play_pause', 'next', 'previous', or 'stop'.",
+                    "enum": ["play", "pause", "play_pause", "next", "previous", "stop"],
+                },
+                "app": {
+                    "type": "string",
+                    "description": "Target app: 'Music' or 'Spotify' (default: auto-detect).",
+                    "default": "",
+                },
+            },
+            "required": ["action"],
+        },
+        "fn": lambda args: media_control(args["action"], args.get("app", "")),
     },
     # ── Wi-Fi ─────────────────────────────────────────────────────────────────
     "get_wifi_networks": {
@@ -4998,6 +6172,151 @@ TOOLS = {
         },
         "fn": lambda args: read_pdf(args["path"], args.get("max_pages", _DEFAULT_PDF_PAGES)),
     },
+    # ── File management ───────────────────────────────────────────────────────
+    "list_directory": {
+        "description": (
+            "List the contents of a directory. Returns each entry's name, type (file/dir), "
+            "size, and modification time. Use to browse the filesystem or verify file presence. "
+            "Requires allow_file_read in ~/.syscontrol/config.json."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory path to list (default: home directory).",
+                    "default": "",
+                },
+                "show_hidden": {
+                    "type": "boolean",
+                    "description": "Include entries starting with '.' (default false).",
+                    "default": False,
+                },
+            },
+            "required": [],
+        },
+        "fn": lambda args: list_directory(args.get("path", ""), args.get("show_hidden", False)),
+    },
+    "move_file": {
+        "description": (
+            "Move or rename a file or directory. "
+            "Use for renaming files, moving files to different folders, or reorganising directories. "
+            "Requires allow_file_write in ~/.syscontrol/config.json."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "src": {"type": "string", "description": "Source path (absolute or home-relative)."},
+                "dst": {"type": "string", "description": "Destination path or target directory."},
+            },
+            "required": ["src", "dst"],
+        },
+        "fn": lambda args: move_file(args["src"], args["dst"]),
+    },
+    "copy_file": {
+        "description": (
+            "Copy a file to a new location. "
+            "If dst is a directory, the file is copied into it preserving its name. "
+            "Requires allow_file_write in ~/.syscontrol/config.json."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "src":       {"type": "string", "description": "Source file path."},
+                "dst":       {"type": "string", "description": "Destination file path or directory."},
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "Replace destination if it exists (default false).",
+                    "default": False,
+                },
+            },
+            "required": ["src", "dst"],
+        },
+        "fn": lambda args: copy_file(args["src"], args["dst"], args.get("overwrite", False)),
+    },
+    "delete_file": {
+        "description": (
+            "Delete a file or directory. "
+            "On macOS, moves to Trash by default (recoverable); pass permanent=true to permanently delete. "
+            "Safety: only allows deletion within the home directory. "
+            "Requires allow_file_write in ~/.syscontrol/config.json."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path":      {"type": "string", "description": "Path to the file or directory to remove."},
+                "permanent": {
+                    "type": "boolean",
+                    "description": "Permanently delete instead of moving to Trash (default false).",
+                    "default": False,
+                },
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: delete_file(args["path"], args.get("permanent", False)),
+    },
+    "create_directory": {
+        "description": (
+            "Create a new directory (and any missing parent directories). "
+            "Requires allow_file_write in ~/.syscontrol/config.json."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute or home-relative path for the new directory."},
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: create_directory(args["path"]),
+    },
+    "search_files": {
+        "description": (
+            "Search for files using macOS Spotlight (mdfind). "
+            "Much faster than find — searches the entire system instantly. "
+            "Use for finding files by name, content keywords, or type. "
+            "macOS only."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "File name fragment or Spotlight query (e.g. 'budget', 'author:Alice').",
+                },
+                "scope": {
+                    "type": "string",
+                    "description": "Directory to restrict the search to (default: home directory).",
+                    "default": "~",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": (
+                        "Optional type filter: 'pdf', 'image', 'video', 'audio', "
+                        "'folder', 'application', 'code', or 'document'."
+                    ),
+                    "default": "",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum results to return (1–200, default 50).",
+                    "default": 50,
+                },
+            },
+            "required": ["query"],
+        },
+        "fn": lambda args: search_files(
+            args["query"],
+            args.get("scope", "~"),
+            args.get("kind", ""),
+            args.get("limit", 50),
+        ),
+    },
     # ── Shell ─────────────────────────────────────────────────────────────────
     "run_shell_command": {
         "description": (
@@ -5065,6 +6384,72 @@ TOOLS = {
             "required": ["name"],
         },
         "fn": lambda args: get_contact(args["name"]),
+    },
+    # ── Notes ─────────────────────────────────────────────────────────────────
+    "list_notes": {
+        "description": (
+            "List notes from macOS Notes.app. Returns title, folder, and timestamps. "
+            "Optionally filter by folder name. "
+            "Requires allow_notes in ~/.syscontrol/config.json. macOS only."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folder": {
+                    "type": "string",
+                    "description": "Folder name to filter by (default: all folders).",
+                    "default": "",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Maximum notes to return (1–100, default 20).",
+                    "default": 20,
+                },
+            },
+            "required": [],
+        },
+        "fn": lambda args: list_notes(args.get("folder", ""), args.get("count", 20)),
+    },
+    "read_note": {
+        "description": (
+            "Read the full body of a note from macOS Notes.app by title (partial match). "
+            "Requires allow_notes in ~/.syscontrol/config.json. macOS only."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Full or partial note title to search for (case-insensitive).",
+                },
+            },
+            "required": ["name"],
+        },
+        "fn": lambda args: read_note(args["name"]),
+    },
+    "create_note": {
+        "description": (
+            "Create a new note in macOS Notes.app with a title and body. "
+            "Optionally specify a folder. "
+            "Requires allow_notes in ~/.syscontrol/config.json. macOS only."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title":  {"type": "string", "description": "Note title."},
+                "body":   {"type": "string", "description": "Note body text."},
+                "folder": {
+                    "type": "string",
+                    "description": "Folder to create the note in (default: default Notes folder).",
+                    "default": "",
+                },
+            },
+            "required": ["title", "body"],
+        },
+        "fn": lambda args: create_note(args["title"], args["body"], args.get("folder", "")),
     },
     # ── Shortcuts & System ────────────────────────────────────────────────────
     "run_shortcut": {
