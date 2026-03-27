@@ -14,6 +14,9 @@ struct SettingsView: View {
     @State private var localModels: [String] = []
     @State private var validationError: String?
     @State private var isRefreshingModels = false
+    @State private var allowDeepResearch: Bool = false
+
+    private let permissionStore = PermissionConfigStore()
 
     enum ProviderKind: String, CaseIterable {
         case local
@@ -66,6 +69,20 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Tools") {
+                Toggle(isOn: $allowDeepResearch) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Deep Research")
+                        Text("Multi-step web research with source verification. Takes 1–3 minutes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: allowDeepResearch) { _, newValue in
+                    permissionStore.set("allow_deep_research", newValue)
+                }
+            }
+
             Section("About & Updates") {
                 LabeledContent("Version", value: appState.updateService.currentVersion)
 
@@ -84,7 +101,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 480)
+        .frame(width: 500, height: 560)
         .navigationTitle("Settings")
         .onAppear {
             loadCurrentConfiguration()
@@ -182,6 +199,7 @@ struct SettingsView: View {
             cloudBaseURL = config.baseURL
             cloudModel = config.model
         }
+        allowDeepResearch = permissionStore.load()["allow_deep_research"] ?? false
     }
 
     private func apply() {

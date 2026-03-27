@@ -1,6 +1,6 @@
 [project]
 name = "syscontrol"
-version = "1.1.0b1"
+version = "1.1.0"
 description = "All-In-One AI agent with MCP tool server; Ultron but slightly weaker and nicer 😉"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,7 @@ dependencies = [
     "openai>=2.26.0",
     "openpyxl>=3.1",
     "python-docx>=1.1",
+    "pypdf>=4.0",
 ]
 
 [project.scripts]

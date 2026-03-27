@@ -2,7 +2,7 @@
 
 An AI agent for your Mac that answers questions about your system — and can extend itself with new tools on the fly.
 
-64 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, shell, spreadsheets, Word documents, deep web research, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
+65 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, shell, spreadsheets, Word documents, PDFs, deep web research, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
 Three ways to run it — pick whichever fits your workflow:
 
@@ -326,6 +326,7 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 | `edit_spreadsheet` | Write cells (A1 notation) or append rows to `.xlsx` / `.csv`. Create new files. |
 | `read_document` | Read paragraphs from `.docx`, `.txt`, or `.md` with word count |
 | `edit_document` | Find/replace text, overwrite paragraphs, or append to `.docx` files |
+| `read_pdf` | Extract text from PDF files, page by page (up to 200 pages) |
 | `run_shell_command` | Execute a bash command and return stdout/stderr. **Disabled by default.** |
 
 ### Calendar, Contacts & Logs

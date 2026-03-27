@@ -2,7 +2,7 @@
 
 ## What is SysControl?
 
-An AI agent for macOS that answers questions about your system using 64 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
+An AI agent for macOS that answers questions about your system using 65 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
 
 **Repo:** `ks6573/SysControl` on GitHub.
 
@@ -12,7 +12,7 @@ An AI agent for macOS that answers questions about your system using 64 MCP tool
 
 ```
 agent.py               ← CLI entry shim → agent.cli:main()
-mcp/server.py          ← MCP server (~5200 lines, all 64 tools, JSON-RPC over stdio)
+mcp/server.py          ← MCP server (~5400 lines, all 65 tools, JSON-RPC over stdio)
 mcp/prompt.json        ← System prompt injected into all LLM requests
 agent/core.py          ← Shared: MCPClient, MCPClientPool, run_streaming_turn(), TurnCallbacks
 agent/bridge.py        ← JSON-over-stdio bridge for the Swift frontend
@@ -25,7 +25,7 @@ swift/                 ← Native SwiftUI macOS app (macOS 14+)
     Services/          ← BackendService.swift (bridge IPC), UpdateService.swift
     Views/             ← SwiftUI views (Chat, Sidebar, Settings, InputBar, etc.)
     Models/            ← ChatMessage, ChatSession, ProviderConfiguration, SavedChat
-    Storage/           ← PersistenceManager, ChatHistoryManager, ProviderConfigStore
+    Storage/           ← PersistenceManager, ChatHistoryManager, ProviderConfigStore, PermissionConfigStore
   Package.swift        ← SPM manifest — explicit source list, must be updated when adding files
   build.sh             ← Builds .app bundle + optional .dmg (reads VERSION → Info.plist)
   install.sh           ← One-liner installer: clone, build, install to /Applications
@@ -136,7 +136,7 @@ Detection: `~/.syscontrol/build/.git` exists → source install.
 2. Register in the `TOOLS` dict (same file) with `description`, `parallel`, `inputSchema`, `fn`
 3. Update tool count in `README.md` and `CLAUDE.md` if changed
 4. For chart tools: return `(data_dict, base64_png)` tuple, use `_style_chart_dark()` + `_fig_to_b64()` helpers
-5. For document tools: gate with `allow_file_read` / `allow_file_write`; use `openpyxl` (xlsx), `python-docx` (docx), or stdlib `csv`
+5. For document tools: gate with `allow_file_read` / `allow_file_write`; use `openpyxl` (xlsx), `python-docx` (docx), `pypdf` (pdf), or stdlib `csv`
 
 ### Adding a new Swift file
 1. Create file under `swift/SysControl/`
@@ -181,7 +181,7 @@ Read specific sections, not entire files:
 
 | File | ~Lines | Notes |
 |---|---|---|
-| `mcp/server.py` | ~5200 | All MCP tools — largest file |
+| `mcp/server.py` | ~5400 | All MCP tools — largest file |
 | `agent/core.py` | ~764 | Shared agent infrastructure |
 | `agent/cli.py` | ~599 | CLI interface |
 | `deep_research/` | ~800 | 12 modules — orchestrator, schemas, LLM steps, retriever, evidence store |
@@ -209,4 +209,4 @@ syscontrol-server → mcp.server:main
 ```
 
 ### Python dependencies
-Core: `psutil`, `matplotlib`, `openai`, `openpyxl`, `python-docx`. Optional groups: `gpu` (nvidia-ml-py), `dev` (ruff, mypy, pytest).
+Core: `psutil`, `matplotlib`, `openai`, `openpyxl`, `python-docx`, `pypdf`. Optional groups: `gpu` (nvidia-ml-py), `dev` (ruff, mypy, pytest).

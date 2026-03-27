@@ -76,6 +76,13 @@ try:
 except ImportError:
     _HAS_DOCX = False
 
+# Optional PDF support via pypdf.
+try:
+    from pypdf import PdfReader as _PdfReader
+    _HAS_PYPDF = True
+except ImportError:
+    _HAS_PYPDF = False
+
 # ── Platform constants (computed once at startup) ─────────────────────────────
 _SYSTEM  = platform.system()
 _MACHINE = platform.machine()
@@ -3402,6 +3409,84 @@ def edit_document(
         return {"error": str(e)}
 
 
+# ── PDF tools ─────────────────────────────────────────────────────────────────
+
+_MAX_PDF_PAGES = 200
+_DEFAULT_PDF_PAGES = 50
+
+
+def read_pdf(path: str, max_pages: int = _DEFAULT_PDF_PAGES) -> dict:
+    """Extract text from a PDF file, one entry per page.
+
+    Args:
+        path: Absolute or home-relative path to the ``.pdf`` file.
+        max_pages: Maximum number of pages to extract (1–200).
+            Pages beyond this limit are silently skipped.
+
+    Returns:
+        A dict with ``path``, ``total_pages``, ``pages_returned``,
+        ``word_count``, and ``pages`` (list of ``{page, text}`` dicts).
+        Includes a ``note`` key when the PDF was truncated.
+    """
+    denied = _permission_check("allow_file_read", "read_pdf")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    if not _HAS_PYPDF:
+        return {"error": "pypdf is not installed. Run: uv add pypdf"}
+    try:
+        # C1: coerce max_pages defensively — JSON input may arrive as float/str.
+        try:
+            max_pages = int(max_pages)
+        except (TypeError, ValueError):
+            max_pages = _DEFAULT_PDF_PAGES
+
+        p = pathlib.Path(path).expanduser().resolve()
+        if not p.exists():
+            return {"error": f"File not found: {p}"}
+        if not p.is_file():
+            return {"error": f"Not a file: {p}"}
+        if p.suffix.lower() != ".pdf":
+            return {"error": f"Expected a .pdf file, got '{p.suffix}'."}
+
+        clamped = max(1, min(max_pages, _MAX_PDF_PAGES))
+        reader = _PdfReader(str(p))
+        if reader.is_encrypted:
+            return {"error": "PDF is encrypted/password-protected and cannot be read."}
+
+        total_pages = len(reader.pages)
+        pages: list[dict] = []
+        for i, page in enumerate(reader.pages[:clamped]):
+            # C2: isolate per-page extraction so one corrupt page doesn't
+            # abort the entire document.
+            try:
+                text = (page.extract_text() or "").strip()
+            except Exception:
+                text = ""
+            if text:
+                pages.append({"page": i + 1, "text": text})
+
+        word_count = sum(len(pg["text"].split()) for pg in pages)
+        result: dict = {
+            "path": str(p),
+            "total_pages": total_pages,
+            "pages_returned": len(pages),
+            "word_count": word_count,
+            "pages": pages,
+        }
+        if total_pages > clamped:
+            result["note"] = (
+                f"PDF has {total_pages} pages; only the first {clamped} were read. "
+                f"Pass max_pages to read more (up to {_MAX_PDF_PAGES})."
+            )
+        return result
+    except PermissionError:
+        return {"error": f"Permission denied: {path}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── Deep research ──────────────────────────────────────────────────────────────
 
 
@@ -4885,6 +4970,33 @@ TOOLS = {
             args.get("append_paragraphs"),
             args.get("set_paragraph"),
         ),
+    },
+    "read_pdf": {
+        "description": (
+            "Extract text from a PDF file, returned page by page. "
+            "Use this when a user shares or mentions a PDF and wants you to read, summarise, "
+            "or answer questions from its contents. "
+            "Supports up to 200 pages per call (default 50); pass max_pages for larger documents. "
+            "Encrypted/password-protected PDFs are not supported. "
+            "Requires allow_file_read in ~/.syscontrol/config.json."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute or home-relative path to the .pdf file.",
+                },
+                "max_pages": {
+                    "type": "integer",
+                    "description": f"Maximum number of pages to read (1-{_MAX_PDF_PAGES}, default {_DEFAULT_PDF_PAGES}).",
+                    "default": _DEFAULT_PDF_PAGES,
+                },
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: read_pdf(args["path"], args.get("max_pages", _DEFAULT_PDF_PAGES)),
     },
     # ── Shell ─────────────────────────────────────────────────────────────────
     "run_shell_command": {

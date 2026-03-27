@@ -21,6 +21,7 @@ let package = Package(
                 "Services/UpdateService.swift",
                 "Storage/ChatHistoryManager.swift",
                 "Storage/PersistenceManager.swift",
+                "Storage/PermissionConfigStore.swift",
                 "Storage/ProviderConfigStore.swift",
                 "Views/ContentView.swift",
                 "Views/SidebarView.swift",
