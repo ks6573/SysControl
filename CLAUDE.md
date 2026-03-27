@@ -2,7 +2,7 @@
 
 ## What is SysControl?
 
-An AI agent for macOS that answers questions about your system using 83 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
+An AI agent for macOS that answers questions about your system using 85 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
 
 **Repo:** `ks6573/SysControl` on GitHub.
 
@@ -12,11 +12,13 @@ An AI agent for macOS that answers questions about your system using 83 MCP tool
 
 ```
 agent.py               ← CLI entry shim → agent.cli:main()
-mcp/server.py          ← MCP server (~6200 lines, all 83 tools, JSON-RPC over stdio)
+mcp/server.py          ← MCP server (~6800 lines, all 85 tools, JSON-RPC over stdio)
 mcp/prompt.json        ← System prompt injected into all LLM requests
 agent/core.py          ← Shared: MCPClient, MCPClientPool, run_streaming_turn(), TurnCallbacks
 agent/bridge.py        ← JSON-over-stdio bridge for the Swift frontend
 agent/cli.py           ← Interactive terminal agent
+agent/agents.py        ← Sub-agent specs: AgentSpec, AgentRegistry, built-in agents
+agent/runner.py        ← Sub-agent runner: run_subagent() with isolated context + filtered tools
 deep_research/         ← Deep research agent: iterative web research with claim verification
 scripts/make_icon.py   ← Generates .icns app icon from source image
 swift/                 ← Native SwiftUI macOS app (macOS 14+)
@@ -39,6 +41,7 @@ VERSION                ← Single source of truth for app version
 - **Streaming loop:** `run_streaming_turn()` in `core.py` handles the LLM ↔ tool-call loop with `TurnCallbacks` for UI events
 - **Chart images:** MCP tools return `(data, base64_png)` tuples → `call_tool()` saves PNG to temp file → bridge emits `chart_image` event → Swift renders inline via `ChartImageView`
 - **Deep research:** `deep_research` MCP tool → `deep_research/orchestrator.py` creates its own OpenAI client from env vars, runs iterative plan→search→extract→verify→synthesize loop using existing `web_search()` / `web_fetch()` functions
+- **Sub-agents:** `run_agent` MCP tool → `agent/runner.py:run_subagent()` spawns an isolated MCPClient subprocess (with `SYSCONTROL_AGENT_DEPTH=1` to block nesting), filters tools to the spec's allowlist, and calls `run_streaming_turn()` with a fresh message history. `agent/agents.py` holds `AgentSpec` definitions and the `AgentRegistry`.
 
 ### Bridge protocol events (bridge → Swift)
 
@@ -171,7 +174,7 @@ pytest                               # tests (testpaths = ["tests"])
 
 Sensitive tools disabled by default. Enabled via `~/.syscontrol/config.json`:
 
-`allow_shell`, `allow_messaging`, `allow_message_history`, `allow_screenshot`, `allow_file_read`, `allow_file_write`, `allow_calendar`, `allow_contacts`, `allow_accessibility`, `allow_tool_creation`, `allow_deep_research`, `allow_email`, `allow_notes`, `allow_brew`
+`allow_shell`, `allow_messaging`, `allow_message_history`, `allow_screenshot`, `allow_file_read`, `allow_file_write`, `allow_calendar`, `allow_contacts`, `allow_accessibility`, `allow_tool_creation`, `allow_deep_research`, `allow_email`, `allow_notes`, `allow_brew`, `allow_agents`
 
 ---
 
@@ -181,9 +184,11 @@ Read specific sections, not entire files:
 
 | File | ~Lines | Notes |
 |---|---|---|
-| `mcp/server.py` | ~6200 | All MCP tools — largest file |
-| `agent/core.py` | ~764 | Shared agent infrastructure |
+| `mcp/server.py` | ~6800 | All MCP tools — largest file |
+| `agent/core.py` | ~770 | Shared agent infrastructure |
 | `agent/cli.py` | ~599 | CLI interface |
+| `agent/agents.py` | ~160 | AgentSpec, AgentRegistry, 4 built-in agents |
+| `agent/runner.py` | ~120 | run_subagent() — isolated sub-agent execution |
 | `deep_research/` | ~800 | 12 modules — orchestrator, schemas, LLM steps, retriever, evidence store |
 
 ---

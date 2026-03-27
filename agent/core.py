@@ -139,12 +139,19 @@ def _read_stderr_safe(
 class MCPClient:
     """Minimal JSON-RPC client that talks to mcp/server.py over stdio."""
 
-    def __init__(self) -> None:
+    def __init__(self, extra_env: dict[str, str] | None = None) -> None:
         """Spawn the MCP server subprocess and perform the JSON-RPC handshake.
 
         In a frozen PyInstaller bundle the executable re-invokes itself with
         ``--mcp-server`` so the entry-point can dispatch to mcp/server.py.
         Otherwise the server is launched directly via ``sys.executable``.
+
+        Args:
+            extra_env: Optional mapping of additional environment variables to
+                inject into the subprocess.  Merged with the current process
+                environment (``extra_env`` values take precedence).  Pass
+                ``{"SYSCONTROL_AGENT_DEPTH": "1"}`` for sub-agent processes to
+                prevent nested agent spawning.
 
         Raises:
             RuntimeError: If the subprocess fails to start or the handshake
@@ -158,6 +165,8 @@ class MCPClient:
         else:
             cmd = [sys.executable, str(SERVER_PATH)]
 
+        proc_env = {**os.environ, **extra_env} if extra_env else None
+
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -165,6 +174,7 @@ class MCPClient:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=proc_env,
         )
         assert self.proc.stdin is not None, "Popen stdin must be a pipe"
         assert self.proc.stdout is not None, "Popen stdout must be a pipe"

@@ -2,7 +2,7 @@
 
 An AI agent for your Mac that answers questions about your system — and can extend itself with new tools on the fly.
 
-83 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, email, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, Notes, Homebrew, media control, file management, Spotlight search, spreadsheets, Word documents, PDFs, deep web research, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
+85 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, email, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, Notes, Homebrew, media control, file management, Spotlight search, spreadsheets, Word documents, PDFs, deep web research, sub-agent orchestration, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
 Three ways to run it — pick whichever fits your workflow:
 
@@ -173,7 +173,8 @@ Sensitive tools are **disabled by default**. Enable them in `~/.syscontrol/confi
   "allow_deep_research":   true,
   "allow_email":           true,
   "allow_notes":           true,
-  "allow_brew":            true
+  "allow_brew":            true,
+  "allow_agents":          true
 }
 ```
 
@@ -232,7 +233,7 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 
 ---
 
-## Tools (64 total)
+## Tools (85 total)
 
 ### Monitoring
 
@@ -385,6 +386,13 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 |---|---|
 | `deep_research` | Multi-step web research agent: plans subquestions, searches multiple sources, extracts and cross-verifies claims, returns a citation-backed answer. Takes 1-3 minutes. |
 
+### Sub-Agent Orchestration
+
+| Tool | What it does |
+|---|---|
+| `list_agents` | List available sub-agents with names and descriptions |
+| `run_agent` | Delegate a focused task to a named sub-agent (explorer, analyst, researcher, writer) running in an isolated subprocess with restricted tools. Requires `allow_agents`. |
+
 ### Self-Extension
 
 | Tool | What it does |
@@ -418,10 +426,12 @@ SysControl/
 │   ├── cli.py               # Interactive terminal REPL
 │   ├── core.py              # Shared agent logic: MCP client, streaming loop, helpers
 │   ├── bridge.py            # JSON-over-stdio bridge for the Swift app
+│   ├── agents.py            # Sub-agent specs: AgentSpec, AgentRegistry, built-in agents
+│   ├── runner.py            # Sub-agent runner: isolated context, filtered tools
 │   ├── paths.py             # Frozen-app-aware path resolution
 │   └── remote.py            # Telegram / WhatsApp / Messenger webhook bridge
 ├── mcp/
-│   ├── server.py            # MCP tool server (83 tools + self-extension)
+│   ├── server.py            # MCP tool server (85 tools + self-extension)
 │   └── prompt.json          # System prompt for the agent
 ├── deep_research/           # Deep research agent (iterative web research with citation verification)
 ├── swift/
@@ -451,7 +461,7 @@ SysControl/
 └────────┬─────────────┘
          │  JSON-RPC (stdio)
 ┌────────▼─────────────┐
-│    MCP Server        │   83 tools, self-extension, permission checks
+│    MCP Server        │   85 tools, self-extension, permission checks
 │  (mcp/server.py)     │   Concurrent tool execution via client pool
 └──────────────────────┘
 ```

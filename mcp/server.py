@@ -4268,6 +4268,69 @@ def search_files(
 # ── Deep research ──────────────────────────────────────────────────────────────
 
 
+def _list_agents() -> dict:
+    """Return available sub-agents and their one-line descriptions."""
+    try:
+        from agent.agents import list_agents  # lazy import — avoids circular dep at load
+        return {"agents": list_agents()}
+    except Exception as exc:
+        return {"error": f"Failed to list agents: {exc}"}
+
+
+def _run_agent(agent_name: str, task: str) -> dict:
+    """Delegate *task* to the named sub-agent and return its final output.
+
+    The sub-agent runs in a separate MCPClient subprocess with
+    ``SYSCONTROL_AGENT_DEPTH=1`` set in its environment, so nested
+    ``run_agent`` calls are blocked at that level.
+    """
+    # Depth guard — block recursive spawning from within a sub-agent process.
+    try:
+        depth = int(os.environ.get("SYSCONTROL_AGENT_DEPTH", "0"))
+    except (ValueError, TypeError):
+        depth = 0
+    if depth > 0:
+        return {
+            "error": "Nested agent spawning is not permitted.",
+            "hint": "Sub-agents cannot call run_agent recursively.",
+        }
+
+    denied = _permission_check("allow_agents", "run_agent")
+    if denied:
+        return denied
+
+    if not agent_name or not agent_name.strip():
+        return {"error": "agent_name is required."}
+    if not task or not task.strip():
+        return {"error": "task is required."}
+
+    api_key  = os.environ.get("SYSCONTROL_API_KEY", "ollama")
+    base_url = os.environ.get("SYSCONTROL_BASE_URL", "http://localhost:11434/v1")
+    model    = os.environ.get("SYSCONTROL_MODEL", "qwen3:30b")
+
+    try:
+        # Lazy imports keep server startup fast and avoid circular references.
+        from agent.agents import AgentNotFoundError, get_agent, list_agents
+        from agent.runner import run_subagent
+    except ImportError as exc:
+        return {"error": f"Agent module unavailable: {exc}"}
+
+    try:
+        spec = get_agent(agent_name.strip())
+    except AgentNotFoundError:
+        return {
+            "error": f"Agent '{agent_name}' not found.",
+            "available": list_agents(),
+        }
+
+    try:
+        llm = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+        result = run_subagent(spec, task.strip(), llm, model)
+        return {"agent": spec.name, "task": task.strip(), "result": result}
+    except Exception as exc:
+        return {"error": f"Agent '{agent_name}' failed: {exc}"}
+
+
 def _run_deep_research(
     question: str, max_sources: int = 15, max_loops: int = 5,
 ) -> dict:
@@ -4318,7 +4381,8 @@ def _run_deep_research(
 #     "allow_accessibility":   true,
 #     "allow_email":           true,
 #     "allow_notes":           true,
-#     "allow_brew":            true
+#     "allow_brew":            true,
+#     "allow_agents":          true
 #   }
 
 _SYSCONTROL_CONFIG_FILE = _REMINDER_DIR / "config.json"
@@ -6647,6 +6711,52 @@ TOOLS = {
             args["question"],
             args.get("max_sources", 15),
             args.get("max_loops", 5),
+        ),
+    },
+    # ── Sub-agent orchestration ────────────────────────────────────────────────
+    "list_agents": {
+        "description": (
+            "List all available sub-agents with their names and descriptions. "
+            "Call this before run_agent if you are unsure which agent to delegate to."
+        ),
+        "parallel": True,
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "fn": lambda _: _list_agents(),
+    },
+    "run_agent": {
+        "description": (
+            "Delegate a focused task to a named sub-agent that runs in an isolated "
+            "context with a restricted tool set. The sub-agent completes the task "
+            "independently and returns only its final answer. "
+            "Use list_agents to discover available agents. "
+            "Do not delegate tasks you can complete directly with other tools. "
+            "Requires allow_agents in ~/.syscontrol/config.json."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_name": {
+                    "type": "string",
+                    "description": (
+                        "Name of the sub-agent (e.g. 'explorer', 'analyst', "
+                        "'researcher', 'writer'). Use list_agents to see all options."
+                    ),
+                },
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "Clear, self-contained description of the task. "
+                        "Include all context the sub-agent needs — it has no "
+                        "access to the parent conversation history."
+                    ),
+                },
+            },
+            "required": ["agent_name", "task"],
+        },
+        "fn": lambda args: _run_agent(
+            args["agent_name"],
+            args["task"],
         ),
     },
     # ── User-Defined Tools (registry) ──────────────────────────────────────────
