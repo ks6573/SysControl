@@ -2,7 +2,7 @@
 
 ## What is SysControl?
 
-An AI agent for macOS that answers questions about your system using 59+ MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
+An AI agent for macOS that answers questions about your system using 64 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
 
 **Repo:** `ks6573/SysControl` on GitHub.
 
@@ -12,11 +12,12 @@ An AI agent for macOS that answers questions about your system using 59+ MCP too
 
 ```
 agent.py               ← CLI entry shim → agent.cli:main()
-mcp/server.py          ← MCP server (~4650 lines, all 59+ tools, JSON-RPC over stdio)
+mcp/server.py          ← MCP server (~5200 lines, all 64 tools, JSON-RPC over stdio)
 mcp/prompt.json        ← System prompt injected into all LLM requests
 agent/core.py          ← Shared: MCPClient, MCPClientPool, run_streaming_turn(), TurnCallbacks
 agent/bridge.py        ← JSON-over-stdio bridge for the Swift frontend
 agent/cli.py           ← Interactive terminal agent
+deep_research/         ← Deep research agent: iterative web research with claim verification
 scripts/make_icon.py   ← Generates .icns app icon from source image
 swift/                 ← Native SwiftUI macOS app (macOS 14+)
   SysControl/
@@ -37,6 +38,7 @@ VERSION                ← Single source of truth for app version
 - **Bridge → MCP:** `agent/core.py` MCPClient connects to `mcp/server.py` via JSON-RPC over stdio
 - **Streaming loop:** `run_streaming_turn()` in `core.py` handles the LLM ↔ tool-call loop with `TurnCallbacks` for UI events
 - **Chart images:** MCP tools return `(data, base64_png)` tuples → `call_tool()` saves PNG to temp file → bridge emits `chart_image` event → Swift renders inline via `ChartImageView`
+- **Deep research:** `deep_research` MCP tool → `deep_research/orchestrator.py` creates its own OpenAI client from env vars, runs iterative plan→search→extract→verify→synthesize loop using existing `web_search()` / `web_fetch()` functions
 
 ### Bridge protocol events (bridge → Swift)
 
@@ -132,8 +134,9 @@ Detection: `~/.syscontrol/build/.git` exists → source install.
 ### Adding a new MCP tool
 1. Add the tool function to `mcp/server.py`
 2. Register in the `TOOLS` dict (same file) with `description`, `parallel`, `inputSchema`, `fn`
-3. Update tool count in `README.md` if changed
+3. Update tool count in `README.md` and `CLAUDE.md` if changed
 4. For chart tools: return `(data_dict, base64_png)` tuple, use `_style_chart_dark()` + `_fig_to_b64()` helpers
+5. For document tools: gate with `allow_file_read` / `allow_file_write`; use `openpyxl` (xlsx), `python-docx` (docx), or stdlib `csv`
 
 ### Adding a new Swift file
 1. Create file under `swift/SysControl/`
@@ -158,7 +161,7 @@ uv run agent.py                      # CLI
 ### Code quality
 ```bash
 ruff check .                         # lint (E, W, F, I, UP, B, SIM)
-mypy agent/ mcp/                     # type check (python 3.11)
+mypy agent/ mcp/ deep_research/       # type check (python 3.11)
 pytest                               # tests (testpaths = ["tests"])
 ```
 
@@ -168,7 +171,7 @@ pytest                               # tests (testpaths = ["tests"])
 
 Sensitive tools disabled by default. Enabled via `~/.syscontrol/config.json`:
 
-`allow_shell`, `allow_messaging`, `allow_message_history`, `allow_screenshot`, `allow_file_read`, `allow_file_write`, `allow_calendar`, `allow_contacts`, `allow_accessibility`, `allow_tool_creation`
+`allow_shell`, `allow_messaging`, `allow_message_history`, `allow_screenshot`, `allow_file_read`, `allow_file_write`, `allow_calendar`, `allow_contacts`, `allow_accessibility`, `allow_tool_creation`, `allow_deep_research`
 
 ---
 
@@ -178,9 +181,10 @@ Read specific sections, not entire files:
 
 | File | ~Lines | Notes |
 |---|---|---|
-| `mcp/server.py` | ~4650 | All MCP tools — largest file |
+| `mcp/server.py` | ~5200 | All MCP tools — largest file |
 | `agent/core.py` | ~764 | Shared agent infrastructure |
 | `agent/cli.py` | ~599 | CLI interface |
+| `deep_research/` | ~800 | 12 modules — orchestrator, schemas, LLM steps, retriever, evidence store |
 
 ---
 
@@ -205,4 +209,4 @@ syscontrol-server → mcp.server:main
 ```
 
 ### Python dependencies
-Core: `psutil`, `matplotlib`, `openai`. Optional groups: `gpu` (nvidia-ml-py), `dev` (ruff, mypy, pytest).
+Core: `psutil`, `matplotlib`, `openai`, `openpyxl`, `python-docx`. Optional groups: `gpu` (nvidia-ml-py), `dev` (ruff, mypy, pytest).
