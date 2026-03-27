@@ -169,6 +169,7 @@ class ReminderChecker:
     """Background daemon thread that fires due reminders via macOS notifications."""
 
     def __init__(self) -> None:
+        self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="syscontrol-reminders"
         )
@@ -177,11 +178,11 @@ class ReminderChecker:
         self._thread.start()
 
     def _loop(self) -> None:
-        while True:
+        while not self._stop.is_set():
             next_due = self._check()
-            # Sleep until the next reminder is due, capped at 15 s so new
+            # Wait until the next reminder is due, capped at 15 s so new
             # reminders set by other tools are noticed quickly.
-            time.sleep(min(15.0, max(1.0, next_due)))
+            self._stop.wait(timeout=min(15.0, max(1.0, next_due)))
 
     def _check(self) -> float:
         """Check and fire due reminders. Returns seconds until the next unfired reminder."""
@@ -1813,7 +1814,7 @@ def brew_install(package: str) -> dict:
         return {"error": "Homebrew is not installed. Get it at https://brew.sh"}
     pkg = package.strip()
     # Allow --cask prefix; validate the package name portion.
-    name_part = pkg.lstrip("-").lstrip("cask").strip() if pkg.startswith("--cask") else pkg
+    name_part = pkg.removeprefix("--cask").strip() if pkg.startswith("--cask") else pkg
     if not _BREW_PKG_RE.match(name_part):
         return {"error": f"Invalid package name: {pkg!r}"}
     cmd = ["brew", "install"] + pkg.split()
@@ -3731,6 +3732,8 @@ def edit_spreadsheet(
                         for i, ch in enumerate(reversed(col_letter))
                     ) - 1
                     row_idx = int(row_str) - 1
+                    if row_idx > 100_000:
+                        return {"error": f"Row index {row_idx + 1} exceeds CSV safety limit (100 000)."}
                     while len(existing) <= row_idx:
                         existing.append([])
                     while len(existing[row_idx]) <= col_idx:
@@ -4235,7 +4238,8 @@ def search_files(
     kind = kind.lower().strip()
     if kind and kind in _SPOTLIGHT_KIND_MAP:
         kind_pred   = _SPOTLIGHT_KIND_MAP[kind]
-        mdfind_query = f'({kind_pred}) && kMDItemFSName == "*{query}*"cd'
+        safe_q       = query.replace('"', "").replace("*", "").replace("(", "").replace(")", "")
+        mdfind_query = f'({kind_pred}) && kMDItemFSName == "*{safe_q}*"cd'
     else:
         kind         = ""
         mdfind_query = query
@@ -4495,7 +4499,7 @@ def get_contact(name: str) -> dict:
     if not name:
         return {"error": "name is required."}
     script = f"""
-set searchName to {json.dumps(name)}
+set searchName to "{_escape_applescript(name)}"
 set resultList to {{}}
 
 tell application "Contacts"
@@ -4584,7 +4588,7 @@ tell application "Notes"
         on error
             set nFolder to "Notes"
         end try
-        set output to output & nId & "|" & nName & "|" & nFolder & "|" & nCreated & "|" & nModified & "||"
+        set output to output & nId & "|||" & nName & "|||" & nFolder & "|||" & nCreated & "|||" & nModified & "|||||"
     end repeat
 end tell
 return output
@@ -4600,11 +4604,11 @@ return output
                 "hint": "Grant Notes access in System Settings → Privacy & Security → Automation.",
             }
         notes: list[dict] = []
-        for record in proc.stdout.strip().split("||"):
+        for record in proc.stdout.strip().split("|||||"):
             record = record.strip()
             if not record:
                 continue
-            parts = record.split("|")
+            parts = record.split("|||")
             notes.append({
                 "id":       parts[0] if len(parts) > 0 else "",
                 "name":     parts[1] if len(parts) > 1 else "",

@@ -235,7 +235,12 @@ class MCPClient:
                     f"MCP server closed unexpectedly."
                     f"{(' Server error: ' + err) if err else ''}"
                 )
-            return json.loads(raw)
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"MCP server sent malformed JSON: {raw[:200]!r}"
+                ) from exc
 
     def _notify(self, method: str) -> None:
         with self._lock:
@@ -299,6 +304,10 @@ class MCPClient:
             markers appended for any image content items.
         """
         resp = self._send("tools/call", {"name": name, "arguments": arguments or {}})
+        if "error" in resp:
+            err = resp["error"]
+            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            return f"[tool error: {msg}]"
         content = resp.get("result", {}).get("content", [])
         if not content:
             return "[no content returned]"
@@ -375,10 +384,11 @@ def _parse_tool_call_args(tc: dict) -> tuple[str, dict]:
     Returns:
         A ``(name, args)`` tuple.  *args* defaults to ``{}`` on parse failure.
     """
-    name = tc["function"]["name"]
+    fn = tc.get("function") or {}
+    name = fn.get("name", "")
     assert name, "Tool call has empty name — malformed LLM response"
     try:
-        args = json.loads(tc["function"]["arguments"])
+        args = json.loads(fn.get("arguments", "{}"))
     except json.JSONDecodeError:
         args = {}
     return name, args
