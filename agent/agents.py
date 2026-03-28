@@ -11,6 +11,7 @@ explorer    Read-only system investigator (metrics, processes, file listings).
 analyst     Data analyst (reads files, spreadsheets, PDFs, CSVs).
 researcher  Web researcher (search + fetch, no local file access).
 writer      Writer/editor (reads existing content, can write files).
+coder       Code editor/developer (read, search, edit code, git, shell).
 """
 from __future__ import annotations
 
@@ -71,8 +72,22 @@ _RESEARCHER_TOOLS: tuple[str, ...] = (
 )
 
 _WRITER_TOOLS: tuple[str, ...] = (
-    "read_file", "write_file", "list_directory",
+    "read_file", "read_file_lines", "write_file", "edit_file",
+    "list_directory", "grep_files", "glob_files",
     "read_document", "read_pdf",
+)
+
+_CODER_TOOLS: tuple[str, ...] = (
+    # File reading
+    "read_file", "read_file_lines", "list_directory",
+    # File writing / editing
+    "write_file", "edit_file",
+    # Search & navigation
+    "grep_files", "glob_files",
+    # Git awareness
+    "git_status", "git_diff",
+    # Shell (for tests, builds, linters)
+    "run_shell_command",
 )
 
 
@@ -131,6 +146,25 @@ BUILT_IN_AGENTS: dict[str, AgentSpec] = {
             "when editing."
         ),
         allowed_tools=_WRITER_TOOLS,
+    ),
+    "coder": AgentSpec(
+        name="coder",
+        description=(
+            "Code editor and developer. Reads, searches, and edits code files with "
+            "targeted find-and-replace. Can run shell commands for testing and linting. "
+            "Use for code modifications, refactoring, and development tasks."
+        ),
+        system_prompt=(
+            "You are a precise code editor. Follow these rules strictly:\n"
+            "1. ALWAYS read the file before editing — never guess at content.\n"
+            "2. Make minimal, targeted changes using edit_file — avoid rewriting entire files.\n"
+            "3. Use grep_files and glob_files to understand the codebase before making changes.\n"
+            "4. After editing, verify your changes by reading the modified section.\n"
+            "5. Run relevant tests or linters after code changes when possible.\n"
+            "6. Preserve existing code style, indentation, and conventions."
+        ),
+        allowed_tools=_CODER_TOOLS,
+        max_rounds=12,
     ),
 }
 

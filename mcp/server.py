@@ -3610,6 +3610,328 @@ def write_file(path: str, content: str, overwrite: bool = True) -> dict:
         return {"error": str(e)}
 
 
+# ── Code editing & navigation tools ──────────────────────────────────────────
+
+_SKIP_DIRS: frozenset[str] = frozenset({
+    ".git", "node_modules", ".venv", "__pycache__", ".mypy_cache", ".ruff_cache",
+    ".tox", ".eggs", "dist", "build",
+})
+
+_MAX_GREP_FILES = 10_000
+_MAX_GREP_RESULTS = 500
+_MAX_GLOB_RESULTS = 500
+_MAX_DIFF_CHARS = 16_000
+
+
+def read_file_lines(path: str, offset: int = 1, limit: int = 200) -> dict:
+    """Read a file with line numbers, supporting offset/limit for large files."""
+    denied = _permission_check("allow_file_read", "read_file_lines")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    offset = max(1, offset)
+    limit = max(1, min(limit, 2000))
+    try:
+        p = pathlib.Path(path).expanduser().resolve()
+        if not p.exists():
+            return {"error": f"File not found: {p}"}
+        if not p.is_file():
+            return {"error": f"Not a file: {p}"}
+        lines: list[str] = []
+        total_lines: int | None = None
+        with p.open(errors="replace") as f:
+            for lineno, text in enumerate(f, start=1):
+                if lineno < offset:
+                    continue
+                if lineno >= offset + limit:
+                    # Count remaining lines only if file is small enough.
+                    if p.stat().st_size < 10_000_000:
+                        remaining = sum(1 for _ in f)
+                        total_lines = lineno + remaining
+                    break
+                lines.append(f"{lineno:>6}\t{text}")
+            else:
+                # Reached EOF — we know the total.
+                total_lines = (lineno if lines or offset == 1 else 0)  # noqa: F821
+        content = "".join(lines)
+        return {
+            "path": str(p),
+            "offset": offset,
+            "limit": limit,
+            "lines_read": len(lines),
+            "total_lines": total_lines,
+            "content": content,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def glob_files(pattern: str, path: str = ".") -> dict:
+    """Find files matching a glob pattern. Skips common non-project directories."""
+    if not pattern:
+        return {"error": "pattern is required."}
+    try:
+        base = pathlib.Path(path).expanduser().resolve()
+        if not base.exists():
+            return {"error": f"Path not found: {base}"}
+        files: list[dict] = []
+        truncated = False
+        for p in sorted(base.glob(pattern)):
+            if any(part in _SKIP_DIRS for part in p.relative_to(base).parts):
+                continue
+            if not p.is_file():
+                continue
+            if len(files) >= _MAX_GLOB_RESULTS:
+                truncated = True
+                break
+            try:
+                st = p.stat()
+                files.append({
+                    "path": str(p),
+                    "size_bytes": st.st_size,
+                    "modified": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+                })
+            except OSError:
+                continue
+        return {
+            "pattern": pattern,
+            "base_path": str(base),
+            "count": len(files),
+            "truncated": truncated,
+            "files": files,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _grep_single_file(
+    p: pathlib.Path,
+    regex: re.Pattern,  # type: ignore[type-arg]
+    context_lines: int,
+) -> list[dict]:
+    """Search a single file for regex matches, returning results with context."""
+    try:
+        # Skip binary files.
+        with p.open("rb") as bf:
+            chunk = bf.read(8192)
+            if b"\x00" in chunk:
+                return []
+        with p.open(errors="replace") as f:
+            all_lines = f.readlines()
+    except (OSError, PermissionError):
+        return []
+    results: list[dict] = []
+    for i, line in enumerate(all_lines):
+        if regex.search(line):
+            before = [ln.rstrip("\n\r") for ln in all_lines[max(0, i - context_lines):i]]
+            after = [ln.rstrip("\n\r") for ln in all_lines[i + 1:i + 1 + context_lines]]
+            results.append({
+                "file": str(p),
+                "line": i + 1,
+                "text": line.rstrip("\n\r"),
+                "context_before": before if context_lines > 0 else [],
+                "context_after": after if context_lines > 0 else [],
+            })
+    return results
+
+
+def grep_files(
+    pattern: str,
+    path: str = ".",
+    include: str = "",
+    max_results: int = 50,
+    context_lines: int = 0,
+) -> dict:
+    """Search file contents for a regex pattern, like grep/ripgrep."""
+    if not pattern:
+        return {"error": "pattern is required."}
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        return {"error": f"Invalid regex: {e}"}
+    max_results = max(1, min(max_results, _MAX_GREP_RESULTS))
+    context_lines = max(0, min(context_lines, 10))
+    try:
+        base = pathlib.Path(path).expanduser().resolve()
+        if not base.exists():
+            return {"error": f"Path not found: {base}"}
+        # Single file mode.
+        if base.is_file():
+            hits = _grep_single_file(base, regex, context_lines)
+            return {
+                "pattern": pattern, "path": str(base), "include": include,
+                "match_count": len(hits), "file_count": 1 if hits else 0,
+                "truncated": False, "results": hits[:max_results],
+            }
+        glob_pattern = include if include else "*"
+        results: list[dict] = []
+        file_count = 0
+        files_scanned = 0
+        truncated = False
+        for p in sorted(base.rglob(glob_pattern)):
+            if files_scanned >= _MAX_GREP_FILES:
+                truncated = True
+                break
+            if not p.is_file():
+                continue
+            if any(part in _SKIP_DIRS for part in p.relative_to(base).parts):
+                continue
+            files_scanned += 1
+            hits = _grep_single_file(p, regex, context_lines)
+            if hits:
+                file_count += 1
+                results.extend(hits)
+                if len(results) >= max_results:
+                    truncated = True
+                    results = results[:max_results]
+                    break
+        return {
+            "pattern": pattern, "path": str(base), "include": include,
+            "match_count": len(results), "file_count": file_count,
+            "truncated": truncated, "results": results,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def edit_file(
+    path: str, old_string: str, new_string: str, replace_all: bool = False,
+) -> dict:
+    """Make targeted edits to a file using exact find-and-replace."""
+    denied = _permission_check("allow_file_write", "edit_file")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    if not old_string:
+        return {"error": "old_string is required (cannot be empty)."}
+    if old_string == new_string:
+        return {"error": "old_string and new_string are identical."}
+    try:
+        p = pathlib.Path(path).expanduser().resolve()
+        if not p.exists():
+            return {"error": f"File not found: {p}"}
+        if not p.is_file():
+            return {"error": f"Not a file: {p}"}
+        content = p.read_text(errors="replace")
+        count = content.count(old_string)
+        if count == 0:
+            return {"error": "old_string not found in file."}
+        if count > 1 and not replace_all:
+            return {
+                "error": (
+                    f"old_string found {count} times. Use replace_all=true "
+                    "or provide a more specific string that matches exactly once."
+                ),
+            }
+        if replace_all:
+            new_content = content.replace(old_string, new_string)
+            replacements = count
+        else:
+            new_content = content.replace(old_string, new_string, 1)
+            replacements = 1
+        p.write_text(new_content)
+        return {"status": "ok", "path": str(p), "replacements": replacements}
+    except PermissionError:
+        return {"error": f"Permission denied: {path}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _parse_git_porcelain(output: str) -> dict[str, list[str]]:
+    """Parse ``git status --porcelain=v1`` into staged, unstaged, and untracked lists."""
+    staged: list[str] = []
+    unstaged: list[str] = []
+    untracked: list[str] = []
+    for line in output.splitlines():
+        if len(line) < 3:
+            continue
+        x, y, name = line[0], line[1], line[3:]
+        if x == "?" and y == "?":
+            untracked.append(name)
+        else:
+            if x not in (" ", "?"):
+                staged.append(name)
+            if y not in (" ", "?"):
+                unstaged.append(name)
+    return {"staged": staged, "unstaged": unstaged, "untracked": untracked}
+
+
+def _run_git(args: list[str], cwd: str, timeout: int = 10) -> subprocess.CompletedProcess:  # type: ignore[type-arg]
+    """Run a git command and return the CompletedProcess."""
+    return subprocess.run(
+        ["git"] + args, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+    )
+
+
+def git_status(path: str = ".") -> dict:
+    """Show git repository status: branch, files, and recent commits."""
+    try:
+        p = pathlib.Path(path).expanduser().resolve()
+        cwd = str(p if p.is_dir() else p.parent)
+        # Find repo root.
+        r = _run_git(["rev-parse", "--show-toplevel"], cwd=cwd)
+        if r.returncode != 0:
+            return {"error": "Not a git repository (or git is not installed)."}
+        repo_root = r.stdout.strip()
+        # Branch name.
+        r = _run_git(["branch", "--show-current"], cwd=repo_root)
+        branch = r.stdout.strip() or "(detached HEAD)"
+        # Porcelain status.
+        r = _run_git(["status", "--porcelain=v1"], cwd=repo_root)
+        file_lists = _parse_git_porcelain(r.stdout)
+        clean = not any(file_lists.values())
+        # Recent commits.
+        r = _run_git(["log", "--oneline", "-5"], cwd=repo_root)
+        commits = []
+        for line in r.stdout.strip().splitlines():
+            parts = line.split(" ", 1)
+            if len(parts) == 2:
+                commits.append({"hash": parts[0], "message": parts[1]})
+        return {
+            "repo_root": repo_root, "branch": branch, "clean": clean,
+            **file_lists, "recent_commits": commits,
+        }
+    except FileNotFoundError:
+        return {"error": "git is not installed or not in PATH."}
+    except subprocess.TimeoutExpired:
+        return {"error": "git command timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def git_diff(path: str = ".", staged: bool = False) -> dict:
+    """Show git diff output for unstaged or staged changes."""
+    try:
+        p = pathlib.Path(path).expanduser().resolve()
+        cwd = str(p if p.is_dir() else p.parent)
+        r = _run_git(["rev-parse", "--show-toplevel"], cwd=cwd)
+        if r.returncode != 0:
+            return {"error": "Not a git repository (or git is not installed)."}
+        repo_root = r.stdout.strip()
+        cmd = ["diff"]
+        if staged:
+            cmd.append("--cached")
+        if p.is_file():
+            cmd.append(str(p))
+        r = _run_git(cmd, cwd=repo_root)
+        diff_text = r.stdout
+        truncated = len(diff_text) > _MAX_DIFF_CHARS
+        if truncated:
+            diff_text = diff_text[:_MAX_DIFF_CHARS]
+        return {
+            "repo_root": repo_root, "staged": staged, "path": str(p),
+            "diff": diff_text, "truncated": truncated,
+        }
+    except FileNotFoundError:
+        return {"error": "git is not installed or not in PATH."}
+    except subprocess.TimeoutExpired:
+        return {"error": "git command timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── Spreadsheet tools ─────────────────────────────────────────────────────────
 
 _MAX_SPREADSHEET_ROWS = 200
@@ -6049,6 +6371,187 @@ TOOLS = {
             "required": ["path", "content"],
         },
         "fn": lambda args: write_file(args["path"], args["content"], args.get("overwrite", True)),
+    },
+    "read_file_lines": {
+        "description": (
+            "Read a file with line numbers, supporting offset and limit for "
+            "navigating large files. Returns content formatted like 'cat -n'. "
+            "Use this instead of read_file when you need line numbers or "
+            "want to read a specific section. "
+            "Requires allow_file_read in ~/.syscontrol/config.json."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute or home-relative path to the file.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "1-based line number to start reading from (default 1).",
+                    "default": 1,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to return (default 200, max 2000).",
+                    "default": 200,
+                },
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: read_file_lines(
+            args["path"], args.get("offset", 1), args.get("limit", 200),
+        ),
+    },
+    "edit_file": {
+        "description": (
+            "Make targeted edits to a file using find-and-replace. "
+            "Provide the exact text to find (old_string) and its replacement (new_string). "
+            "By default, old_string must appear exactly once (fails if ambiguous). "
+            "Set replace_all=true to replace all occurrences. "
+            "ALWAYS read the file first to get the exact text to replace. "
+            "Requires allow_file_write in ~/.syscontrol/config.json."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute or home-relative path to the file to edit.",
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "Exact text to find in the file. Must be unique unless replace_all=true.",
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement text. Use empty string to delete the matched text.",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace all occurrences instead of requiring uniqueness (default false).",
+                    "default": False,
+                },
+            },
+            "required": ["path", "old_string", "new_string"],
+        },
+        "fn": lambda args: edit_file(
+            args["path"], args["old_string"], args["new_string"],
+            args.get("replace_all", False),
+        ),
+    },
+    "glob_files": {
+        "description": (
+            "Find files matching a glob pattern (e.g. '**/*.py', 'src/**/*.ts'). "
+            "Searches recursively from the given base path. "
+            "Skips .git, node_modules, .venv, __pycache__ directories."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern (e.g. '**/*.py', '*.json', 'src/**/*.ts').",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Base directory to search from (default: current directory).",
+                    "default": ".",
+                },
+            },
+            "required": ["pattern"],
+        },
+        "fn": lambda args: glob_files(args["pattern"], args.get("path", ".")),
+    },
+    "grep_files": {
+        "description": (
+            "Search file contents for a regex pattern, like grep/ripgrep. "
+            "Returns matching lines with file paths and line numbers. "
+            "Optionally filter by file glob (e.g. '*.py') and include context lines. "
+            "Skips binary files and .git, node_modules, .venv, __pycache__."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Regex pattern to search for (Python re syntax).",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "File or directory to search in (default: current directory).",
+                    "default": ".",
+                },
+                "include": {
+                    "type": "string",
+                    "description": "Glob filter for file names (e.g. '*.py', '*.ts'). Empty = all files.",
+                    "default": "",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum matching lines to return (default 50, max 500).",
+                    "default": 50,
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "description": "Lines of context before and after each match (default 0, max 10).",
+                    "default": 0,
+                },
+            },
+            "required": ["pattern"],
+        },
+        "fn": lambda args: grep_files(
+            args["pattern"], args.get("path", "."), args.get("include", ""),
+            args.get("max_results", 50), args.get("context_lines", 0),
+        ),
+    },
+    "git_status": {
+        "description": (
+            "Show git repository status: current branch, staged/unstaged/untracked "
+            "files, and the 5 most recent commits. Auto-detects the repo root."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path inside the git repository (default: current directory).",
+                    "default": ".",
+                },
+            },
+            "required": [],
+        },
+        "fn": lambda args: git_status(args.get("path", ".")),
+    },
+    "git_diff": {
+        "description": (
+            "Show git diff output for a repository. By default shows unstaged changes; "
+            "set staged=true for staged changes. Optionally scope to a specific file path."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path inside the repo, or a specific file (default: repo root).",
+                    "default": ".",
+                },
+                "staged": {
+                    "type": "boolean",
+                    "description": "Show staged (cached) changes instead of unstaged (default false).",
+                    "default": False,
+                },
+            },
+            "required": [],
+        },
+        "fn": lambda args: git_diff(args.get("path", "."), args.get("staged", False)),
     },
     "read_spreadsheet": {
         "description": (

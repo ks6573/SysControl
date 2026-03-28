@@ -2,7 +2,7 @@
 
 ## What is SysControl?
 
-An AI agent for macOS that answers questions about your system using 85 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
+An AI agent for macOS that answers questions about your system using 91 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
 
 **Repo:** `ks6573/SysControl` on GitHub.
 
@@ -12,12 +12,12 @@ An AI agent for macOS that answers questions about your system using 85 MCP tool
 
 ```
 agent.py               ← CLI entry shim → agent.cli:main()
-mcp/server.py          ← MCP server (~6800 lines, all 85 tools, JSON-RPC over stdio)
+mcp/server.py          ← MCP server (~7400 lines, all 91 tools, JSON-RPC over stdio)
 mcp/prompt.json        ← System prompt injected into all LLM requests
 agent/core.py          ← Shared: MCPClient, MCPClientPool, run_streaming_turn(), TurnCallbacks
 agent/bridge.py        ← JSON-over-stdio bridge for the Swift frontend
 agent/cli.py           ← Interactive terminal agent
-agent/agents.py        ← Sub-agent specs: AgentSpec, AgentRegistry, built-in agents
+agent/agents.py        ← Sub-agent specs: AgentSpec, AgentRegistry, 5 built-in agents
 agent/runner.py        ← Sub-agent runner: run_subagent() with isolated context + filtered tools
 deep_research/         ← Deep research agent: iterative web research with claim verification
 scripts/make_icon.py   ← Generates .icns app icon from source image
@@ -184,10 +184,10 @@ Read specific sections, not entire files:
 
 | File | ~Lines | Notes |
 |---|---|---|
-| `mcp/server.py` | ~6800 | All MCP tools — largest file |
+| `mcp/server.py` | ~7400 | All MCP tools — largest file |
 | `agent/core.py` | ~770 | Shared agent infrastructure |
 | `agent/cli.py` | ~599 | CLI interface |
-| `agent/agents.py` | ~160 | AgentSpec, AgentRegistry, 4 built-in agents |
+| `agent/agents.py` | ~210 | AgentSpec, AgentRegistry, 5 built-in agents (explorer, analyst, researcher, writer, coder) |
 | `agent/runner.py` | ~120 | run_subagent() — isolated sub-agent execution |
 | `deep_research/` | ~800 | 12 modules — orchestrator, schemas, LLM steps, retriever, evidence store |
 

@@ -2,7 +2,7 @@
 
 An AI agent for your Mac that answers questions about your system — and can extend itself with new tools on the fly.
 
-85 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, email, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, Notes, Homebrew, media control, file management, Spotlight search, spreadsheets, Word documents, PDFs, deep web research, sub-agent orchestration, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
+91 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, email, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, Notes, Homebrew, media control, file management, Spotlight search, spreadsheets, Word documents, PDFs, deep web research, sub-agent orchestration, code editing, git integration, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
 Three ways to run it — pick whichever fits your workflow:
 
@@ -233,7 +233,7 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 
 ---
 
-## Tools (85 total)
+## Tools (91 total)
 
 ### Monitoring
 
@@ -386,6 +386,17 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 |---|---|
 | `deep_research` | Multi-step web research agent: plans subquestions, searches multiple sources, extracts and cross-verifies claims, returns a citation-backed answer. Takes 1-3 minutes. |
 
+### Code Editing & Navigation
+
+| Tool | What it does |
+|---|---|
+| `read_file_lines` | Read a file with line numbers, offset, and limit — large-file friendly. Requires `allow_file_read`. |
+| `edit_file` | Targeted find-and-replace editing. Exact string match, fails if ambiguous. Requires `allow_file_write`. |
+| `glob_files` | Find files by glob pattern (e.g. `**/*.py`). Skips .git, node_modules, .venv. |
+| `grep_files` | Regex content search across files with optional context lines. Skips binary files. |
+| `git_status` | Show branch, staged/unstaged/untracked files, and recent commits. |
+| `git_diff` | Show git diff for unstaged or staged changes. |
+
 ### Sub-Agent Orchestration
 
 | Tool | What it does |
@@ -431,7 +442,7 @@ SysControl/
 │   ├── paths.py             # Frozen-app-aware path resolution
 │   └── remote.py            # Telegram / WhatsApp / Messenger webhook bridge
 ├── mcp/
-│   ├── server.py            # MCP tool server (85 tools + self-extension)
+│   ├── server.py            # MCP tool server (91 tools + self-extension)
 │   └── prompt.json          # System prompt for the agent
 ├── deep_research/           # Deep research agent (iterative web research with citation verification)
 ├── swift/
@@ -461,7 +472,7 @@ SysControl/
 └────────┬─────────────┘
          │  JSON-RPC (stdio)
 ┌────────▼─────────────┐
-│    MCP Server        │   85 tools, self-extension, permission checks
+│    MCP Server        │   91 tools, self-extension, permission checks
 │  (mcp/server.py)     │   Concurrent tool execution via client pool
 └──────────────────────┘
 ```
