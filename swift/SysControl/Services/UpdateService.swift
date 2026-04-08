@@ -27,7 +27,7 @@ final class UpdateService {
     // MARK: - Private
 
     private static let repoOwner = "ks6573"
-    private static let repoName  = "SyscontrolMCP"
+    private static let repoName  = "SysControl"
     private static let apiURL    = "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest"
     private static let cacheKey  = "lastUpdateCheck"
     private static let cacheInterval: TimeInterval = 4 * 60 * 60  // 4 hours

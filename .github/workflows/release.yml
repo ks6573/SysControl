@@ -65,7 +65,7 @@ jobs:
 
             ### Install from source (alternative)
             ```bash
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SysControl/master/swift/install.sh)"
             ```
 
             ### Requirements

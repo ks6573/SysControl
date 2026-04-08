@@ -3,7 +3,7 @@
 # SysControl — One-line installer
 #
 # Usage:
-#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SysControl/master/swift/install.sh)"
 #
 # Flags:
 #   --uninstall   Remove SysControl from Applications (and optionally ~/.syscontrol)
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 APP_NAME="SysControl"
-REPO_URL="https://github.com/ks6573/SyscontrolMCP.git"
+REPO_URL="https://github.com/ks6573/SysControl.git"
 INSTALL_DIR="$HOME/.syscontrol/build"
 LOG_FILE="$HOME/.syscontrol/install.log"
 DEST="/Applications/$APP_NAME.app"
@@ -177,7 +177,7 @@ echo ""
 if [ ! -d "$INSTALL_DIR" ]; then
     echo "✗ SysControl source not found at $INSTALL_DIR."
     echo "  Run the full installer first:"
-    echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SyscontrolMCP/master/swift/install.sh)"'
+    echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SysControl/master/swift/install.sh)"'
     exit 1
 fi
 
@@ -187,7 +187,7 @@ git pull --ff-only 2>>"$LOG_FILE" || {
     echo "  Fast-forward failed — re-cloning..."
     cd /
     rm -rf "$INSTALL_DIR"
-    git clone --depth 1 https://github.com/ks6573/SyscontrolMCP.git "$INSTALL_DIR" 2>>"$LOG_FILE"
+    git clone --depth 1 https://github.com/ks6573/SysControl.git "$INSTALL_DIR" 2>>"$LOG_FILE"
     cd "$INSTALL_DIR"
 }
 VERSION=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "?")
