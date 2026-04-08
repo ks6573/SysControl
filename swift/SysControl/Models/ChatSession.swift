@@ -82,8 +82,9 @@ final class ChatSession: Identifiable, Codable {
         // Validate: must be in temp dir with expected prefix, and file must exist
         let resolved = (path as NSString).resolvingSymlinksInPath
         let tmpDir = NSTemporaryDirectory()
+        let basename = (resolved as NSString).lastPathComponent
         guard resolved.hasPrefix(tmpDir),
-              resolved.contains("syscontrol_chart_"),
+              basename.hasPrefix("syscontrol_chart_"),
               FileManager.default.fileExists(atPath: resolved) else { return }
 
         // Attach chart to the current streaming message, or create a new one
