@@ -119,7 +119,7 @@ final class UpdateService {
         Task.detached {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = [path]
+            process.arguments = ["-l", path]  // login shell to pick up user's PATH
 
             let pipe = Pipe()
             process.standardOutput = pipe
