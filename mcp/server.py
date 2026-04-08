@@ -644,53 +644,63 @@ def get_top_processes(n: int = 10, sort_by: str = "cpu") -> dict:
     }
 
 
-def _cpu_with_chart() -> tuple[dict, str]:
+def _cpu_with_chart() -> dict | tuple[dict, str]:
     data = get_cpu_usage()
     cores = data["per_core_percent"]
     n = len(cores)
 
     fig, ax = plt.subplots(figsize=(7, max(3, n * 0.4)))
-    colors = ["#e74c3c" if v >= 80 else "#e67e22" if v >= 60 else "#2ecc71" for v in cores]
-    labels = [f"Core {i}" for i in range(n)]
-    ax.barh(labels, cores, color=colors, height=0.6)
-    ax.axvline(data["total_percent"], color="#3498db", linestyle="--", linewidth=1.5,
-               label=f'Total: {data["total_percent"]}%')
-    ax.set_xlim(0, 100)
-    ax.set_xlabel("Usage %")
-    ax.set_title("CPU Usage per Core")
-    ax.legend(loc="lower right", fontsize=8, facecolor="#2a2a2a", edgecolor="#555",
-              labelcolor=_CHART_TEXT_COLOR)
-    ax.xaxis.set_major_formatter(mticker.PercentFormatter())
-    ax.set_yticklabels(labels, color=_CHART_TEXT_COLOR)
-    _style_chart_dark(fig, ax)
-    fig.tight_layout()
-    return data, _fig_to_b64(fig)
+    try:
+        colors = ["#e74c3c" if v >= 80 else "#e67e22" if v >= 60 else "#2ecc71" for v in cores]
+        labels = [f"Core {i}" for i in range(n)]
+        ax.barh(labels, cores, color=colors, height=0.6)
+        ax.axvline(data["total_percent"], color="#3498db", linestyle="--", linewidth=1.5,
+                   label=f'Total: {data["total_percent"]}%')
+        ax.set_xlim(0, 100)
+        ax.set_xlabel("Usage %")
+        ax.set_title("CPU Usage per Core")
+        ax.legend(loc="lower right", fontsize=8, facecolor="#2a2a2a", edgecolor="#555",
+                  labelcolor=_CHART_TEXT_COLOR)
+        ax.xaxis.set_major_formatter(mticker.PercentFormatter())
+        ax.set_yticklabels(labels, color=_CHART_TEXT_COLOR)
+        _style_chart_dark(fig, ax)
+        fig.tight_layout()
+        return data, _fig_to_b64(fig)
+    except Exception as exc:
+        sys.stderr.write(f"[syscontrol] _cpu_with_chart rendering failed: {exc}\n")
+        plt.close(fig)
+        return data
 
 
-def _ram_with_chart() -> tuple[dict, str]:
+def _ram_with_chart() -> dict | tuple[dict, str]:
     data = get_ram_usage()
     ram = data["ram"]
     swap = data["swap"]
 
     fig, ax = plt.subplots(figsize=(7, 2.5))
-    labels = ["RAM", "Swap"]
-    ax.barh(["RAM"],  [ram["used_gb"]],                                    color="#e74c3c", label="Used")
-    ax.barh(["RAM"],  [ram["available_gb"]], left=[ram["used_gb"]],         color="#2ecc71", label="Available")
-    ax.barh(["Swap"], [swap["used_gb"]],                                    color="#e67e22")
-    ax.barh(["Swap"], [swap["total_gb"] - swap["used_gb"]], left=[swap["used_gb"]], color="#95a5a6")
-    ax.set_xlabel("GB")
-    ax.set_title("Memory Usage")
-    ax.legend(loc="lower right", fontsize=8, facecolor="#2a2a2a", edgecolor="#555",
-              labelcolor=_CHART_TEXT_COLOR)
-    ax.set_yticklabels(labels, color=_CHART_TEXT_COLOR)
-    for bar in ax.patches:
-        w = bar.get_width()
-        if w > 0.3:
-            ax.text(bar.get_x() + w / 2, bar.get_y() + bar.get_height() / 2,
-                    f"{w:.1f} GB", ha="center", va="center", fontsize=7, color="white")
-    _style_chart_dark(fig, ax)
-    fig.tight_layout()
-    return data, _fig_to_b64(fig)
+    try:
+        labels = ["RAM", "Swap"]
+        ax.barh(["RAM"],  [ram["used_gb"]],                                    color="#e74c3c", label="Used")
+        ax.barh(["RAM"],  [ram["available_gb"]], left=[ram["used_gb"]],         color="#2ecc71", label="Available")
+        ax.barh(["Swap"], [swap["used_gb"]],                                    color="#e67e22")
+        ax.barh(["Swap"], [swap["total_gb"] - swap["used_gb"]], left=[swap["used_gb"]], color="#95a5a6")
+        ax.set_xlabel("GB")
+        ax.set_title("Memory Usage")
+        ax.legend(loc="lower right", fontsize=8, facecolor="#2a2a2a", edgecolor="#555",
+                  labelcolor=_CHART_TEXT_COLOR)
+        ax.set_yticklabels(labels, color=_CHART_TEXT_COLOR)
+        for bar in ax.patches:
+            w = bar.get_width()
+            if w > 0.3:
+                ax.text(bar.get_x() + w / 2, bar.get_y() + bar.get_height() / 2,
+                        f"{w:.1f} GB", ha="center", va="center", fontsize=7, color="white")
+        _style_chart_dark(fig, ax)
+        fig.tight_layout()
+        return data, _fig_to_b64(fig)
+    except Exception as exc:
+        sys.stderr.write(f"[syscontrol] _ram_with_chart rendering failed: {exc}\n")
+        plt.close(fig)
+        return data
 
 
 def _gpu_with_chart() -> dict | tuple[dict, str]:
