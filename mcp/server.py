@@ -3224,8 +3224,20 @@ def quit_app(name: str, force: bool = False) -> dict:
             pids = find_proc.stdout.strip().splitlines()
             if not pids:
                 return {"error": f"No process found matching '{name}'."}
+            failed = []
             for pid in pids:
-                subprocess.run(["kill", "-9", pid], timeout=5)
+                result = subprocess.run(
+                    ["kill", "-9", pid], capture_output=True, timeout=5,
+                )
+                if result.returncode != 0:
+                    failed.append(pid)
+            if failed:
+                return {
+                    "status": "partial-failure",
+                    "app": name,
+                    "pids": pids,
+                    "failed_pids": failed,
+                }
             return {"status": "force-killed", "app": name, "pids": pids}
         else:
             script = f'tell application "{_escape_applescript(name)}" to quit'
@@ -3641,6 +3653,7 @@ def read_file_lines(path: str, offset: int = 1, limit: int = 200) -> dict:
         lines: list[str] = []
         total_lines: int | None = None
         with p.open(errors="replace") as f:
+            lineno = 0
             for lineno, text in enumerate(f, start=1):
                 if lineno < offset:
                     continue
@@ -3653,7 +3666,7 @@ def read_file_lines(path: str, offset: int = 1, limit: int = 200) -> dict:
                 lines.append(f"{lineno:>6}\t{text}")
             else:
                 # Reached EOF — we know the total.
-                total_lines = (lineno if lines or offset == 1 else 0)  # noqa: F821
+                total_lines = (lineno if lines or offset == 1 else 0)
         content = "".join(lines)
         return {
             "path": str(p),
