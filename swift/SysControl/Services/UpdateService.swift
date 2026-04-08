@@ -103,7 +103,7 @@ final class UpdateService {
 
     // MARK: - Source Update
 
-    /// Run `syscontrol-update` in the background and report progress.
+    /// Run `syscontrol-update` in the background, then relaunch the app.
     @MainActor
     private func runSourceUpdate() {
         let scriptPath = NSString("~/.local/bin/syscontrol-update").expandingTildeInPath
@@ -132,7 +132,7 @@ final class UpdateService {
                 let code = process.terminationStatus
                 await MainActor.run { [weak self] in
                     if code == 0 {
-                        self?.status = .upToDate
+                        self?.relaunchApp()
                     } else {
                         self?.status = .failed("Update script exited with code \(code)")
                     }
@@ -141,6 +141,24 @@ final class UpdateService {
                 await MainActor.run { [weak self] in
                     self?.status = .failed("Failed to run update script")
                 }
+            }
+        }
+    }
+
+    /// Relaunch the app from /Applications after a successful update.
+    @MainActor
+    private func relaunchApp() {
+        let appPath = "/Applications/SysControl.app"
+        guard FileManager.default.fileExists(atPath: appPath) else {
+            status = .upToDate  // updated but can't relaunch — user must reopen manually
+            return
+        }
+        let url = URL(fileURLWithPath: appPath)
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
+            DispatchQueue.main.async {
+                NSApplication.shared.terminate(nil)
             }
         }
     }
