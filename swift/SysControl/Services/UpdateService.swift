@@ -73,7 +73,11 @@ final class UpdateService {
             if isNewerVersion(remote: remoteVersion, local: currentVersion) {
                 let dmgAsset = release.assets.first { $0.name.hasSuffix(".dmg") }
                 let downloadURL = dmgAsset.flatMap { URL(string: $0.browser_download_url) }
-                    ?? URL(string: release.html_url)!
+                    ?? URL(string: release.html_url)
+                guard let downloadURL else {
+                    status = .failed("Invalid download URL in release")
+                    return
+                }
                 status = .available(version: remoteVersion, downloadURL: downloadURL)
             } else {
                 status = .upToDate

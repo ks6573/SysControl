@@ -28,8 +28,13 @@ struct PersistenceManager {
 
     func saveSessionList(_ sessions: [ChatSession]) {
         let ids = sessions.map { $0.id.uuidString }
-        if let data = try? encoder.encode(ids) {
-            try? data.write(to: indexURL)
+        guard let data = try? encoder.encode(ids) else { return }
+        do {
+            try data.write(to: indexURL)
+        } catch {
+            FileHandle.standardError.write(
+                Data("[SysControl] Failed to save session index: \(error.localizedDescription)\n".utf8)
+            )
         }
     }
 
@@ -48,8 +53,13 @@ struct PersistenceManager {
 
     func saveSession(_ session: ChatSession) {
         let url = baseDir.appendingPathComponent("\(session.id.uuidString).json")
-        if let data = try? encoder.encode(session) {
-            try? data.write(to: url)
+        guard let data = try? encoder.encode(session) else { return }
+        do {
+            try data.write(to: url)
+        } catch {
+            FileHandle.standardError.write(
+                Data("[SysControl] Failed to save session \(session.id): \(error.localizedDescription)\n".utf8)
+            )
         }
     }
 
