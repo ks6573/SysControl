@@ -293,11 +293,11 @@ private final class SavedChatMetadataCache {
         let loaded = loader()
 
         lock.lock()
+        defer { lock.unlock() }
         entries[path] = Entry(modifiedAt: modifiedAt, fileSize: fileSize, title: loaded)
         if entries.count > 1000 {
             entries.removeAll(keepingCapacity: true)
         }
-        lock.unlock()
         return loaded
     }
 
