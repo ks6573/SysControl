@@ -343,7 +343,8 @@ class MCPClient:
                     tempfile.gettempdir(),
                     f"{_CHART_FILE_PREFIX}{digest}.png",
                 )
-                with open(path, "wb") as f:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as f:
                     f.write(decoded)
                 self._chart_files.append(path)
                 text_parts.append(f"\n[chart_image:{path}]")

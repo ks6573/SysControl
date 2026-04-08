@@ -117,7 +117,9 @@ def _emit_tool_finished(name: str, result: str) -> None:
         path = match.group(1)
         # Validate: must be inside the system temp dir with expected prefix
         resolved = os.path.realpath(path)
-        if not resolved.startswith(tmp_dir + os.sep) or "syscontrol_chart_" not in os.path.basename(resolved):
+        if os.path.commonpath([resolved, tmp_dir]) != tmp_dir:
+            continue
+        if not os.path.basename(resolved).startswith("syscontrol_chart_"):
             continue
         _emit({"type": "chart_image", "path": resolved})
 
