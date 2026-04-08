@@ -61,6 +61,7 @@ struct InputBar: View {
                         .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.3))
                 }
                 .buttonStyle(.plain)
+                .help("Send message")
                 .disabled(!canSend)
                 .keyboardShortcut(.return, modifiers: .command)
             }
@@ -92,6 +93,7 @@ struct InputBar: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .help("Remove attachment")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
