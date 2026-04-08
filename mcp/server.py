@@ -10,6 +10,7 @@ import contextlib
 import datetime
 import heapq
 import io
+import ipaddress
 import json
 import os
 import pathlib
@@ -2389,6 +2390,8 @@ def _tail_linux_log(lines: int, filter_str: str) -> dict:
             return {"error": f"journalctl failed: {exc}"}
     syslog = pathlib.Path("/var/log/syslog")
     if syslog.exists():
+        if syslog.stat().st_size > 50_000_000:  # 50 MB guard
+            return {"error": "System log is too large to read safely (>50 MB)."}
         try:
             all_lines = syslog.read_text(errors="replace").splitlines()
             tail = [
@@ -2525,6 +2528,19 @@ def web_fetch(url: str, max_chars: int = 8000) -> dict:
     """
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or ""
+    _BLOCKED_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "169.254.169.254"}
+    if host in _BLOCKED_HOSTS:
+        return {"url": url, "error": "Access to private/internal URLs is blocked."}
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return {"url": url, "error": "Access to private/internal IP addresses is blocked."}
+    except ValueError:
+        pass
+
     max_chars = max(500, min(max_chars, 32000))
     try:
         req = urllib.request.Request(
@@ -3169,7 +3185,7 @@ def take_screenshot(path: str = "") -> tuple:
 
         saved_to = None
         if path:
-            dest = pathlib.Path(path).expanduser()
+            dest = pathlib.Path(path).expanduser().resolve()
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(img_bytes)
             saved_to = str(dest)
@@ -5361,9 +5377,19 @@ def _validate_tool_code(
     func_name   = func_defs[0].name
     func_params = [a.arg for a in func_defs[0].args.args if a.arg != "self"]
 
-    # Security scan (non-blocking — warns but does not block).
-    _DANGEROUS        = ["eval(", "exec(", "__import__(", "compile(", "os.system("]
+    # Security scan — block dangerous functions.
+    _DANGEROUS = [
+        "eval(", "exec(", "__import__(", "compile(", "os.system(",
+        "subprocess", "os.popen(", "shutil.rmtree(",
+    ]
     security_warnings = [d for d in _DANGEROUS if d in implementation]
+    if security_warnings:
+        return {
+            "error": (
+                f"Implementation contains dangerous functions: "
+                f"{', '.join(security_warnings)}. These are not allowed."
+            )
+        }
 
     if func_params:
         param_str = ", ".join(f'args.get("{p}")' for p in func_params)
