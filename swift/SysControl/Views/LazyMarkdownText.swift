@@ -304,14 +304,23 @@ private struct StructuredMarkdownTextView: View {
                         .font(font)
                         .foregroundStyle(foreground)
                         .lineSpacing(4)
-                case let .codeBlock(code):
-                    ScrollView(.horizontal, showsIndicators: true) {
-                        Text(code)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(Color.primary.opacity(0.96))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                case let .codeBlock(language, code):
+                    VStack(alignment: .leading, spacing: 0) {
+                        if !language.isEmpty {
+                            Text(language)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 12)
+                                .padding(.top, 6)
+                                .padding(.bottom, 2)
+                        }
+                        ScrollView(.horizontal, showsIndicators: true) {
+                            Text(SyntaxHighlighter.highlight(code, language: language))
+                                .font(.system(size: 12, design: .monospaced))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, language.isEmpty ? 10 : 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                     .background(
                         RoundedRectangle(cornerRadius: 8)
@@ -347,7 +356,7 @@ private enum StructuredLine {
     case bullet(text: String)
     case numbered(index: String, text: String)
     case paragraph(text: String)
-    case codeBlock(code: String)
+    case codeBlock(language: String, code: String)
     case spacer
 }
 
@@ -360,6 +369,7 @@ private enum StructuredMarkdownParser {
         var output: [StructuredLine] = []
         var paragraphBuffer: [String] = []
         var codeBuffer: [String] = []
+        var codeLanguage = ""
         var inCodeBlock = false
 
         func flushParagraph() {
@@ -375,9 +385,10 @@ private enum StructuredMarkdownParser {
         func flushCode() {
             let code = codeBuffer.joined(separator: "\n").trimmingCharacters(in: .newlines)
             if !code.isEmpty {
-                output.append(.codeBlock(code: code))
+                output.append(.codeBlock(language: codeLanguage, code: code))
             }
             codeBuffer.removeAll(keepingCapacity: true)
+            codeLanguage = ""
         }
 
         for rawLine in lines {
@@ -387,6 +398,10 @@ private enum StructuredMarkdownParser {
                 flushParagraph()
                 if inCodeBlock {
                     flushCode()
+                } else {
+                    // Capture language identifier from opening fence
+                    let lang = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces).lowercased()
+                    codeLanguage = lang
                 }
                 inCodeBlock.toggle()
                 continue
@@ -697,5 +712,131 @@ actor MarkdownRenderCache {
             }
         }
         return rendered
+    }
+}
+
+// MARK: - Syntax Highlighting
+
+/// Lightweight regex-based syntax highlighter for common languages.
+private enum SyntaxHighlighter {
+    /// Returns an attributed string with syntax coloring applied.
+    static func highlight(_ code: String, language: String) -> AttributedString {
+        let rules = rules(for: language)
+        guard !rules.isEmpty else {
+            return AttributedString(code)
+        }
+
+        var result = AttributedString(code)
+
+        for rule in rules {
+            guard let regex = try? NSRegularExpression(pattern: rule.pattern, options: rule.options) else {
+                continue
+            }
+            let nsRange = NSRange(code.startIndex..., in: code)
+            for match in regex.matches(in: code, range: nsRange) {
+                guard let range = Range(match.range, in: code),
+                      let attrRange = Range(range, in: result) else { continue }
+                result[attrRange].foregroundColor = rule.color
+            }
+        }
+
+        return result
+    }
+
+    private struct Rule {
+        let pattern: String
+        let color: NSColor
+        var options: NSRegularExpression.Options = []
+    }
+
+    // Shared token patterns
+    private static let stringPattern = #"(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')"#
+    private static let numberPattern = #"\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b"#
+
+    private static func rules(for language: String) -> [Rule] {
+        let commentColor = NSColor.systemGreen
+        let stringColor = NSColor.systemOrange
+        let keywordColor = NSColor.systemPink
+        let numberColor = NSColor.systemPurple
+        let typeColor = NSColor.systemCyan
+
+        switch language {
+        case "python", "py":
+            return [
+                Rule(pattern: #"#.*$"#, color: commentColor, options: .anchorsMatchLines),
+                Rule(pattern: #"(?:"""[\s\S]*?"""|'''[\s\S]*?''')"#, color: stringColor),
+                Rule(pattern: stringPattern, color: stringColor),
+                Rule(pattern: numberPattern, color: numberColor),
+                Rule(pattern: #"\b(?:def|class|import|from|return|if|elif|else|for|while|try|except|finally|with|as|yield|lambda|raise|pass|break|continue|and|or|not|in|is|True|False|None|async|await|self)\b"#, color: keywordColor),
+            ]
+        case "swift":
+            return [
+                Rule(pattern: #"//.*$"#, color: commentColor, options: .anchorsMatchLines),
+                Rule(pattern: stringPattern, color: stringColor),
+                Rule(pattern: numberPattern, color: numberColor),
+                Rule(pattern: #"\b(?:func|var|let|class|struct|enum|protocol|import|return|if|else|guard|for|while|switch|case|default|break|continue|throw|throws|try|catch|async|await|self|Self|nil|true|false|private|public|internal|static|override|init|deinit|where|in|some|any)\b"#, color: keywordColor),
+                Rule(pattern: #"\b(?:String|Int|Bool|Double|Float|Array|Dictionary|Set|Optional|Result|Void|UUID|Date|URL|Data)\b"#, color: typeColor),
+            ]
+        case "javascript", "js", "typescript", "ts", "jsx", "tsx":
+            return [
+                Rule(pattern: #"//.*$"#, color: commentColor, options: .anchorsMatchLines),
+                Rule(pattern: #"`(?:[^`\\]|\\.)*`"#, color: stringColor),
+                Rule(pattern: stringPattern, color: stringColor),
+                Rule(pattern: numberPattern, color: numberColor),
+                Rule(pattern: #"\b(?:function|const|let|var|return|if|else|for|while|do|switch|case|default|break|continue|throw|try|catch|finally|class|extends|import|export|from|async|await|new|this|typeof|instanceof|null|undefined|true|false|yield|of|in)\b"#, color: keywordColor),
+                Rule(pattern: #"\b(?:interface|type|enum|namespace|declare|readonly|keyof|infer|never|unknown|any)\b"#, color: typeColor),
+            ]
+        case "bash", "sh", "shell", "zsh":
+            return [
+                Rule(pattern: #"#.*$"#, color: commentColor, options: .anchorsMatchLines),
+                Rule(pattern: stringPattern, color: stringColor),
+                Rule(pattern: numberPattern, color: numberColor),
+                Rule(pattern: #"\b(?:if|then|else|elif|fi|for|while|do|done|case|esac|in|function|return|exit|local|export|source|alias|unset|shift|trap|eval|exec|set|unset|readonly|declare)\b"#, color: keywordColor),
+            ]
+        case "json":
+            return [
+                Rule(pattern: stringPattern, color: stringColor),
+                Rule(pattern: numberPattern, color: numberColor),
+                Rule(pattern: #"\b(?:true|false|null)\b"#, color: keywordColor),
+            ]
+        case "rust", "rs":
+            return [
+                Rule(pattern: #"//.*$"#, color: commentColor, options: .anchorsMatchLines),
+                Rule(pattern: stringPattern, color: stringColor),
+                Rule(pattern: numberPattern, color: numberColor),
+                Rule(pattern: #"\b(?:fn|let|mut|const|struct|enum|impl|trait|pub|use|mod|self|Self|return|if|else|for|while|loop|match|break|continue|async|await|move|where|type|true|false|unsafe|extern|crate|super|ref|as|in|dyn)\b"#, color: keywordColor),
+            ]
+        case "go", "golang":
+            return [
+                Rule(pattern: #"//.*$"#, color: commentColor, options: .anchorsMatchLines),
+                Rule(pattern: stringPattern, color: stringColor),
+                Rule(pattern: #"`[^`]*`"#, color: stringColor),
+                Rule(pattern: numberPattern, color: numberColor),
+                Rule(pattern: #"\b(?:func|var|const|type|struct|interface|package|import|return|if|else|for|range|switch|case|default|break|continue|go|defer|select|chan|map|make|new|nil|true|false|fallthrough)\b"#, color: keywordColor),
+            ]
+        case "css", "scss":
+            return [
+                Rule(pattern: #"/\*[\s\S]*?\*/"#, color: commentColor),
+                Rule(pattern: stringPattern, color: stringColor),
+                Rule(pattern: numberPattern, color: numberColor),
+                Rule(pattern: #"[.#][\w-]+"#, color: keywordColor),
+            ]
+        case "html", "xml", "svg":
+            return [
+                Rule(pattern: #"<!--[\s\S]*?-->"#, color: commentColor),
+                Rule(pattern: stringPattern, color: stringColor),
+                Rule(pattern: #"</?[\w-]+"#, color: keywordColor),
+                Rule(pattern: #"/?\s*>"#, color: keywordColor),
+            ]
+        default:
+            // Generic: highlight strings, numbers, and C-style comments
+            if language.isEmpty { return [] }
+            return [
+                Rule(pattern: #"//.*$"#, color: commentColor, options: .anchorsMatchLines),
+                Rule(pattern: #"#.*$"#, color: commentColor, options: .anchorsMatchLines),
+                Rule(pattern: stringPattern, color: stringColor),
+                Rule(pattern: numberPattern, color: numberColor),
+            ]
+        }
     }
 }

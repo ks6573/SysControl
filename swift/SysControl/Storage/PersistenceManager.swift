@@ -22,6 +22,15 @@ struct PersistenceManager {
         return d
     }()
 
+    // MARK: - Atomic Write
+
+    /// Writes data atomically: writes to a temp file then replaces the target.
+    private func atomicWrite(_ data: Data, to url: URL) throws {
+        let tmpURL = url.appendingPathExtension("tmp")
+        try data.write(to: tmpURL)
+        _ = try FileManager.default.replaceItemAt(url, withItemAt: tmpURL)
+    }
+
     // MARK: - Session List
 
     private var indexURL: URL { baseDir.appendingPathComponent("_index.json") }
@@ -30,7 +39,7 @@ struct PersistenceManager {
         let ids = sessions.map { $0.id.uuidString }
         guard let data = try? encoder.encode(ids) else { return }
         do {
-            try data.write(to: indexURL)
+            try atomicWrite(data, to: indexURL)
         } catch {
             FileHandle.standardError.write(
                 Data("[SysControl] Failed to save session index: \(error.localizedDescription)\n".utf8)
@@ -55,7 +64,7 @@ struct PersistenceManager {
         let url = baseDir.appendingPathComponent("\(session.id.uuidString).json")
         guard let data = try? encoder.encode(session) else { return }
         do {
-            try data.write(to: url)
+            try atomicWrite(data, to: url)
         } catch {
             FileHandle.standardError.write(
                 Data("[SysControl] Failed to save session \(session.id): \(error.localizedDescription)\n".utf8)

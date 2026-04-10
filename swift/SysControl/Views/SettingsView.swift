@@ -15,8 +15,15 @@ struct SettingsView: View {
     @State private var validationError: String?
     @State private var isRefreshingModels = false
     @State private var allowDeepResearch: Bool = false
+    @State private var connectionTestResult: ConnectionTestResult?
+    @State private var isTestingConnection = false
 
     private let permissionStore = PermissionConfigStore()
+
+    enum ConnectionTestResult {
+        case success(String)
+        case failure(String)
+    }
 
     enum ProviderKind: String, CaseIterable {
         case local
@@ -94,10 +101,45 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Apply & Reconnect") {
-                    apply()
+                HStack(spacing: 12) {
+                    Button("Test Connection") {
+                        Task { await testConnection() }
+                    }
+                    .disabled(isTestingConnection)
+
+                    if isTestingConnection {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 14, height: 14)
+                    } else if let result = connectionTestResult {
+                        switch result {
+                        case .success(let info):
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                                Text(info)
+                                    .foregroundStyle(.green)
+                            }
+                            .font(.caption)
+                        case .failure(let error):
+                            HStack(spacing: 4) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.red)
+                                Text(error)
+                                    .foregroundStyle(.red)
+                            }
+                            .font(.caption)
+                            .lineLimit(2)
+                        }
+                    }
+
+                    Spacer()
+
+                    Button("Apply & Reconnect") {
+                        apply()
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
             }
         }
         .formStyle(.grouped)
@@ -234,6 +276,53 @@ struct SettingsView: View {
 
         appState.applyProviderConfiguration(configuration)
         dismiss()
+    }
+
+    private func testConnection() async {
+        isTestingConnection = true
+        connectionTestResult = nil
+        defer { isTestingConnection = false }
+
+        let baseURL: String
+        if provider == .local {
+            baseURL = ProviderConfiguration.localBaseURL
+        } else {
+            let trimmed = cloudBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            baseURL = trimmed.isEmpty ? ProviderConfiguration.cloudBaseURL : trimmed
+        }
+
+        // Use /api/tags for Ollama, /models for OpenAI-compatible APIs
+        let testURL: String
+        if baseURL.contains("localhost") || baseURL.contains("127.0.0.1") {
+            testURL = "http://localhost:11434/api/tags"
+        } else {
+            testURL = baseURL.hasSuffix("/") ? "\(baseURL)models" : "\(baseURL)/models"
+        }
+
+        guard let url = URL(string: testURL) else {
+            connectionTestResult = .failure("Invalid URL")
+            return
+        }
+
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 5
+            if provider == .cloud {
+                let key = cloudAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !key.isEmpty {
+                    request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                }
+            }
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                connectionTestResult = .success("Connected")
+            } else {
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                connectionTestResult = .failure("HTTP \(code)")
+            }
+        } catch {
+            connectionTestResult = .failure(error.localizedDescription)
+        }
     }
 
     private func refreshLocalModels() async {

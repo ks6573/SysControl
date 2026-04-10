@@ -6,6 +6,8 @@ struct MessageBubble: View {
     let message: ChatMessage
     let isStreaming: Bool
 
+    @State private var showCopied = false
+
     var body: some View {
         switch message.role {
         case .user:
@@ -24,16 +26,33 @@ struct MessageBubble: View {
     private var userBubble: some View {
         HStack(alignment: .top) {
             Spacer(minLength: 80)
-            Text(message.content)
-                .font(.system(size: 14))
-                .foregroundStyle(.white)
-                .textSelection(.enabled)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Color.accentColor)
-                )
+            VStack(alignment: .trailing, spacing: 4) {
+                if let filePath = message.attachedFilePath {
+                    HStack(spacing: 5) {
+                        Image(systemName: "paperclip")
+                            .font(.system(size: 10))
+                        Text((filePath as NSString).lastPathComponent)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule().fill(Color.white.opacity(0.15))
+                    )
+                }
+                Text(message.content)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.white)
+                    .textSelection(.enabled)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.accentColor)
+            )
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 4)
@@ -101,13 +120,18 @@ struct MessageBubble: View {
                     Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(message.content, forType: .string)
+                        showCopied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            showCopied = false
+                        }
                     } label: {
-                        Image(systemName: "doc.on.doc")
+                        Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
                             .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(showCopied ? Color.green : Color.secondary.opacity(0.5))
                     }
                     .buttonStyle(.plain)
                     .help("Copy response")
+                    .animation(.easeInOut(duration: 0.15), value: showCopied)
                 }
             }
 
@@ -145,18 +169,32 @@ struct MessageBubble: View {
     }
 }
 
-/// Displays a chart image from a file path.
+/// Displays a chart image from a file path, loading asynchronously.
 private struct ChartImageView: View {
     let path: String
+    @State private var nsImage: NSImage?
 
     var body: some View {
-        if let nsImage = NSImage(contentsOfFile: path) {
-            Image(nsImage: nsImage)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(maxWidth: 500)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .padding(.vertical, 4)
+        Group {
+            if let nsImage {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: 500)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.primary.opacity(0.05))
+                    .frame(width: 200, height: 120)
+                    .overlay(ProgressView().scaleEffect(0.7))
+            }
+        }
+        .padding(.vertical, 4)
+        .task(id: path) {
+            let loaded = await Task.detached(priority: .utility) {
+                NSImage(contentsOfFile: path)
+            }.value
+            nsImage = loaded
         }
     }
 }

@@ -28,6 +28,10 @@ final class AppState {
     private var pendingSavedChatRefreshWorkItem: DispatchWorkItem?
     private var reconnectAttempt = 0
 
+    // Token batching: accumulate tokens and flush every 50ms to reduce redraws
+    private var tokenBuffer: String = ""
+    private var tokenFlushWorkItem: DispatchWorkItem?
+
     /// Backward-compatible computed property used by ChatView's InputBar disable check.
     var isConnected: Bool {
         if case .ready = backendStatus { return true }
@@ -191,7 +195,7 @@ final class AppState {
         }
         service.onToken = { [weak self] text in
             Task { @MainActor in
-                self?.activeSession?.appendToken(text)
+                self?.bufferToken(text)
             }
         }
         service.onToolStarted = { [weak self] names in
@@ -211,6 +215,7 @@ final class AppState {
         }
         service.onTurnDone = { [weak self] _, elapsed in
             Task { @MainActor in
+                self?.flushTokenBuffer()
                 self?.activeSession?.finishStreaming(elapsed: elapsed)
                 if let session = self?.activeSession {
                     self?.persistence.saveSession(session)
@@ -219,6 +224,7 @@ final class AppState {
         }
         service.onError = { [weak self] category, message in
             Task { @MainActor in
+                self?.flushTokenBuffer()
                 self?.activeSession?.appendError("\(category): \(message)")
                 self?.activeSession?.finishStreaming(elapsed: 0)
                 self?.connectionError = "\(category): \(message)"
@@ -239,7 +245,7 @@ final class AppState {
         )
     }
 
-    func sendMessage(_ text: String) {
+    func sendMessage(_ text: String, attachedFilePath: String? = nil) {
         guard let session = activeSession else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -251,9 +257,28 @@ final class AppState {
 
         selectedSavedChat = nil
         selectedSavedChatContent = ""
-        session.addUserMessage(trimmed)
+
+        // Display the clean user text (with optional attachment indicator)
+        var userMessage = ChatMessage(role: .user, content: trimmed)
+        userMessage.attachedFilePath = attachedFilePath
+        session.messages.append(userMessage)
+        // Auto-title from first user message
+        if session.title == "New Chat" && session.messages.filter({ $0.role == .user }).count == 1 {
+            let words = trimmed.split(separator: " ").prefix(6).joined(separator: " ")
+            session.title = words.count > 40 ? String(words.prefix(40)) + "…" : words
+        }
+
+        // Compose backend message with file context
+        let backendText: String
+        if let filePath = attachedFilePath {
+            let filename = (filePath as NSString).lastPathComponent
+            backendText = "[Attached file: \(filename) (\(filePath))]\n\n\(trimmed)"
+        } else {
+            backendText = trimmed
+        }
+
         session.beginStreaming()
-        backend?.sendMessage(trimmed)
+        backend?.sendMessage(backendText)
         persistence.saveSession(session)
     }
 
@@ -292,6 +317,34 @@ final class AppState {
         startBackend()
     }
 
+    // MARK: - Cancellation
+
+    func cancelRequest() {
+        flushTokenBuffer()
+        backend?.cancelRequest()
+    }
+
+    // MARK: - Token Batching
+
+    private func bufferToken(_ text: String) {
+        tokenBuffer += text
+        if tokenFlushWorkItem == nil {
+            let work = DispatchWorkItem { [weak self] in
+                self?.flushTokenBuffer()
+            }
+            tokenFlushWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+        }
+    }
+
+    private func flushTokenBuffer() {
+        tokenFlushWorkItem = nil
+        guard !tokenBuffer.isEmpty else { return }
+        let batch = tokenBuffer
+        tokenBuffer = ""
+        activeSession?.appendToken(batch)
+    }
+
     // MARK: - Auto Save
 
     func autoSaveActiveSession() {
@@ -299,6 +352,7 @@ final class AppState {
         guard !session.wasAutoSavedToHistory else { return }
         if history.saveSession(session, title: session.title) != nil {
             session.wasAutoSavedToHistory = true
+            persistence.saveSession(session)
             refreshSavedChats()
         }
     }

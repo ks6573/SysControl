@@ -452,6 +452,27 @@ class MCPClientPool:
             self._clients[index] = new_client
             return new_client
 
+    def warm_up(self, count: int | None = None) -> None:
+        """Pre-spawn worker clients in background threads.
+
+        Args:
+            count: Number of workers to spawn.  Defaults to ``pool_size - 1``
+                (all workers besides the primary).
+        """
+        target = min(count or (self._pool_size - 1), self._pool_size - 1)
+        threads: list[threading.Thread] = []
+        for i in range(1, target + 1):
+            with self._pool_lock:
+                if i in self._clients:
+                    continue
+            t = threading.Thread(
+                target=self._get_or_create, args=(i,), daemon=True,
+            )
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join()
+
     # Sentinel: distinguishes "server unreachable, allow everything" from a
     # legitimately loaded (but possibly empty) set of safe tool names.
     _FALLBACK: frozenset[str] = frozenset()
@@ -704,6 +725,7 @@ class TurnCallbacks:
     on_tool_started: Callable[[list[str]], None] = field(default=lambda: (lambda _n: None))
     on_tool_finished: Callable[[str, str], None] = field(default=lambda: (lambda _n, _r: None))
     on_error: Callable[[str, str], None] = field(default=lambda: (lambda _c, _m: None))
+    cancel_event: threading.Event | None = field(default=None)
 
 
 def _create_llm_stream(
@@ -752,6 +774,11 @@ def _accumulate_stream_chunks(
     finish_reason: str | None = None
 
     for chunk in stream:
+        if callbacks.cancel_event and callbacks.cancel_event.is_set():
+            with contextlib.suppress(Exception):
+                stream.close()
+            return "".join(content_parts), tool_calls, "cancelled"
+
         choice = chunk.choices[0] if chunk.choices else None
         if choice is None:
             continue
@@ -929,6 +956,9 @@ def run_streaming_turn(
     start_time = time.monotonic()
 
     for _round in range(MAX_TOOL_ROUNDS):
+        if callbacks.cancel_event and callbacks.cancel_event.is_set():
+            return "cancelled", time.monotonic() - start_time
+
         messages[:] = prune_history(messages)
 
         content, tool_calls, finish_reason = _stream_llm_response(

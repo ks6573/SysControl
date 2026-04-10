@@ -130,6 +130,10 @@ final class BackendService: @unchecked Sendable {
         sendCommand(["type": "user_message", "text": text])
     }
 
+    func cancelRequest() {
+        sendCommand(["type": "cancel"])
+    }
+
     func clearSession() {
         sendCommand(["type": "clear_session"])
     }

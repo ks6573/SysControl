@@ -9,9 +9,52 @@ struct ChatView: View {
     @State private var lastScrollAt: Date = .distantPast
     @State private var attachedFilePath: String?
     @State private var isDropTargeted: Bool = false
+    @State private var isSearchVisible: Bool = false
+    @State private var searchText: String = ""
+
+    private func filteredMessages(_ session: ChatSession) -> [ChatMessage] {
+        guard isSearchVisible, !searchText.isEmpty else { return session.messages }
+        let query = searchText.lowercased()
+        return session.messages.filter { msg in
+            msg.content.lowercased().contains(query)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
+            // Search bar
+            if isSearchVisible {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search messages…", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                    if !searchText.isEmpty {
+                        Button {
+                            searchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Button {
+                        isSearchVisible = false
+                        searchText = ""
+                    } label: {
+                        Text("Done")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.04))
+                Divider()
+            }
+
             // Messages
             if let session = appState.activeSession {
                 if session.messages.isEmpty {
@@ -30,10 +73,15 @@ struct ChatView: View {
             Divider()
 
             // Input bar
-            InputBar(onSend: { text in
-                appState.sendMessage(text)
-            }, attachedFilePath: $attachedFilePath)
-            .disabled(appState.activeSession?.isStreaming == true || !appState.isConnected)
+            InputBar(
+                onSend: { text, filePath in
+                    appState.sendMessage(text, attachedFilePath: filePath)
+                },
+                onCancel: { appState.cancelRequest() },
+                isStreaming: appState.activeSession?.isStreaming == true,
+                attachedFilePath: $attachedFilePath
+            )
+            .disabled(!appState.isConnected)
         }
         .overlay {
             if isDropTargeted {
@@ -44,15 +92,22 @@ struct ChatView: View {
             handleDrop(providers)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .onKeyPress(characters: CharacterSet(charactersIn: "f"), phases: .down) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
+            isSearchVisible.toggle()
+            if !isSearchVisible { searchText = "" }
+            return .handled
+        }
     }
 
     // MARK: - Messages
 
     private func messageList(_ session: ChatSession) -> some View {
-        ScrollViewReader { proxy in
+        let displayMessages = filteredMessages(session)
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 2) {
-                    ForEach(session.messages) { message in
+                    ForEach(displayMessages) { message in
                         MessageBubble(
                             message: message,
                             isStreaming: session.isStreaming

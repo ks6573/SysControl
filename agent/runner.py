@@ -16,6 +16,7 @@ token events and tool-call details are discarded (or forwarded to an optional
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from collections.abc import Callable
@@ -36,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 # Env-var injected into sub-agent subprocess to prevent recursive spawning.
 _DEPTH_ENV_VAR = "SYSCONTROL_AGENT_DEPTH"
+
+# Reusable sub-agent MCP client pool, keyed by agent name.
+_subagent_pool: dict[str, tuple[MCPClient, MCPClientPool]] = {}
+_subagent_pool_lock = __import__("threading").Lock()
 
 # Env vars propagated to sub-agent subprocesses.  Only these (plus all
 # SYSCONTROL_* vars) are forwarded — secrets in the parent env are NOT leaked.
@@ -100,6 +105,36 @@ def _build_system_message(spec: AgentSpec) -> dict[str, str]:
     return {"role": "system", "content": content}
 
 
+def _get_or_create_subagent(spec_name: str) -> tuple[MCPClient, MCPClientPool]:
+    """Return a cached (client, pool) pair, creating one if needed.
+
+    If the cached subprocess has died, it is replaced with a fresh one.
+    """
+    env = _build_subprocess_env()
+    with _subagent_pool_lock:
+        if spec_name in _subagent_pool:
+            client, pool = _subagent_pool[spec_name]
+            if client.process and client.process.poll() is None:
+                return client, pool
+            # Process died — clean up and recreate.
+            with contextlib.suppress(Exception):
+                pool.close_all()
+
+        client = MCPClient(extra_env=env)
+        pool = MCPClientPool(client, pool_size=1)
+        _subagent_pool[spec_name] = (client, pool)
+        return client, pool
+
+
+def close_subagent_pool() -> None:
+    """Shut down all cached sub-agent clients. Call during bridge shutdown."""
+    with _subagent_pool_lock:
+        for _name, (_, pool) in _subagent_pool.items():
+            with contextlib.suppress(Exception):
+                pool.close_all()
+        _subagent_pool.clear()
+
+
 def run_subagent(
     spec: AgentSpec,
     task: str,
@@ -126,13 +161,8 @@ def run_subagent(
         The agent's final stripped text response, or an ``[Agent error …]``
         string if the run fails for any reason.
     """
-    env = _build_subprocess_env()
-
-    client: MCPClient | None = None
-    pool: MCPClientPool | None = None
     try:
-        client = MCPClient(extra_env=env)
-        pool = MCPClientPool(client, pool_size=1)
+        client, pool = _get_or_create_subagent(spec.name)
 
         openai_tools = mcp_to_openai_tools(_build_filtered_tools(client, spec))
         system_message = _build_system_message(spec)
@@ -184,7 +214,5 @@ def run_subagent(
         return f"[Agent error (Internal): {exc}]"
 
     finally:
-        if pool is not None:
-            pool.close_all()
-        elif client is not None:
-            client.close()
+        # Cached clients are reused; cleanup happens via close_subagent_pool().
+        pass

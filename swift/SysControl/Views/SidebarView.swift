@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 struct SidebarView: View {
     @Environment(AppState.self) private var appState
     @State private var isImporterPresented = false
+    @State private var sessionToDelete: ChatSession?
+    @State private var savedChatToDelete: SavedChat?
 
     private var markdownType: UTType {
         UTType(filenameExtension: "md") ?? .plainText
@@ -30,6 +32,40 @@ struct SidebarView: View {
             appState.importSavedChats(from: urls)
         }
         .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: importDroppedFiles)
+        .alert(
+            "Delete Chat",
+            isPresented: Binding(
+                get: { sessionToDelete != nil },
+                set: { if !$0 { sessionToDelete = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { sessionToDelete = nil }
+            Button("Delete", role: .destructive) {
+                if let session = sessionToDelete {
+                    withAnimation { appState.deleteSession(session) }
+                    sessionToDelete = nil
+                }
+            }
+        } message: {
+            Text("Are you sure you want to delete \"\(sessionToDelete?.title ?? "")\"?")
+        }
+        .alert(
+            "Delete Saved Chat",
+            isPresented: Binding(
+                get: { savedChatToDelete != nil },
+                set: { if !$0 { savedChatToDelete = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { savedChatToDelete = nil }
+            Button("Delete", role: .destructive) {
+                if let chat = savedChatToDelete {
+                    appState.deleteSavedChat(chat)
+                    savedChatToDelete = nil
+                }
+            }
+        } message: {
+            Text("Are you sure you want to delete \"\(savedChatToDelete?.title ?? "")\"?")
+        }
     }
 
     private var header: some View {
@@ -142,9 +178,7 @@ struct SidebarView: View {
                     )
                     .contextMenu {
                         Button("Delete", role: .destructive) {
-                            withAnimation {
-                                appState.deleteSession(session)
-                            }
+                            sessionToDelete = session
                         }
                     }
                 }
@@ -163,7 +197,7 @@ struct SidebarView: View {
                         .buttonStyle(.plain)
 
                         Button(role: .destructive) {
-                            appState.deleteSavedChat(chat)
+                            savedChatToDelete = chat
                         } label: {
                             Image(systemName: "trash")
                                 .font(.system(size: 12, weight: .semibold))
@@ -217,15 +251,34 @@ struct SidebarView: View {
 private struct SessionRow: View {
     let session: ChatSession
 
+    private var messagePreview: String? {
+        guard let first = session.messages.first(where: { $0.role == .user }) else { return nil }
+        let text = first.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : String(text.prefix(50))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(session.title)
                 .font(.system(size: 13, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Text(session.createdAt, style: .relative)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            if let preview = messagePreview {
+                Text(preview)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            HStack(spacing: 4) {
+                Text(session.createdAt, style: .relative)
+                if !session.messages.isEmpty {
+                    Text("·")
+                    Text("\(session.messages.count) messages")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 3)
     }

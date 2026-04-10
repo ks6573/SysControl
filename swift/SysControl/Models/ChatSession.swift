@@ -14,6 +14,7 @@ final class ChatSession: Identifiable, Codable {
 
     // Transient streaming state (not persisted)
     private var _streamingMessageID: UUID?
+    private var _streamingMessageIndex: Int?
 
     init(title: String = "New Chat") {
         self.id = UUID()
@@ -25,7 +26,7 @@ final class ChatSession: Identifiable, Codable {
     // MARK: - Codable
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, createdAt
+        case id, title, messages, createdAt, wasAutoSavedToHistory
     }
 
     required init(from decoder: Decoder) throws {
@@ -34,6 +35,7 @@ final class ChatSession: Identifiable, Codable {
         title = try c.decode(String.self, forKey: .title)
         messages = try c.decode([ChatMessage].self, forKey: .messages)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
+        wasAutoSavedToHistory = try c.decodeIfPresent(Bool.self, forKey: .wasAutoSavedToHistory) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -42,6 +44,7 @@ final class ChatSession: Identifiable, Codable {
         try c.encode(title, forKey: .title)
         try c.encode(messages, forKey: .messages)
         try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(wasAutoSavedToHistory, forKey: .wasAutoSavedToHistory)
     }
 
     // MARK: - Message Management
@@ -61,11 +64,13 @@ final class ChatSession: Identifiable, Codable {
         let msg = ChatMessage(role: .assistant, content: "")
         _streamingMessageID = msg.id
         messages.append(msg)
+        _streamingMessageIndex = messages.count - 1
     }
 
     func appendToken(_ text: String) {
-        guard let sid = _streamingMessageID,
-              let idx = messages.lastIndex(where: { $0.id == sid }) else { return }
+        guard let idx = _streamingMessageIndex,
+              idx < messages.count,
+              messages[idx].id == _streamingMessageID else { return }
         messages[idx].content += text
     }
 
@@ -88,8 +93,9 @@ final class ChatSession: Identifiable, Codable {
               FileManager.default.fileExists(atPath: resolved) else { return }
 
         // Attach chart to the current streaming message, or create a new one
-        if let sid = _streamingMessageID,
-           let idx = messages.lastIndex(where: { $0.id == sid }) {
+        if let idx = _streamingMessageIndex,
+           idx < messages.count,
+           messages[idx].id == _streamingMessageID {
             if messages[idx].chartImagePaths == nil {
                 messages[idx].chartImagePaths = [path]
             } else {
@@ -110,6 +116,7 @@ final class ChatSession: Identifiable, Codable {
         _ = elapsed
         isStreaming = false
         _streamingMessageID = nil
+        _streamingMessageIndex = nil
         activeToolNames = []
     }
 }

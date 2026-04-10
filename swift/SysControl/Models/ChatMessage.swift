@@ -9,6 +9,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var toolNames: [String]?
     var isError: Bool
     var chartImagePaths: [String]?
+    var attachedFilePath: String?
 
     enum Role: String, Codable {
         case user

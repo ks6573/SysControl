@@ -2,7 +2,9 @@ import SwiftUI
 
 /// Bottom text input bar with send button. Supports multiline (Shift+Enter) and file attachments.
 struct InputBar: View {
-    let onSend: (String) -> Void
+    let onSend: (String, String?) -> Void
+    var onCancel: (() -> Void)?
+    var isStreaming: Bool = false
     @Binding var attachedFilePath: String?
 
     @State private var text: String = ""
@@ -52,18 +54,30 @@ struct InputBar: View {
                         .stroke(Color.primary.opacity(0.1), lineWidth: 1)
                 )
 
-                // Send button
-                Button {
-                    submitIfReady()
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 28))
-                        .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.3))
+                // Send or Stop button
+                if isStreaming {
+                    Button {
+                        onCancel?()
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.red.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop generating")
+                } else {
+                    Button {
+                        submitIfReady()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.3))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Send message")
+                    .disabled(!canSend)
+                    .keyboardShortcut(.return, modifiers: .command)
                 }
-                .buttonStyle(.plain)
-                .help("Send message")
-                .disabled(!canSend)
-                .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(.horizontal, 20)
@@ -125,20 +139,16 @@ struct InputBar: View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || attachedFilePath != nil else { return }
 
-        var message = ""
-        if let filePath = attachedFilePath {
-            let filename = (filePath as NSString).lastPathComponent
-            if trimmed.isEmpty {
-                message = "Read and summarize this file: \(filePath)"
-            } else {
-                message = "[Attached file: \(filename) (\(filePath))]\n\n\(trimmed)"
-            }
-            attachedFilePath = nil
+        let filePath = attachedFilePath
+        let displayText: String
+        if trimmed.isEmpty && filePath != nil {
+            displayText = "Read and summarize this file"
         } else {
-            message = trimmed
+            displayText = trimmed
         }
 
-        onSend(message)
+        attachedFilePath = nil
+        onSend(displayText, filePath)
         text = ""
     }
 }

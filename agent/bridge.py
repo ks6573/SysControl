@@ -44,6 +44,7 @@ from agent.core import (
     mcp_to_openai_tools,
     run_streaming_turn,
 )
+from agent.runner import close_subagent_pool
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -138,6 +139,9 @@ def _initialise_agent() -> tuple[MCPClientPool, list[dict], dict]:
     mcp_client = MCPClient()
     pool       = MCPClientPool(mcp_client)
 
+    # Pre-warm worker pool in background to eliminate first-batch latency.
+    threading.Thread(target=pool.warm_up, daemon=True).start()
+
     mcp_tools = mcp_client.list_tools()
     tools     = mcp_to_openai_tools(mcp_tools)
 
@@ -163,6 +167,9 @@ def _initialise_agent() -> tuple[MCPClientPool, list[dict], dict]:
     return pool, tools, system_message
 
 
+_cancel_event: threading.Event | None = None
+
+
 def _handle_user_message(
     cmd: dict,
     messages: list[dict],
@@ -185,10 +192,14 @@ def _handle_user_message(
         model: Model identifier string.
         log: File-like object for internal error logging (typically stderr).
     """
+    global _cancel_event
+
     text = cmd.get("text", "").strip()
     if not text:
         return
     messages.append({"role": "user", "content": text})
+
+    _cancel_event = threading.Event()
 
     callbacks = TurnCallbacks(
         on_token=lambda t: _emit({"type": "token", "text": t}),
@@ -199,6 +210,7 @@ def _handle_user_message(
         on_error=lambda cat, msg: _emit(
             {"type": "error", "category": cat, "message": msg}
         ),
+        cancel_event=_cancel_event,
     )
 
     try:
@@ -213,6 +225,8 @@ def _handle_user_message(
     except Exception as exc:
         log.write(f"[bridge] turn error: {exc}\n")
         _emit({"type": "error", "category": "Turn", "message": str(exc)})
+    finally:
+        _cancel_event = None
 
 
 # ── Event loop ────────────────────────────────────────────────────────────────
@@ -228,10 +242,13 @@ def _event_loop(
 ) -> tuple[OpenAI, str]:
     """Read stdin commands, dispatch them, and return the (possibly reconfigured) client/model.
 
-    Runs until EOF or a ``shutdown`` command. Unknown command types are
-    silently ignored for forward compatibility.
+    Runs until EOF or a ``shutdown`` command.  User messages are dispatched
+    to a worker thread so ``cancel`` commands can be read while a turn is
+    in progress.  Unknown command types are silently ignored for forward
+    compatibility.
     """
     messages: list[dict] = []
+    turn_thread: threading.Thread | None = None
 
     while True:
         cmd = _read_command()
@@ -241,7 +258,15 @@ def _event_loop(
         cmd_type = cmd.get("type", "")
 
         if cmd_type == "shutdown":
+            # Signal cancellation if a turn is running, then break.
+            if _cancel_event is not None:
+                _cancel_event.set()
+            if turn_thread is not None:
+                turn_thread.join(timeout=3.0)
             break
+        elif cmd_type == "cancel":
+            if _cancel_event is not None:
+                _cancel_event.set()
         elif cmd_type == "clear_session":
             messages.clear()
             _emit({"type": "session_cleared"})
@@ -253,9 +278,15 @@ def _event_loop(
             llm = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
             _emit({"type": "configured", "model": model})
         elif cmd_type == "user_message":
-            _handle_user_message(
-                cmd, messages, llm, pool, tools, system_message, model, log,
+            # Wait for any prior turn to finish before starting a new one.
+            if turn_thread is not None:
+                turn_thread.join()
+            turn_thread = threading.Thread(
+                target=_handle_user_message,
+                args=(cmd, messages, llm, pool, tools, system_message, model, log),
+                daemon=True,
             )
+            turn_thread.start()
 
     return llm, model
 
@@ -289,6 +320,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        close_subagent_pool()
         pool.close_all()
 
 
