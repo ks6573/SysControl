@@ -1,8 +1,9 @@
 [project]
 name = "syscontrol"
-version = "1.4.4"
+version = "1.4.5"
 description = "All-In-One AI agent with MCP tool server; Ultron but slightly weaker and nicer 😉"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 keywords = ["mcp", "system-monitor", "ollama", "ai", "agent"]
 classifiers = [
@@ -10,6 +11,7 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Operating System :: Microsoft :: Windows",

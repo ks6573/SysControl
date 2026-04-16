@@ -24,7 +24,7 @@ A native SwiftUI app with streaming chat, Markdown rendering, chat history sideb
 
 **Option A — Pre-built DMG** (no Xcode required):
 
-Download the latest `SysControl.dmg` from [GitHub Releases](https://github.com/ks6573/Syscontrol/releases), drag to Applications, then bypass Gatekeeper on first launch (the app is ad-hoc signed, not notarized):
+Download the latest `SysControl.dmg` from [GitHub Releases](https://github.com/ks6573/SysControl/releases), drag to Applications, then bypass Gatekeeper on first launch (the app is ad-hoc signed, not notarized):
 
 ```bash
 xattr -r -d com.apple.quarantine /Applications/SysControl.app
@@ -35,7 +35,7 @@ Or right-click the app → **Open** → **Open** the first time.
 **Option B — Install from source** (compiles locally, bypasses Gatekeeper automatically):
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/Syscontrol/master/swift/install.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SysControl/master/swift/install.sh)"
 ```
 
 To update later: use **Check for Updates** in the app (⇧⌘U), or run `syscontrol-update` from Terminal.
@@ -45,8 +45,8 @@ To uninstall: re-run with `--uninstall`.
 **Option C — Build manually:**
 
 ```bash
-git clone https://github.com/ks6573/Syscontrol.git
-cd Syscontrol/swift
+git clone https://github.com/ks6573/SysControl.git
+cd SysControl/swift
 ./build.sh release
 open .build/SysControl.app
 ```
@@ -87,8 +87,8 @@ To change providers later, open **Settings** (⌘,).
 ## Installation (CLI only)
 
 ```bash
-git clone https://github.com/ks6573/Syscontrol.git
-cd Syscontrol
+git clone https://github.com/ks6573/SysControl.git
+cd SysControl
 
 # Install uv if needed
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -196,7 +196,7 @@ Each disabled tool returns an error with the exact flag needed to enable it.
   "mcpServers": {
     "system-monitor": {
       "command": "/path/to/uv",
-      "args": ["run", "/absolute/path/to/Syscontrol/mcp/server.py"],
+      "args": ["run", "/absolute/path/to/SysControl/mcp/server.py"],
       "env": {}
     }
   }
@@ -497,3 +497,8 @@ After `pip install -e .`, these registered scripts also work:
 | `syscontrol-server` | MCP server (stdio) |
 | `syscontrol-gui` | PySide6 GUI |
 
+---
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
