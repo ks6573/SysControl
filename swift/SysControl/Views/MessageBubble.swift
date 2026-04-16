@@ -7,6 +7,7 @@ struct MessageBubble: View {
     let isStreaming: Bool
 
     @State private var showCopied = false
+    @State private var isHoveringAssistantBubble = false
 
     var body: some View {
         switch message.role {
@@ -116,7 +117,8 @@ struct MessageBubble: View {
                 }
 
                 // Copy button (visible on hover via overlay)
-                if !isStreaming && !message.content.isEmpty && !message.isError {
+                if !isStreaming && !message.content.isEmpty && !message.isError
+                    && (isHoveringAssistantBubble || showCopied) {
                     Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(message.content, forType: .string)
@@ -132,6 +134,7 @@ struct MessageBubble: View {
                     .buttonStyle(.plain)
                     .help("Copy response")
                     .animation(.easeInOut(duration: 0.15), value: showCopied)
+                    .transition(.opacity)
                 }
             }
 
@@ -139,6 +142,9 @@ struct MessageBubble: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 4)
+        .onHover { hovering in
+            isHoveringAssistantBubble = hovering
+        }
     }
 
     // MARK: - Tool Indicator
@@ -191,10 +197,25 @@ private struct ChartImageView: View {
         }
         .padding(.vertical, 4)
         .task(id: path) {
+            if let cached = ChartImageCache.shared.object(forKey: path as NSString) {
+                nsImage = cached
+                return
+            }
             let loaded = await Task.detached(priority: .utility) {
                 NSImage(contentsOfFile: path)
             }.value
+            if let loaded {
+                ChartImageCache.shared.setObject(loaded, forKey: path as NSString)
+            }
             nsImage = loaded
         }
     }
+}
+
+private enum ChartImageCache {
+    static let shared: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 120
+        return cache
+    }()
 }

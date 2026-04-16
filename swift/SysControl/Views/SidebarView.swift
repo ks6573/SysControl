@@ -186,27 +186,11 @@ struct SidebarView: View {
 
             Section {
                 ForEach(appState.savedChats) { chat in
-                    HStack(spacing: 8) {
-                        Button {
-                            appState.openSavedChat(chat)
-                        } label: {
-                            SavedChatRow(chat: chat)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        Button(role: .destructive) {
-                            savedChatToDelete = chat
-                        } label: {
-                            Image(systemName: "trash")
-                                .font(.system(size: 12, weight: .semibold))
-                                .frame(width: 30, height: 30)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Delete chat")
-                    }
+                    SavedChatListRow(
+                        chat: chat,
+                        onOpen: { appState.openSavedChat(chat) },
+                        onDelete: { savedChatToDelete = chat }
+                    )
                     .listRowBackground(
                         appState.selectedSavedChat?.id == chat.id
                             ? Color.accentColor.opacity(0.14)
@@ -298,5 +282,51 @@ private struct SavedChatRow: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 3)
+    }
+}
+
+private struct SavedChatListRow: View {
+    let chat: SavedChat
+    let onOpen: () -> Void
+    let onDelete: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            SavedChatRow(chat: chat)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(isHovering ? 1 : 0)
+            .allowsHitTesting(isHovering)
+            .help("Delete chat")
+            .accessibilityLabel("Delete chat")
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onOpen()
+        }
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Saved chat \(chat.title)")
+        .accessibilityAction {
+            onOpen()
+        }
+        .contextMenu {
+            Button("Delete", role: .destructive) {
+                onDelete()
+            }
+        }
     }
 }

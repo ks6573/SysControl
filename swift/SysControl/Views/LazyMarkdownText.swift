@@ -13,6 +13,8 @@ struct LazyMarkdownText: View {
 
     @State private var rendered: AttributedString?
     @State private var renderTask: Task<Void, Never>?
+    @State private var renderedBlocks: [MarkdownBlock]?
+    @State private var renderedBlockSource: String = ""
 
     init(
         content: String,
@@ -34,11 +36,15 @@ struct LazyMarkdownText: View {
         let displayText = preprocessForReadability(content)
         Group {
             if style == .block {
-                RichMarkdownBlockView(
-                    content: displayText,
-                    font: font,
-                    foreground: foreground
-                )
+                if let renderedBlocks, renderedBlockSource == displayText {
+                    RichMarkdownBlockView(
+                        blocks: renderedBlocks,
+                        font: font,
+                        foreground: foreground
+                    )
+                } else {
+                    Text(displayText)
+                }
             } else {
                 if shouldParseMarkdown(displayText) {
                     if let rendered {
@@ -70,8 +76,31 @@ struct LazyMarkdownText: View {
         let snapshot = preprocessForReadability(original)
         if snapshot.isEmpty {
             rendered = AttributedString("")
+            renderedBlocks = []
+            renderedBlockSource = ""
             return
         }
+
+        if style == .block {
+            let delay: UInt64 = snapshot.count > largeTextThreshold
+                ? debounceMilliseconds
+                : max(20, debounceMilliseconds / 3)
+
+            renderTask = Task(priority: .utility) {
+                try? await Task.sleep(nanoseconds: delay * 1_000_000)
+                if Task.isCancelled { return }
+                let blocks = MarkdownBlockParser.parse(snapshot)
+                if Task.isCancelled { return }
+                await MainActor.run {
+                    if original == content {
+                        renderedBlocks = blocks
+                        renderedBlockSource = snapshot
+                    }
+                }
+            }
+            return
+        }
+
         if !shouldParseMarkdown(snapshot) {
             rendered = nil
             return
@@ -236,13 +265,9 @@ struct LazyMarkdownText: View {
 }
 
 private struct RichMarkdownBlockView: View {
-    let content: String
+    let blocks: [MarkdownBlock]
     let font: Font
     let foreground: Color
-
-    private var blocks: [MarkdownBlock] {
-        MarkdownBlockParser.parse(content)
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -490,12 +515,12 @@ private enum StructuredMarkdownParser {
     }
 }
 
-private enum MarkdownBlock {
+private enum MarkdownBlock: Sendable {
     case markdown(String)
     case table(MarkdownTableData)
 }
 
-private struct MarkdownTableData {
+private struct MarkdownTableData: Sendable {
     let headers: [String]
     let rows: [[String]]
 }

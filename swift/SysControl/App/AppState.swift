@@ -27,6 +27,8 @@ final class AppState {
     private let providerStore = ProviderConfigStore()
     private var pendingSavedChatRefreshWorkItem: DispatchWorkItem?
     private var reconnectAttempt = 0
+    private var reconnectTask: Task<Void, Never>?
+    private var hydratedSessionIDs: Set<UUID> = []
 
     // Token batching: accumulate tokens and flush every 50ms to reduce redraws
     private var tokenBuffer: String = ""
@@ -78,7 +80,6 @@ final class AppState {
         activeSessionID = session.id
         selectedSavedChat = nil
         selectedSavedChatContent = ""
-        backend?.clearSession()
         persistence.saveSession(session)
         persistence.saveSessionList(sessions)
     }
@@ -87,7 +88,6 @@ final class AppState {
         activeSessionID = session.id
         selectedSavedChat = nil
         selectedSavedChatContent = ""
-        backend?.clearSession()
     }
 
     func deleteSession(_ session: ChatSession) {
@@ -97,12 +97,12 @@ final class AppState {
             activeSessionID = sessions.first?.id
             selectedSavedChat = nil
             selectedSavedChatContent = ""
-            backend?.clearSession()
             if sessions.isEmpty {
                 createNewSession(autoSaveCurrent: false)
                 return
             }
         }
+        hydratedSessionIDs.remove(session.id)
         persistence.saveSessionList(sessions)
     }
 
@@ -155,6 +155,7 @@ final class AppState {
         providerConfiguration = configuration
         providerStore.save(configuration)
         modelName = configuration.model
+        hydratedSessionIDs.removeAll()
         backend?.configure(
             apiKey: configuration.apiKey,
             baseURL: configuration.baseURL,
@@ -168,6 +169,7 @@ final class AppState {
 
     func startBackend() {
         guard backend == nil else { return }
+        hydratedSessionIDs.removeAll()
 
         let service = BackendService()
         service.onReady = { [weak self] toolCount, model in
@@ -249,6 +251,8 @@ final class AppState {
         guard let session = activeSession else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let shouldSeedSessionHistory = !hydratedSessionIDs.contains(session.id)
+        let historySeed = shouldSeedSessionHistory ? bridgeHistory(for: session) : nil
 
         if Self.exitPhrases.contains(trimmed.lowercased()) {
             handleGoodbye()
@@ -278,11 +282,23 @@ final class AppState {
         }
 
         session.beginStreaming()
-        backend?.sendMessage(backendText)
+        backend?.sendMessage(
+            backendText,
+            sessionID: session.id.uuidString,
+            history: historySeed
+        )
+        if shouldSeedSessionHistory {
+            hydratedSessionIDs.insert(session.id)
+        }
         persistence.saveSession(session)
     }
 
     func stopBackend() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        pendingSavedChatRefreshWorkItem?.cancel()
+        tokenFlushWorkItem?.cancel()
+        hydratedSessionIDs.removeAll()
         autoSaveActiveSession()
         for session in sessions {
             persistence.saveSession(session)
@@ -304,16 +320,22 @@ final class AppState {
         reconnectAttempt += 1
         backendStatus = .reconnecting(attempt: reconnectAttempt)
         backend = nil
-        Task { @MainActor in
+        hydratedSessionIDs.removeAll()
+        reconnectTask?.cancel()
+        reconnectTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
+            if Task.isCancelled { return }
             startBackend()
         }
     }
 
     func retryConnection() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
         reconnectAttempt = 0
         backendStatus = .connecting
         backend = nil
+        hydratedSessionIDs.removeAll()
         startBackend()
     }
 
@@ -369,6 +391,19 @@ final class AppState {
         }
         pendingSavedChatRefreshWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+    }
+
+    private func bridgeHistory(for session: ChatSession) -> [[String: String]] {
+        session.messages.compactMap { message in
+            switch message.role {
+            case .user, .assistant:
+                let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                return ["role": message.role.rawValue, "content": message.content]
+            default:
+                return nil
+            }
+        }
     }
 
     private static let exitPhrases: Set<String> = [

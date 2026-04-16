@@ -178,7 +178,27 @@ fi
 
 # Ad-hoc code sign the entire app bundle
 echo "  Code signing app bundle..."
-codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || true
+if codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1; then
+    echo "  ✓ App bundle signed"
+else
+    echo "  ✗ Code signing failed"
+    if [ "$MODE" = "release" ]; then
+        echo "    Release build aborted because code signing is required."
+        exit 1
+    fi
+    echo "    Continuing debug build without valid signature."
+fi
+
+# Verify signature integrity for release builds
+if [ "$MODE" = "release" ]; then
+    echo "  Verifying app signature..."
+    if codesign --verify --deep --strict --verbose=2 "$APP_DIR" >/dev/null 2>&1; then
+        echo "  ✓ Signature verification passed"
+    else
+        echo "  ✗ Signature verification failed"
+        exit 1
+    fi
+fi
 
 echo "✓ App bundle: $APP_DIR"
 

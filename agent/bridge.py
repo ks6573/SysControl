@@ -8,8 +8,8 @@ MCPClientPool, run_streaming_turn) so every existing tool and the
 streaming agentic loop work out of the box.
 
 Protocol (stdin → bridge):
-    {"type":"user_message","text":"...","session_id":"..."}
-    {"type":"clear_session"}
+    {"type":"user_message","text":"...","session_id":"...","history":[{"role":"user","content":"..."}]}
+    {"type":"clear_session","session_id":"..."}  # omit session_id to clear all
     {"type":"shutdown"}
 
 Protocol (bridge → stdout):
@@ -108,6 +108,7 @@ def _read_command() -> dict | None:
 
 
 _CHART_IMAGE_RE = re.compile(r"\[chart_image:(.+?)\]")
+_ALLOWED_HISTORY_ROLES = {"system", "user", "assistant", "tool"}
 
 
 def _emit_tool_finished(name: str, result: str) -> None:
@@ -123,6 +124,28 @@ def _emit_tool_finished(name: str, result: str) -> None:
         if not os.path.basename(resolved).startswith("syscontrol_chart_"):
             continue
         _emit({"type": "chart_image", "path": resolved})
+
+
+def _coerce_history(raw_history: object) -> list[dict]:
+    """Validate and normalize optional history payload from stdin command."""
+    if not isinstance(raw_history, list):
+        return []
+
+    normalized: list[dict] = []
+    for item in raw_history:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if not isinstance(role, str) or not isinstance(content, str):
+            continue
+        role_name = role.strip().lower()
+        if role_name not in _ALLOWED_HISTORY_ROLES:
+            continue
+        if not content.strip():
+            continue
+        normalized.append({"role": role_name, "content": content})
+    return normalized
 
 
 # ── Bridge helpers ────────────────────────────────────────────────────────────
@@ -172,7 +195,7 @@ _cancel_event: threading.Event | None = None
 
 def _handle_user_message(
     cmd: dict,
-    messages: list[dict],
+    session_histories: dict[str, list[dict]],
     llm: OpenAI,
     pool: MCPClientPool,
     tools: list[dict],
@@ -184,7 +207,7 @@ def _handle_user_message(
 
     Args:
         cmd: The parsed command dict (must have ``type == "user_message"``).
-        messages: Mutable conversation history — appended in-place.
+        session_histories: Mutable map of ``session_id`` to conversation history.
         llm: OpenAI-compatible client.
         pool: MCP client pool for tool execution.
         tools: Tool definitions in OpenAI format.
@@ -193,6 +216,12 @@ def _handle_user_message(
         log: File-like object for internal error logging (typically stderr).
     """
     global _cancel_event
+
+    raw_session_id = cmd.get("session_id", "default")
+    session_id = str(raw_session_id).strip() or "default"
+    messages = session_histories.setdefault(session_id, [])
+    if not messages:
+        messages.extend(_coerce_history(cmd.get("history")))
 
     text = cmd.get("text", "").strip()
     if not text:
@@ -247,7 +276,7 @@ def _event_loop(
     in progress.  Unknown command types are silently ignored for forward
     compatibility.
     """
-    messages: list[dict] = []
+    session_histories: dict[str, list[dict]] = {}
     turn_thread: threading.Thread | None = None
 
     while True:
@@ -268,14 +297,21 @@ def _event_loop(
             if _cancel_event is not None:
                 _cancel_event.set()
         elif cmd_type == "clear_session":
-            messages.clear()
-            _emit({"type": "session_cleared"})
+            raw_session_id = cmd.get("session_id")
+            session_id = str(raw_session_id).strip() if isinstance(raw_session_id, str) else ""
+            if session_id:
+                session_histories.pop(session_id, None)
+                _emit({"type": "session_cleared", "session_id": session_id})
+            else:
+                session_histories.clear()
+                _emit({"type": "session_cleared"})
         elif cmd_type == "configure":
             # Allow runtime reconfiguration of provider.
             api_key = cmd.get("api_key", llm.api_key)
             base_url = cmd.get("base_url", str(llm.base_url))
             model = cmd.get("model", model)
             llm = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+            session_histories.clear()
             _emit({"type": "configured", "model": model})
         elif cmd_type == "user_message":
             # Wait for any prior turn to finish before starting a new one.
@@ -283,7 +319,7 @@ def _event_loop(
                 turn_thread.join()
             turn_thread = threading.Thread(
                 target=_handle_user_message,
-                args=(cmd, messages, llm, pool, tools, system_message, model, log),
+                args=(cmd, session_histories, llm, pool, tools, system_message, model, log),
                 daemon=True,
             )
             turn_thread.start()

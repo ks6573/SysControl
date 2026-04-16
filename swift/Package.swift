@@ -10,6 +10,9 @@ let package = Package(
         .executableTarget(
             name: "SysControl",
             path: "SysControl",
+            exclude: [
+                "Resources",
+            ],
             sources: [
                 "App/SysControlApp.swift",
                 "App/AppState.swift",

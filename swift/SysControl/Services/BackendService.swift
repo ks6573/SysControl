@@ -126,16 +126,30 @@ final class BackendService: @unchecked Sendable {
 
     // MARK: - Commands
 
-    func sendMessage(_ text: String) {
-        sendCommand(["type": "user_message", "text": text])
+    func sendMessage(_ text: String, sessionID: String? = nil, history: [[String: String]]? = nil) {
+        var command: [String: Any] = [
+            "type": "user_message",
+            "text": text,
+        ]
+        if let sessionID, !sessionID.isEmpty {
+            command["session_id"] = sessionID
+        }
+        if let history, !history.isEmpty {
+            command["history"] = history
+        }
+        sendCommand(command)
     }
 
     func cancelRequest() {
         sendCommand(["type": "cancel"])
     }
 
-    func clearSession() {
-        sendCommand(["type": "clear_session"])
+    func clearSession(sessionID: String? = nil) {
+        var command: [String: Any] = ["type": "clear_session"]
+        if let sessionID, !sessionID.isEmpty {
+            command["session_id"] = sessionID
+        }
+        sendCommand(command)
     }
 
     func configure(apiKey: String, baseURL: String, model: String) {
