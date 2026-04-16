@@ -106,6 +106,23 @@ final class AppState {
         persistence.saveSessionList(sessions)
     }
 
+    func setSessionPinned(_ session: ChatSession, pinned: Bool) {
+        guard let index = sessions.firstIndex(where: { $0.id == session.id }) else { return }
+        let target = sessions[index]
+        target.isPinned = pinned
+
+        // Keep sidebar ordering predictable after pin changes.
+        sessions.sort { lhs, rhs in
+            if lhs.isPinned != rhs.isPinned {
+                return lhs.isPinned && !rhs.isPinned
+            }
+            return lhs.createdAt > rhs.createdAt
+        }
+
+        persistence.saveSession(target)
+        persistence.saveSessionList(sessions)
+    }
+
     // MARK: - Saved Markdown Chats
 
     func refreshSavedChats() {

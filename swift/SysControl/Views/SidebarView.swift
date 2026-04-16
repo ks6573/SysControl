@@ -12,6 +12,23 @@ struct SidebarView: View {
         UTType(filenameExtension: "md") ?? .plainText
     }
 
+    private var pinnedSessions: [ChatSession] {
+        appState.sessions.filter(\.isPinned)
+    }
+
+    private var recentSessionGroups: [SessionGroup] {
+        var grouped: [SessionBucket: [ChatSession]] = [:]
+        for session in appState.sessions where !session.isPinned {
+            let bucket = SessionBucket.bucket(for: session.createdAt)
+            grouped[bucket, default: []].append(session)
+        }
+
+        return SessionBucket.allCases.compactMap { bucket in
+            guard let sessions = grouped[bucket], !sessions.isEmpty else { return nil }
+            return SessionGroup(bucket: bucket, sessions: sessions)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -161,26 +178,61 @@ struct SidebarView: View {
 
     private var sidebarList: some View {
         List {
-            Section("Chats") {
-                ForEach(appState.sessions) { session in
-                    Button {
-                        appState.selectSession(session)
-                    } label: {
-                        SessionRow(session: session)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
+            Section {
+                NewChatListRow {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        appState.createNewSession()
                     }
-                    .buttonStyle(.plain)
-                    .listRowBackground(
-                        appState.activeSessionID == session.id && appState.selectedSavedChat == nil
-                            ? Color.accentColor.opacity(0.14)
-                            : Color.clear
-                    )
-                    .contextMenu {
-                        Button("Delete", role: .destructive) {
-                            sessionToDelete = session
+                }
+                .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 8))
+                .listRowBackground(Color.clear)
+            } header: {
+                sectionHeader("Chats")
+            }
+
+            if !pinnedSessions.isEmpty {
+                Section {
+                    ForEach(pinnedSessions) { session in
+                        SessionListRow(
+                            session: session,
+                            isSelected: appState.activeSessionID == session.id && appState.selectedSavedChat == nil,
+                            onOpen: { appState.selectSession(session) },
+                            onTogglePin: {
+                                appState.setSessionPinned(session, pinned: !session.isPinned)
+                            },
+                            onDelete: { sessionToDelete = session }
+                        )
+                        .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 8))
+                        .listRowBackground(Color.clear)
+                    }
+                } header: {
+                    sectionHeader("Pinned")
+                }
+            }
+
+            if !recentSessionGroups.isEmpty {
+                Section {
+                    ForEach(recentSessionGroups) { group in
+                        SessionGroupLabelRow(title: group.bucket.title)
+                            .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 2, trailing: 8))
+                            .listRowBackground(Color.clear)
+
+                        ForEach(group.sessions) { session in
+                            SessionListRow(
+                                session: session,
+                                isSelected: appState.activeSessionID == session.id && appState.selectedSavedChat == nil,
+                                onOpen: { appState.selectSession(session) },
+                                onTogglePin: {
+                                    appState.setSessionPinned(session, pinned: !session.isPinned)
+                                },
+                                onDelete: { sessionToDelete = session }
+                            )
+                            .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 8))
+                            .listRowBackground(Color.clear)
                         }
                     }
+                } header: {
+                    sectionHeader("Recent")
                 }
             }
 
@@ -188,18 +240,16 @@ struct SidebarView: View {
                 ForEach(appState.savedChats) { chat in
                     SavedChatListRow(
                         chat: chat,
+                        isSelected: appState.selectedSavedChat?.id == chat.id,
                         onOpen: { appState.openSavedChat(chat) },
                         onDelete: { savedChatToDelete = chat }
                     )
-                    .listRowBackground(
-                        appState.selectedSavedChat?.id == chat.id
-                            ? Color.accentColor.opacity(0.14)
-                            : Color.clear
-                    )
+                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 8))
+                    .listRowBackground(Color.clear)
                 }
             } header: {
                 HStack {
-                    Text("Other Chats")
+                    sectionHeader("Other Chats")
                     Spacer()
                     Button {
                         isImporterPresented = true
@@ -212,6 +262,14 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .environment(\.defaultMinListRowHeight, 40)
+    }
+
+    private func sectionHeader(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .textCase(nil)
     }
 
     private func importDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
@@ -232,77 +290,184 @@ struct SidebarView: View {
     }
 }
 
-private struct SessionRow: View {
-    let session: ChatSession
+private struct SessionGroup: Identifiable {
+    let bucket: SessionBucket
+    let sessions: [ChatSession]
 
-    private var messagePreview: String? {
-        guard let first = session.messages.first(where: { $0.role == .user }) else { return nil }
-        let text = first.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? nil : String(text.prefix(50))
+    var id: SessionBucket {
+        bucket
+    }
+}
+
+private enum SessionBucket: Int, CaseIterable, Hashable {
+    case today
+    case yesterday
+    case previous7Days
+    case previous30Days
+    case older
+
+    var title: String {
+        switch self {
+        case .today:
+            return "Today"
+        case .yesterday:
+            return "Yesterday"
+        case .previous7Days:
+            return "Previous 7 Days"
+        case .previous30Days:
+            return "Previous 30 Days"
+        case .older:
+            return "Older"
+        }
+    }
+
+    static func bucket(for date: Date, calendar: Calendar = .current) -> SessionBucket {
+        if calendar.isDateInToday(date) {
+            return .today
+        }
+        if calendar.isDateInYesterday(date) {
+            return .yesterday
+        }
+
+        let now = Date()
+        let dayDelta = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: date),
+            to: calendar.startOfDay(for: now)
+        ).day ?? Int.max
+
+        if dayDelta >= 0 && dayDelta <= 7 {
+            return .previous7Days
+        }
+        if dayDelta >= 0 && dayDelta <= 30 {
+            return .previous30Days
+        }
+        return .older
+    }
+}
+
+private struct NewChatListRow: View {
+    let onCreate: () -> Void
+
+    @State private var isHovering = false
+
+    private var backgroundFill: Color {
+        isHovering ? Color.primary.opacity(0.07) : .clear
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(session.title)
-                .font(.system(size: 13, weight: .medium))
-                .lineLimit(1)
-                .truncationMode(.tail)
-            if let preview = messagePreview {
-                Text(preview)
-                    .font(.caption)
+        Button(action: onCreate) {
+            HStack(spacing: 8) {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
+                Text("New chat")
+                    .font(.system(size: 14, weight: .semibold))
                     .lineLimit(1)
-                    .truncationMode(.tail)
+                Spacer()
             }
-            HStack(spacing: 4) {
-                Text(session.createdAt, style: .relative)
-                if !session.messages.isEmpty {
-                    Text("·")
-                    Text("\(session.messages.count) messages")
-                }
-            }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(backgroundFill)
+            )
+            .animation(.easeInOut(duration: 0.14), value: isHovering)
         }
-        .padding(.vertical, 3)
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        .accessibilityLabel("New chat")
     }
 }
 
-private struct SavedChatRow: View {
-    let chat: SavedChat
+private struct SessionGroupLabelRow: View {
+    let title: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(chat.title)
-                .font(.system(size: 13, weight: .medium))
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Text(chat.dateLabel)
-                .font(.caption2)
+        HStack {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.tertiary)
+                .textCase(.uppercase)
+            Spacer()
         }
-        .padding(.vertical, 3)
+        .padding(.horizontal, 8)
     }
 }
 
-private struct SavedChatListRow: View {
-    let chat: SavedChat
+private struct SessionListRow: View {
+    let session: ChatSession
+    let isSelected: Bool
     let onOpen: () -> Void
+    let onTogglePin: () -> Void
     let onDelete: () -> Void
 
     @State private var isHovering = false
 
+    private var displayTitle: String {
+        let normalized = session.title.replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? "New Chat" : normalized
+    }
+
+    private var metadata: String {
+        if session.messages.isEmpty {
+            return session.createdAt.sidebarLabel
+        }
+        return "\(session.createdAt.sidebarLabel) · \(session.messages.count) messages"
+    }
+
+    private var backgroundFill: Color {
+        if isSelected {
+            return Color.accentColor.opacity(0.18)
+        }
+        if isHovering {
+            return Color.primary.opacity(0.07)
+        }
+        return .clear
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            SavedChatRow(chat: chat)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: isHovering || isSelected ? 3 : 0) {
+                Text(displayTitle)
+                    .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                if isHovering || isSelected {
+                    Text(metadata)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                onTogglePin()
+            } label: {
+                Image(systemName: session.isPinned ? "pin.slash" : "pin")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(isHovering || session.isPinned ? 1 : 0)
+            .allowsHitTesting(isHovering || session.isPinned)
+            .help(session.isPinned ? "Unpin chat" : "Pin chat")
+            .accessibilityLabel(session.isPinned ? "Unpin chat" : "Pin chat")
 
             Button(role: .destructive) {
                 onDelete()
             } label: {
                 Image(systemName: "trash")
                     .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 30, height: 30)
+                    .frame(width: 26, height: 26)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -311,6 +476,102 @@ private struct SavedChatListRow: View {
             .help("Delete chat")
             .accessibilityLabel("Delete chat")
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(backgroundFill)
+        )
+        .animation(.easeInOut(duration: 0.14), value: isHovering)
+        .animation(.easeInOut(duration: 0.14), value: isSelected)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onOpen()
+        }
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        .contextMenu {
+            Button(session.isPinned ? "Unpin" : "Pin") {
+                onTogglePin()
+            }
+            Button("Delete", role: .destructive) {
+                onDelete()
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Chat \(displayTitle)\(session.isPinned ? ", pinned" : "")")
+        .accessibilityAction {
+            onOpen()
+        }
+    }
+}
+
+private struct SavedChatListRow: View {
+    let chat: SavedChat
+    let isSelected: Bool
+    let onOpen: () -> Void
+    let onDelete: () -> Void
+
+    @State private var isHovering = false
+
+    private var displayTitle: String {
+        let normalized = chat.title.replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? "Saved Chat" : normalized
+    }
+
+    private var backgroundFill: Color {
+        if isSelected {
+            return Color.accentColor.opacity(0.18)
+        }
+        if isHovering {
+            return Color.primary.opacity(0.07)
+        }
+        return .clear
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: isHovering || isSelected ? 3 : 0) {
+                Text(displayTitle)
+                    .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                if isHovering || isSelected {
+                    Text(chat.dateLabel)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(isHovering ? 1 : 0)
+            .allowsHitTesting(isHovering)
+            .help("Delete chat")
+            .accessibilityLabel("Delete chat")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(backgroundFill)
+        )
+        .animation(.easeInOut(duration: 0.14), value: isHovering)
+        .animation(.easeInOut(duration: 0.14), value: isSelected)
         .contentShape(Rectangle())
         .onTapGesture {
             onOpen()
@@ -328,5 +589,34 @@ private struct SavedChatListRow: View {
                 onDelete()
             }
         }
+    }
+}
+
+private extension Date {
+    var sidebarLabel: String {
+        let calendar = Calendar.current
+        let now = Date()
+
+        if calendar.isDateInToday(self) {
+            return formatted(date: .omitted, time: .shortened)
+        }
+        if calendar.isDateInYesterday(self) {
+            return "Yesterday"
+        }
+
+        let dayDelta = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: self),
+            to: calendar.startOfDay(for: now)
+        ).day ?? Int.max
+
+        if dayDelta >= 0 && dayDelta < 7 {
+            return "\(dayDelta)d ago"
+        }
+
+        if calendar.isDate(self, equalTo: now, toGranularity: .year) {
+            return formatted(.dateTime.month(.abbreviated).day())
+        }
+        return formatted(.dateTime.month(.abbreviated).day().year())
     }
 }

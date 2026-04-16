@@ -1,6 +1,6 @@
 [project]
 name = "syscontrol"
-version = "1.4.6"
+version = "1.4.7"
 description = "All-In-One AI agent with MCP tool server; Ultron but slightly weaker and nicer 😉"
 readme = "README.md"
 license = { file = "LICENSE" }

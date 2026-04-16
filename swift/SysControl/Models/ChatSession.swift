@@ -8,6 +8,7 @@ final class ChatSession: Identifiable, Codable {
     var title: String
     var messages: [ChatMessage]
     let createdAt: Date
+    var isPinned: Bool = false
     var isStreaming: Bool = false
     var activeToolNames: [String] = []
     var wasAutoSavedToHistory: Bool = false
@@ -26,7 +27,7 @@ final class ChatSession: Identifiable, Codable {
     // MARK: - Codable
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, createdAt, wasAutoSavedToHistory
+        case id, title, messages, createdAt, isPinned, wasAutoSavedToHistory
     }
 
     required init(from decoder: Decoder) throws {
@@ -35,6 +36,7 @@ final class ChatSession: Identifiable, Codable {
         title = try c.decode(String.self, forKey: .title)
         messages = try c.decode([ChatMessage].self, forKey: .messages)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
+        isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         wasAutoSavedToHistory = try c.decodeIfPresent(Bool.self, forKey: .wasAutoSavedToHistory) ?? false
     }
 
@@ -44,6 +46,7 @@ final class ChatSession: Identifiable, Codable {
         try c.encode(title, forKey: .title)
         try c.encode(messages, forKey: .messages)
         try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(isPinned, forKey: .isPinned)
         try c.encode(wasAutoSavedToHistory, forKey: .wasAutoSavedToHistory)
     }
 
