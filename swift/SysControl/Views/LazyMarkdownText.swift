@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import SwiftUI
 
 /// Render markdown asynchronously with small debouncing and in-memory caching.
@@ -9,6 +10,8 @@ struct LazyMarkdownText: View {
     let foreground: Color
     let debounceMilliseconds: UInt64
     let largeTextThreshold: Int
+    let highlightQuery: String
+    let isFocusedMatch: Bool
     private let autoParagraphMinLength = 180
 
     @State private var rendered: AttributedString?
@@ -22,7 +25,9 @@ struct LazyMarkdownText: View {
         font: Font = .system(size: 14),
         foreground: Color = .primary,
         debounceMilliseconds: UInt64 = 90,
-        largeTextThreshold: Int = 6000
+        largeTextThreshold: Int = 6000,
+        highlightQuery: String = "",
+        isFocusedMatch: Bool = false
     ) {
         self.content = content
         self.style = style
@@ -30,30 +35,34 @@ struct LazyMarkdownText: View {
         self.foreground = foreground
         self.debounceMilliseconds = debounceMilliseconds
         self.largeTextThreshold = largeTextThreshold
+        self.highlightQuery = highlightQuery
+        self.isFocusedMatch = isFocusedMatch
     }
 
     var body: some View {
         let displayText = preprocessForReadability(content)
         Group {
             if style == .block {
-                if let renderedBlocks, renderedBlockSource == displayText {
+                if let renderedBlocks, !renderedBlockSource.isEmpty {
                     RichMarkdownBlockView(
                         blocks: renderedBlocks,
                         font: font,
-                        foreground: foreground
+                        foreground: foreground,
+                        highlightQuery: highlightQuery,
+                        isFocusedMatch: isFocusedMatch
                     )
                 } else {
-                    Text(displayText)
+                    Text(highlightedPlainText(displayText))
                 }
             } else {
                 if shouldParseMarkdown(displayText) {
                     if let rendered {
-                        Text(rendered)
+                        Text(highlighted(rendered, source: displayText))
                     } else {
-                        Text(displayText)
+                        Text(highlightedPlainText(displayText))
                     }
                 } else {
-                    Text(displayText)
+                    Text(highlightedPlainText(displayText))
                 }
             }
         }
@@ -68,6 +77,19 @@ struct LazyMarkdownText: View {
         .onDisappear {
             renderTask?.cancel()
         }
+    }
+
+    private func highlightedPlainText(_ text: String) -> AttributedString {
+        SearchHighlightRenderer.attributed(from: text, query: highlightQuery, focused: isFocusedMatch)
+    }
+
+    private func highlighted(_ attributed: AttributedString, source: String) -> AttributedString {
+        SearchHighlightRenderer.apply(
+            to: attributed,
+            source: source,
+            query: highlightQuery,
+            focused: isFocusedMatch
+        )
     }
 
     private func scheduleRender() {
@@ -268,6 +290,8 @@ private struct RichMarkdownBlockView: View {
     let blocks: [MarkdownBlock]
     let font: Font
     let foreground: Color
+    let highlightQuery: String
+    let isFocusedMatch: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -277,10 +301,16 @@ private struct RichMarkdownBlockView: View {
                     StructuredMarkdownTextView(
                         content: text,
                         font: font,
-                        foreground: foreground
+                        foreground: foreground,
+                        highlightQuery: highlightQuery,
+                        isFocusedMatch: isFocusedMatch
                     )
                 case let .table(table):
-                    MarkdownTableView(table: table)
+                    MarkdownTableView(
+                        table: table,
+                        highlightQuery: highlightQuery,
+                        isFocusedMatch: isFocusedMatch
+                    )
                 }
             }
         }
@@ -291,79 +321,99 @@ private struct StructuredMarkdownTextView: View {
     let content: String
     let font: Font
     let foreground: Color
+    let highlightQuery: String
+    let isFocusedMatch: Bool
 
-    private var items: [StructuredLine] {
-        StructuredMarkdownParser.parse(content)
-    }
+    @State private var items: [StructuredLine] = []
+    @State private var parseTask: Task<Void, Never>?
+    @State private var renderedSource: String = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                switch item {
-                case let .heading(level, text):
-                    Text(inlineMarkdown(text))
-                        .font(headingFont(level))
-                        .foregroundStyle(foreground)
-                case let .bullet(text):
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("•")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(foreground.opacity(0.9))
-                            .padding(.top, 1)
-                        Text(inlineMarkdown(text))
-                            .font(font)
-                            .foregroundStyle(foreground)
-                    }
-                case let .numbered(index, text):
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("\(index).")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(foreground.opacity(0.9))
-                            .padding(.top, 1)
-                        Text(inlineMarkdown(text))
-                            .font(font)
-                            .foregroundStyle(foreground)
-                    }
-                case let .paragraph(text):
-                    Text(inlineMarkdown(text))
-                        .font(font)
-                        .foregroundStyle(foreground)
-                        .lineSpacing(4)
-                case let .codeBlock(language, code):
-                    VStack(alignment: .leading, spacing: 0) {
-                        if !language.isEmpty {
-                            Text(language)
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 12)
-                                .padding(.top, 6)
-                                .padding(.bottom, 2)
-                        }
-                        ScrollView(.horizontal, showsIndicators: true) {
-                            Text(SyntaxHighlighter.highlight(code, language: language))
-                                .font(.system(size: 12, design: .monospaced))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, language.isEmpty ? 10 : 6)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+        Group {
+            if renderedSource == content {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                        switch item {
+                        case let .heading(level, text):
+                            Text(inlineMarkdown(text))
+                                .font(headingFont(level))
+                                .foregroundStyle(foreground)
+                        case let .bullet(text):
+                            HStack(alignment: .top, spacing: 8) {
+                                Text("•")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(foreground.opacity(0.9))
+                                    .padding(.top, 1)
+                                Text(inlineMarkdown(text))
+                                    .font(font)
+                                    .foregroundStyle(foreground)
+                            }
+                        case let .numbered(index, text):
+                            HStack(alignment: .top, spacing: 8) {
+                                Text("\(index).")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(foreground.opacity(0.9))
+                                    .padding(.top, 1)
+                                Text(inlineMarkdown(text))
+                                    .font(font)
+                                    .foregroundStyle(foreground)
+                            }
+                        case let .paragraph(text):
+                            Text(inlineMarkdown(text))
+                                .font(font)
+                                .foregroundStyle(foreground)
+                                .lineSpacing(4)
+                        case let .codeBlock(language, code):
+                            CodeBlockView(language: language, code: code)
+                        case .spacer:
+                            Spacer()
+                                .frame(height: 4)
                         }
                     }
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.primary.opacity(0.08))
-                    )
-                case .spacer:
-                    Spacer()
-                        .frame(height: 4)
+                }
+            } else {
+                Text(content)
+                    .font(font)
+                    .foregroundStyle(foreground)
+                    .lineSpacing(4)
+            }
+        }
+        .onAppear(perform: scheduleParse)
+        .onChange(of: content) { _, _ in
+            scheduleParse()
+        }
+        .onDisappear {
+            parseTask?.cancel()
+        }
+    }
+
+    private func scheduleParse() {
+        parseTask?.cancel()
+        let snapshot = content
+        if snapshot.isEmpty {
+            items = []
+            renderedSource = ""
+            return
+        }
+        parseTask = Task(priority: .utility) {
+            let parsed = StructuredMarkdownParser.parse(snapshot)
+            if Task.isCancelled { return }
+            await MainActor.run {
+                if snapshot == content {
+                    items = parsed
+                    renderedSource = snapshot
                 }
             }
         }
     }
 
     private func inlineMarkdown(_ text: String) -> AttributedString {
-        (try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(text)
+        SearchHighlightRenderer.apply(
+            to: InlineMarkdownRenderCache.shared.render(text),
+            source: text,
+            query: highlightQuery,
+            focused: isFocusedMatch
+        )
     }
 
     private func headingFont(_ level: Int) -> Font {
@@ -376,7 +426,62 @@ private struct StructuredMarkdownTextView: View {
     }
 }
 
-private enum StructuredLine {
+private struct CodeBlockView: View {
+    let language: String
+    let code: String
+
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                if !language.isEmpty {
+                    Text(language)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("code")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(code, forType: .string)
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.25) {
+                        copied = false
+                    }
+                } label: {
+                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark.circle.fill" : "doc.on.doc")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(copied ? Color.green : Color.secondary)
+                .help("Copy code block")
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 7)
+            .padding(.bottom, 4)
+
+            ScrollView(.horizontal, showsIndicators: true) {
+                Text(SyntaxHighlighter.highlight(code, language: language))
+                    .font(.system(size: 12, design: .monospaced))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, language.isEmpty ? 10 : 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.08))
+        )
+    }
+}
+
+private enum StructuredLine: Sendable {
     case heading(level: Int, text: String)
     case bullet(text: String)
     case numbered(index: String, text: String)
@@ -520,7 +625,7 @@ private enum MarkdownBlock: Sendable {
     case table(MarkdownTableData)
 }
 
-private struct MarkdownTableData: Sendable {
+private struct MarkdownTableData: Sendable, Hashable {
     let headers: [String]
     let rows: [[String]]
 }
@@ -619,6 +724,8 @@ private enum MarkdownBlockParser {
 
 private struct MarkdownTableView: View {
     let table: MarkdownTableData
+    let highlightQuery: String
+    let isFocusedMatch: Bool
 
     private let headerBackground = Color.primary.opacity(0.08)
     private let rowBackground = Color.primary.opacity(0.03)
@@ -658,10 +765,12 @@ private struct MarkdownTableView: View {
 
     @ViewBuilder
     private func cellView(text: String, isHeader: Bool) -> some View {
-        let parsed = (try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(text)
+        let parsed = SearchHighlightRenderer.apply(
+            to: InlineMarkdownRenderCache.shared.render(text),
+            source: text,
+            query: highlightQuery,
+            focused: isFocusedMatch
+        )
 
         Text(parsed)
             .font(.system(size: 13, weight: isHeader ? .semibold : .regular))
@@ -679,6 +788,78 @@ private struct MarkdownTableView: View {
                     .fill(borderColor)
                     .frame(height: 1)
             }
+    }
+}
+
+private enum SearchHighlightRenderer {
+    static func attributed(from text: String, query: String, focused: Bool) -> AttributedString {
+        apply(to: AttributedString(text), source: text, query: query, focused: focused)
+    }
+
+    static func apply(
+        to attributed: AttributedString,
+        source: String,
+        query: String,
+        focused: Bool
+    ) -> AttributedString {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return attributed }
+
+        var rendered = attributed
+        let color = focused
+            ? NSColor.systemYellow.withAlphaComponent(0.36)
+            : NSColor.systemYellow.withAlphaComponent(0.24)
+        var start = source.startIndex
+        while start < source.endIndex,
+              let range = source.range(
+                  of: needle,
+                  options: [.caseInsensitive, .diacriticInsensitive],
+                  range: start..<source.endIndex
+              ) {
+            if let attributedRange = Range(range, in: rendered) {
+                rendered[attributedRange].backgroundColor = color
+            }
+            start = range.upperBound
+        }
+        return rendered
+    }
+}
+
+private final class InlineMarkdownRenderCache {
+    static let shared = InlineMarkdownRenderCache()
+
+    private let maxEntries = 600
+    private var values: [String: AttributedString] = [:]
+    private var order: [String] = []
+    private let lock = NSLock()
+
+    func render(_ text: String) -> AttributedString {
+        lock.lock()
+        if let cached = values[text] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let rendered = (try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(text)
+
+        lock.lock()
+        values[text] = rendered
+        order.append(text)
+        if order.count > maxEntries {
+            let overflow = order.count - maxEntries
+            if overflow > 0 {
+                for _ in 0..<overflow {
+                    let key = order.removeFirst()
+                    values.removeValue(forKey: key)
+                }
+            }
+        }
+        lock.unlock()
+        return rendered
     }
 }
 

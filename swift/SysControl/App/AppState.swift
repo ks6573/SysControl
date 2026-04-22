@@ -29,6 +29,8 @@ final class AppState {
     private var reconnectAttempt = 0
     private var reconnectTask: Task<Void, Never>?
     private var hydratedSessionIDs: Set<UUID> = []
+    private var isShuttingDownBackend = false
+    private var savedChatsRefreshNonce: UInt = 0
 
     // Token batching: accumulate tokens and flush every 50ms to reduce redraws
     private var tokenBuffer: String = ""
@@ -126,12 +128,30 @@ final class AppState {
     // MARK: - Saved Markdown Chats
 
     func refreshSavedChats() {
-        savedChats = history.listSavedChats()
+        savedChatsRefreshNonce &+= 1
+        let refreshNonce = savedChatsRefreshNonce
+        DispatchQueue.global(qos: .utility).async { [history] in
+            let chats = history.listSavedChats()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard refreshNonce == self.savedChatsRefreshNonce else { return }
+                self.savedChats = chats
+            }
+        }
     }
 
     func openSavedChat(_ chat: SavedChat) {
         selectedSavedChat = chat
-        selectedSavedChatContent = history.readChat(at: chat.path)
+        selectedSavedChatContent = ""
+        let selectedChatID = chat.id
+        DispatchQueue.global(qos: .userInitiated).async { [history] in
+            let content = history.readChat(at: chat.path)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard self.selectedSavedChat?.id == selectedChatID else { return }
+                self.selectedSavedChatContent = content
+            }
+        }
     }
 
     func closeSavedChat() {
@@ -186,6 +206,7 @@ final class AppState {
 
     func startBackend() {
         guard backend == nil else { return }
+        isShuttingDownBackend = false
         hydratedSessionIDs.removeAll()
 
         let service = BackendService()
@@ -311,6 +332,7 @@ final class AppState {
     }
 
     func stopBackend() {
+        isShuttingDownBackend = true
         reconnectTask?.cancel()
         reconnectTask = nil
         pendingSavedChatRefreshWorkItem?.cancel()
@@ -328,6 +350,7 @@ final class AppState {
     // MARK: - Auto Reconnect
 
     private func scheduleReconnect() {
+        guard !isShuttingDownBackend else { return }
         guard reconnectAttempt < 5 else {
             backendStatus = .failed(message: "Could not connect to backend")
             connectionError = "Could not connect to backend"
@@ -347,6 +370,7 @@ final class AppState {
     }
 
     func retryConnection() {
+        isShuttingDownBackend = false
         reconnectTask?.cancel()
         reconnectTask = nil
         reconnectAttempt = 0

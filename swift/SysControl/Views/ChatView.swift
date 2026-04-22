@@ -11,13 +11,18 @@ struct ChatView: View {
     @State private var isDropTargeted: Bool = false
     @State private var isSearchVisible: Bool = false
     @State private var searchText: String = ""
+    @State private var autoScrollEnabled: Bool = true
+    @State private var searchMatchMessageIDs: [UUID] = []
+    @State private var focusedSearchMatchIndex: Int = 0
 
-    private func filteredMessages(_ session: ChatSession) -> [ChatMessage] {
-        guard isSearchVisible, !searchText.isEmpty else { return session.messages }
-        let query = searchText.lowercased()
-        return session.messages.filter { msg in
-            msg.content.lowercased().contains(query)
-        }
+    private var normalizedSearchQuery: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var focusedSearchMatchID: UUID? {
+        guard !searchMatchMessageIDs.isEmpty else { return nil }
+        let index = min(max(focusedSearchMatchIndex, 0), searchMatchMessageIDs.count - 1)
+        return searchMatchMessageIDs[index]
     }
 
     var body: some View {
@@ -30,6 +35,41 @@ struct ChatView: View {
                     TextField("Search messages…", text: $searchText)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13))
+                        .onKeyPress(.return, phases: .down) { press in
+                            if press.modifiers.contains(.shift) {
+                                focusPreviousSearchMatch()
+                            } else {
+                                focusNextSearchMatch()
+                            }
+                            return .handled
+                        }
+                    if !normalizedSearchQuery.isEmpty {
+                        Text("\(searchMatchMessageIDs.count) match\(searchMatchMessageIDs.count == 1 ? "" : "es")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Button {
+                            focusPreviousSearchMatch()
+                        } label: {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .disabled(searchMatchMessageIDs.isEmpty)
+                        .help("Previous match")
+
+                        Button {
+                            focusNextSearchMatch()
+                        } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .disabled(searchMatchMessageIDs.isEmpty)
+                        .help("Next match")
+                    }
                     if !searchText.isEmpty {
                         Button {
                             searchText = ""
@@ -42,6 +82,8 @@ struct ChatView: View {
                     Button {
                         isSearchVisible = false
                         searchText = ""
+                        searchMatchMessageIDs = []
+                        focusedSearchMatchIndex = 0
                     } label: {
                         Text("Done")
                             .font(.system(size: 12))
@@ -75,6 +117,7 @@ struct ChatView: View {
             // Input bar
             InputBar(
                 onSend: { text, filePath in
+                    autoScrollEnabled = true
                     appState.sendMessage(text, attachedFilePath: filePath)
                 },
                 onCancel: { appState.cancelRequest() },
@@ -95,46 +138,92 @@ struct ChatView: View {
         .onKeyPress(characters: CharacterSet(charactersIn: "f"), phases: .down) { press in
             guard press.modifiers.contains(.command) else { return .ignored }
             isSearchVisible.toggle()
-            if !isSearchVisible { searchText = "" }
+            if !isSearchVisible {
+                searchText = ""
+                searchMatchMessageIDs = []
+                focusedSearchMatchIndex = 0
+            }
             return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "g"), phases: .down) { press in
+            guard isSearchVisible, press.modifiers.contains(.command) else { return .ignored }
+            if press.modifiers.contains(.shift) {
+                focusPreviousSearchMatch()
+            } else {
+                focusNextSearchMatch()
+            }
+            return .handled
+        }
+        .onChange(of: appState.activeSessionID) { _, _ in
+            autoScrollEnabled = true
+            focusedSearchMatchIndex = 0
+            searchMatchMessageIDs = []
         }
     }
 
     // MARK: - Messages
 
     private func messageList(_ session: ChatSession) -> some View {
-        let displayMessages = filteredMessages(session)
+        let matchingIDs = Set(searchMatchMessageIDs)
+        let focusedMatchID = focusedSearchMatchID
+
         return ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 2) {
-                    ForEach(displayMessages) { message in
-                        MessageBubble(
-                            message: message,
-                            isStreaming: session.isStreaming
-                                && message.role == .assistant
-                                && message.id == session.messages.last?.id
-                        )
-                            .id(message.id)
+            ChatMessageListContent(
+                session: session,
+                searchQuery: normalizedSearchQuery,
+                matchingIDs: matchingIDs,
+                focusedMatchID: focusedMatchID,
+                showStreamingIndicator: isAwaitingFirstToken(session)
+            )
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 6)
+                    .onChanged { _ in
+                        autoScrollEnabled = false
                     }
-
-                    if !session.activeToolNames.isEmpty {
-                        ToolIndicatorRow(names: session.activeToolNames)
-                            .id("tool-indicator")
-                    }
-
-                    // Streaming indicator
-                    if session.isStreaming && isAwaitingFirstToken(session) {
-                        HStack {
-                            ThinkingIndicator()
-                                .padding(.leading, 52)
-                            Spacer()
+            )
+            .overlay(alignment: .bottomTrailing) {
+                if !autoScrollEnabled, !session.messages.isEmpty {
+                    Button {
+                        autoScrollEnabled = true
+                        if session.isStreaming {
+                            scheduleScroll(proxy: proxy, target: "streaming-indicator", animated: true, debounce: 0)
+                        } else if let last = session.messages.last {
+                            scheduleScroll(proxy: proxy, target: last.id, animated: true, debounce: 0)
                         }
-                        .id("streaming-indicator")
+                    } label: {
+                        Label("Jump to latest", systemImage: "arrow.down")
+                            .font(.system(size: 12, weight: .semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(.ultraThinMaterial)
+                            )
                     }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 12)
                 }
-                .padding(.vertical, 16)
+            }
+            .onAppear {
+                refreshSearchMatches(for: session)
+            }
+            .onChange(of: isSearchVisible) { _, _ in
+                refreshSearchMatches(for: session)
+            }
+            .onChange(of: searchText) { _, _ in
+                refreshSearchMatches(for: session)
+            }
+            .onChange(of: session.messages) { _, _ in
+                refreshSearchMatches(for: session)
+            }
+            .onChange(of: focusedSearchMatchIndex) { _, _ in
+                guard let focusedID = focusedSearchMatchID else { return }
+                autoScrollEnabled = false
+                scheduleScroll(proxy: proxy, target: focusedID, animated: true, debounce: 0)
             }
             .onChange(of: session.messages.count) { _, _ in
+                guard autoScrollEnabled else { return }
                 if session.isStreaming {
                     scheduleScroll(proxy: proxy, target: "streaming-indicator", animated: true, debounce: 0.03)
                 } else if let last = session.messages.last {
@@ -143,12 +232,12 @@ struct ChatView: View {
             }
             .onChange(of: session.messages.last?.content) { _, _ in
                 // Auto-scroll during streaming
-                if session.isStreaming {
+                if session.isStreaming && autoScrollEnabled {
                     scheduleScroll(proxy: proxy, target: "streaming-indicator", animated: false, debounce: 0.05)
                 }
             }
             .onChange(of: session.activeToolNames) { _, _ in
-                if !session.activeToolNames.isEmpty {
+                if !session.activeToolNames.isEmpty && autoScrollEnabled {
                     scheduleScroll(proxy: proxy, target: "tool-indicator", animated: false, debounce: 0.05)
                 }
             }
@@ -156,6 +245,50 @@ struct ChatView: View {
                 pendingScrollWorkItem?.cancel()
             }
         }
+    }
+
+    private func refreshSearchMatches(for session: ChatSession) {
+        let query = normalizedSearchQuery
+        guard isSearchVisible, !query.isEmpty else {
+            searchMatchMessageIDs = []
+            focusedSearchMatchIndex = 0
+            return
+        }
+
+        let previousFocusedID = focusedSearchMatchID
+        let matches = session.messages.compactMap { message -> UUID? in
+            guard message.role == .assistant || message.role == .user else { return nil }
+            guard message.content.range(
+                of: query,
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) != nil else { return nil }
+            return message.id
+        }
+        searchMatchMessageIDs = matches
+
+        guard !matches.isEmpty else {
+            focusedSearchMatchIndex = 0
+            return
+        }
+        if let previousFocusedID,
+           let existingIndex = matches.firstIndex(of: previousFocusedID) {
+            focusedSearchMatchIndex = existingIndex
+        } else {
+            focusedSearchMatchIndex = 0
+        }
+    }
+
+    private func focusNextSearchMatch() {
+        guard !searchMatchMessageIDs.isEmpty else { return }
+        autoScrollEnabled = false
+        focusedSearchMatchIndex = (focusedSearchMatchIndex + 1) % searchMatchMessageIDs.count
+    }
+
+    private func focusPreviousSearchMatch() {
+        guard !searchMatchMessageIDs.isEmpty else { return }
+        autoScrollEnabled = false
+        focusedSearchMatchIndex = (focusedSearchMatchIndex - 1 + searchMatchMessageIDs.count)
+            % searchMatchMessageIDs.count
     }
 
     // MARK: - Welcome
@@ -255,6 +388,66 @@ struct ChatView: View {
             }
         }
         return true
+    }
+}
+
+private struct ChatMessageListContent: View {
+    let session: ChatSession
+    let searchQuery: String
+    let matchingIDs: Set<UUID>
+    let focusedMatchID: UUID?
+    let showStreamingIndicator: Bool
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 2) {
+                ForEach(session.messages) { message in
+                    ChatMessageRow(
+                        message: message,
+                        isStreaming: session.isStreaming
+                            && message.role == .assistant
+                            && message.id == session.messages.last?.id,
+                        searchQuery: searchQuery,
+                        isSearchMatch: matchingIDs.contains(message.id),
+                        isFocusedSearchMatch: focusedMatchID == message.id
+                    )
+                    .id(message.id)
+                }
+
+                if !session.activeToolNames.isEmpty {
+                    ToolIndicatorRow(names: session.activeToolNames)
+                        .id("tool-indicator")
+                }
+
+                if session.isStreaming && showStreamingIndicator {
+                    HStack {
+                        ThinkingIndicator()
+                            .padding(.leading, 52)
+                        Spacer()
+                    }
+                    .id("streaming-indicator")
+                }
+            }
+            .padding(.vertical, 16)
+        }
+    }
+}
+
+private struct ChatMessageRow: View {
+    let message: ChatMessage
+    let isStreaming: Bool
+    let searchQuery: String
+    let isSearchMatch: Bool
+    let isFocusedSearchMatch: Bool
+
+    var body: some View {
+        MessageBubble(
+            message: message,
+            isStreaming: isStreaming,
+            searchQuery: searchQuery,
+            isSearchMatch: isSearchMatch,
+            isFocusedSearchMatch: isFocusedSearchMatch
+        )
     }
 }
 

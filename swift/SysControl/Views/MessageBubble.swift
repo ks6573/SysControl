@@ -5,9 +5,29 @@ import SwiftUI
 struct MessageBubble: View {
     let message: ChatMessage
     let isStreaming: Bool
+    let searchQuery: String
+    let isSearchMatch: Bool
+    let isFocusedSearchMatch: Bool
 
     @State private var showCopied = false
     @State private var isHoveringAssistantBubble = false
+
+    private let assistantMaxReadWidth: CGFloat = 760
+    private let userMaxReadWidth: CGFloat = 700
+
+    init(
+        message: ChatMessage,
+        isStreaming: Bool,
+        searchQuery: String = "",
+        isSearchMatch: Bool = false,
+        isFocusedSearchMatch: Bool = false
+    ) {
+        self.message = message
+        self.isStreaming = isStreaming
+        self.searchQuery = searchQuery
+        self.isSearchMatch = isSearchMatch
+        self.isFocusedSearchMatch = isFocusedSearchMatch
+    }
 
     var body: some View {
         switch message.role {
@@ -20,6 +40,66 @@ struct MessageBubble: View {
         case .system:
             EmptyView()
         }
+    }
+
+    private var hasSearchQuery: Bool {
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var hasResponseContent: Bool {
+        !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var highlightedUserContent: AttributedString {
+        var rendered = AttributedString(message.content)
+        guard hasSearchQuery && isSearchMatch else { return rendered }
+
+        let highlightColor = isFocusedSearchMatch
+            ? NSColor.systemYellow.withAlphaComponent(0.36)
+            : NSColor.systemYellow.withAlphaComponent(0.24)
+
+        var start = message.content.startIndex
+        while start < message.content.endIndex,
+              let range = message.content.range(
+                  of: searchQuery,
+                  options: [.caseInsensitive, .diacriticInsensitive],
+                  range: start..<message.content.endIndex
+              ) {
+            if let attrRange = Range(range, in: rendered) {
+                rendered[attrRange].backgroundColor = highlightColor
+            }
+            start = range.upperBound
+        }
+        return rendered
+    }
+
+    private var bubbleHighlightStroke: Color {
+        guard hasSearchQuery else { return .clear }
+        if isFocusedSearchMatch {
+            return Color.yellow.opacity(0.85)
+        }
+        if isSearchMatch {
+            return Color.yellow.opacity(0.45)
+        }
+        return .clear
+    }
+
+    private var bubbleHighlightLineWidth: CGFloat {
+        guard hasSearchQuery else { return 0 }
+        if isFocusedSearchMatch { return 2 }
+        if isSearchMatch { return 1.2 }
+        return 0
+    }
+
+    private var bubbleHighlightBackdrop: Color {
+        guard hasSearchQuery else { return .clear }
+        if isFocusedSearchMatch {
+            return Color.yellow.opacity(0.14)
+        }
+        if isSearchMatch {
+            return Color.yellow.opacity(0.07)
+        }
+        return .clear
     }
 
     // MARK: - User Bubble
@@ -43,20 +123,30 @@ struct MessageBubble: View {
                         Capsule().fill(Color.white.opacity(0.15))
                     )
                 }
-                Text(message.content)
+                Text(highlightedUserContent)
                     .font(.system(size: 14))
                     .foregroundStyle(.white)
+                    .lineSpacing(2)
                     .textSelection(.enabled)
             }
+            .frame(maxWidth: userMaxReadWidth, alignment: .trailing)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(Color.accentColor)
             )
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(bubbleHighlightStroke, lineWidth: bubbleHighlightLineWidth)
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(bubbleHighlightBackdrop)
+        )
     }
 
     // MARK: - Assistant Bubble
@@ -78,35 +168,25 @@ struct MessageBubble: View {
             }
             .padding(.top, 2)
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 if message.isError {
                     Text(message.content)
                         .font(.system(size: 14))
                         .foregroundStyle(.red.opacity(0.9))
+                        .lineSpacing(2)
                         .textSelection(.enabled)
                 } else {
-                    if isStreaming {
-                        // Match the Python GUI behavior: immediate text updates
-                        // with light, debounced markdown cleanup while streaming.
-                        LazyMarkdownText(
-                            content: message.content,
-                            style: .inline,
-                            font: .system(size: 14),
-                            foreground: .primary.opacity(0.92),
-                            debounceMilliseconds: 140,
-                            largeTextThreshold: 4500
-                        )
-                    } else {
-                        // Final pass: fuller markdown rendering once the turn completes.
-                        LazyMarkdownText(
-                            content: message.content,
-                            style: .block,
-                            font: .system(size: 14),
-                            foreground: .primary.opacity(0.92),
-                            debounceMilliseconds: 20,
-                            largeTextThreshold: 12000
-                        )
-                    }
+                    // Keep rendering mode stable during streaming to minimize layout jumps.
+                    LazyMarkdownText(
+                        content: message.content,
+                        style: .block,
+                        font: .system(size: 14),
+                        foreground: .primary.opacity(0.92),
+                        debounceMilliseconds: isStreaming ? 140 : 20,
+                        largeTextThreshold: isStreaming ? 5000 : 12000,
+                        highlightQuery: isSearchMatch ? searchQuery : "",
+                        isFocusedMatch: isFocusedSearchMatch
+                    )
                 }
 
                 // Chart images
@@ -116,34 +196,76 @@ struct MessageBubble: View {
                     }
                 }
 
-                // Copy button (visible on hover via overlay)
-                if !isStreaming && !message.content.isEmpty && !message.isError
-                    && (isHoveringAssistantBubble || showCopied) {
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(message.content, forType: .string)
-                        showCopied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                            showCopied = false
+                if !message.isError {
+                    HStack(spacing: 10) {
+                        Button {
+                            copyResponse()
+                        } label: {
+                            Label(showCopied ? "Copied" : "Copy", systemImage: showCopied ? "checkmark.circle.fill" : "doc.on.doc")
+                                .font(.caption)
+                                .fontWeight(.medium)
                         }
-                    } label: {
-                        Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 11))
-                            .foregroundStyle(showCopied ? Color.green : Color.secondary.opacity(0.5))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(showCopied ? Color.green : Color.secondary)
+                        .disabled(!hasResponseContent)
+                        .help("Copy response")
+
+                        if hasSearchQuery && isSearchMatch {
+                            Text(isFocusedSearchMatch ? "Current match" : "Match")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(
+                                    Capsule(style: .continuous)
+                                        .fill(Color.yellow.opacity(isFocusedSearchMatch ? 0.3 : 0.17))
+                                )
+                        }
+
+                        Spacer(minLength: 0)
+
+                        if isStreaming {
+                            Text("Streaming…")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .help("Copy response")
+                    .opacity(isHoveringAssistantBubble || showCopied ? 1 : 0.88)
                     .animation(.easeInOut(duration: 0.15), value: showCopied)
-                    .transition(.opacity)
                 }
+            }
+            .frame(maxWidth: assistantMaxReadWidth, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(message.isError ? Color.red.opacity(0.06) : Color.primary.opacity(0.04))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(bubbleHighlightStroke, lineWidth: bubbleHighlightLineWidth)
             }
 
             Spacer(minLength: 40)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(bubbleHighlightBackdrop)
+        )
         .onHover { hovering in
             isHoveringAssistantBubble = hovering
+        }
+    }
+
+    private func copyResponse() {
+        guard hasResponseContent else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message.content, forType: .string)
+        showCopied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            showCopied = false
         }
     }
 
