@@ -1,6 +1,6 @@
 [project]
 name = "syscontrol"
-version = "1.4.7"
+version = "1.4.8"
 description = "All-In-One AI agent with MCP tool server; Ultron but slightly weaker and nicer 😉"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -23,12 +23,12 @@ classifiers = [
 ]
 
 dependencies = [
-    "psutil>=5.9.0",
-    "matplotlib>=3.7.0",
-    "openai>=2.26.0",
-    "openpyxl>=3.1",
-    "python-docx>=1.1",
-    "pypdf>=4.0",
+    "psutil>=5.9.0,<8",
+    "matplotlib>=3.7.0,<4",
+    "openai>=2.26.0,<3",
+    "openpyxl>=3.1,<4",
+    "python-docx>=1.1,<2",
+    "pypdf>=4.0,<7",
 ]
 
 [project.scripts]

@@ -114,7 +114,7 @@ def _get_or_create_subagent(spec_name: str) -> tuple[MCPClient, MCPClientPool]:
     with _subagent_pool_lock:
         if spec_name in _subagent_pool:
             client, pool = _subagent_pool[spec_name]
-            if client.process and client.process.poll() is None:
+            if client.proc and client.proc.poll() is None:
                 return client, pool
             # Process died — clean up and recreate.
             with contextlib.suppress(Exception):
@@ -161,6 +161,11 @@ def run_subagent(
         The agent's final stripped text response, or an ``[Agent error …]``
         string if the run fails for any reason.
     """
+    # Refuse to nest: if we are already inside a sub-agent, the depth env var
+    # is set and any further run_subagent call would recurse.
+    if os.environ.get(_DEPTH_ENV_VAR):
+        return "[Agent error (Depth): nested sub-agent invocation refused]"
+
     try:
         client, pool = _get_or_create_subagent(spec.name)
 
@@ -201,6 +206,7 @@ def run_subagent(
             llm=llm, pool=pool, tools=openai_tools,
             system_message=system_message, messages=messages,
             model=model, callbacks=callbacks,
+            max_rounds=spec.max_rounds,
         )
 
         if errors:

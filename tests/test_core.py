@@ -2,7 +2,6 @@
 
 
 from agent.core import (
-    _read_stderr_safe,
     colorize,
     load_memory,
     mcp_to_openai_tools,
@@ -128,25 +127,6 @@ class TestColorize:
         result = colorize("---")
         # Should return something (possibly decorated), not crash.
         assert isinstance(result, str)
-
-
-# ── _read_stderr_safe ────────────────────────────────────────────────────────
-
-
-class TestReadStderrSafe:
-    """Tests for the non-blocking stderr reader."""
-
-    def test_none_pipe(self) -> None:
-        assert _read_stderr_safe(None) == ""
-
-    def test_closed_pipe(self) -> None:
-        """Closed file-like should return empty, not raise."""
-        import io
-        pipe = io.BytesIO(b"")
-        pipe.close()
-        # Should not raise.
-        result = _read_stderr_safe(pipe)
-        assert result == ""
 
 
 # ── load_memory ──────────────────────────────────────────────────────────────

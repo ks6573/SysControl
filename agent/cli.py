@@ -48,6 +48,8 @@ from agent.core import (
     colorize,
     fcntl_mod,
     fetch_ollama_models,
+    llm_client_max_retries,
+    llm_client_timeout,
     load_memory,
     load_system_prompt,
     mcp_to_openai_tools,
@@ -601,7 +603,11 @@ def main() -> None:
             )
 
         system_message = {"role": "system", "content": full_system}
-        ollama_client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+        ollama_client = OpenAI(
+            api_key=api_key, base_url=base_url,
+            timeout=llm_client_timeout(),
+            max_retries=llm_client_max_retries(),
+        )
 
         _repl_loop(ollama_client, pool, tools, system_message, model, provider_label)
 

@@ -67,7 +67,6 @@ coverage.xml
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
 .claude/
-CLAUDE.md
 .tmp_website/
 
 # ── Build resources (generated icons) ────────────────────────────────────────

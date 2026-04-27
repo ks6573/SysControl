@@ -7,6 +7,21 @@ on:
     branches: [master]
 
 jobs:
+  version-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: VERSION matches pyproject.toml
+        run: |
+          VFILE=$(tr -d '[:space:]' < VERSION)
+          PYPROJ=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          if [ "$VFILE" != "$PYPROJ" ]; then
+            echo "::error::VERSION ($VFILE) and pyproject.toml ($PYPROJ) disagree"
+            exit 1
+          fi
+          echo "Versions in sync: $VFILE"
+
   lint-and-type-check:
     runs-on: ubuntu-latest
     steps:
@@ -53,6 +68,22 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
+
+      - name: Verify Package.swift sources list is complete
+        run: |
+          # Every .swift file under swift/SysControl/ must appear in
+          # Package.swift's `sources:` array — otherwise SwiftPM silently
+          # skips it.  Diff filesystem against the manifest.
+          MISSING=0
+          while IFS= read -r f; do
+            rel=${f#swift/SysControl/}
+            if ! grep -qF "\"$rel\"" swift/Package.swift; then
+              echo "::error::$rel is on disk but not declared in swift/Package.swift sources"
+              MISSING=1
+            fi
+          done < <(find swift/SysControl -name '*.swift' -type f)
+          if [ "$MISSING" -ne 0 ]; then exit 1; fi
+          echo "Package.swift sources list matches filesystem."
 
       - name: Build Swift app
         run: cd swift && swift build

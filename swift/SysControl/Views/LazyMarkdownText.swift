@@ -18,6 +18,9 @@ struct LazyMarkdownText: View {
     @State private var renderTask: Task<Void, Never>?
     @State private var renderedBlocks: [MarkdownBlock]?
     @State private var renderedBlockSource: String = ""
+    // `preprocessForReadability` is a ~175-line splitter; cache so `body`
+    // re-evaluations don't repeat the work for unchanged content.
+    @State private var displayCache: (source: String, displayText: String) = ("", "")
 
     init(
         content: String,
@@ -40,7 +43,9 @@ struct LazyMarkdownText: View {
     }
 
     var body: some View {
-        let displayText = preprocessForReadability(content)
+        let displayText = displayCache.source == content
+            ? displayCache.displayText
+            : preprocessForReadability(content)
         Group {
             if style == .block {
                 if let renderedBlocks, !renderedBlockSource.isEmpty {
@@ -70,8 +75,12 @@ struct LazyMarkdownText: View {
         .foregroundStyle(foreground)
         .lineSpacing(style == .block ? 4 : 2)
         .textSelection(.enabled)
-        .onAppear(perform: scheduleRender)
+        .onAppear {
+            primeDisplayCache()
+            scheduleRender()
+        }
         .onChange(of: content) { _, _ in
+            primeDisplayCache()
             scheduleRender()
         }
         .onDisappear {
@@ -92,10 +101,16 @@ struct LazyMarkdownText: View {
         )
     }
 
+    private func primeDisplayCache() {
+        if displayCache.source == content { return }
+        displayCache = (content, preprocessForReadability(content))
+    }
+
     private func scheduleRender() {
         renderTask?.cancel()
+        primeDisplayCache()
         let original = content
-        let snapshot = preprocessForReadability(original)
+        let snapshot = displayCache.displayText
         if snapshot.isEmpty {
             rendered = AttributedString("")
             renderedBlocks = []

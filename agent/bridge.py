@@ -39,6 +39,8 @@ from agent.core import (
     MCPClient,
     MCPClientPool,
     TurnCallbacks,
+    llm_client_max_retries,
+    llm_client_timeout,
     load_memory,
     load_system_prompt,
     mcp_to_openai_tools,
@@ -97,14 +99,30 @@ def _read_command() -> dict | None:
     line = sys.stdin.readline()
     if not line:
         return None
+    # Hard cap on line size — guards against runaway producers that never
+    # newline-terminate.  1 MB is far above any expected command (largest
+    # legitimate payload is a history list, typically a few KB).
+    if len(line) > 1_048_576:
+        _emit({
+            "type": "error", "category": "Protocol",
+            "message": "Command exceeds 1 MB line size limit",
+        })
+        return {}
     try:
-        return json.loads(line)
+        parsed = json.loads(line)
     except json.JSONDecodeError:
         _emit({
             "type": "error", "category": "Protocol",
-            "message": f"Invalid JSON: {line.strip()}",
+            "message": f"Invalid JSON: {line.strip()[:200]}",
         })
         return {}
+    if not isinstance(parsed, dict):
+        _emit({
+            "type": "error", "category": "Protocol",
+            "message": f"Command must be a JSON object, got {type(parsed).__name__}",
+        })
+        return {}
+    return parsed
 
 
 _CHART_IMAGE_RE = re.compile(r"\[chart_image:(.+?)\]")
@@ -190,7 +208,40 @@ def _initialise_agent() -> tuple[MCPClientPool, list[dict], dict]:
     return pool, tools, system_message
 
 
-_cancel_event: threading.Event | None = None
+class _CancelRegistry:
+    """Thread-safe holder for the currently-active turn's cancel event.
+
+    Replaces the previous module-global ``_cancel_event``.  Turns are
+    serialised by the event loop (a new ``user_message`` waits for the prior
+    turn thread to join), so at most one entry is live at any time — but the
+    lock makes the read/write pattern explicit and safe against any future
+    refactor that loosens the serialisation.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active: threading.Event | None = None
+
+    def begin(self) -> threading.Event:
+        event = threading.Event()
+        with self._lock:
+            self._active = event
+        return event
+
+    def end(self, event: threading.Event) -> None:
+        with self._lock:
+            if self._active is event:
+                self._active = None
+
+    def cancel(self) -> bool:
+        with self._lock:
+            if self._active is None:
+                return False
+            self._active.set()
+            return True
+
+
+_cancel_registry = _CancelRegistry()
 
 
 def _handle_user_message(
@@ -215,20 +266,25 @@ def _handle_user_message(
         model: Model identifier string.
         log: File-like object for internal error logging (typically stderr).
     """
-    global _cancel_event
-
     raw_session_id = cmd.get("session_id", "default")
     session_id = str(raw_session_id).strip() or "default"
     messages = session_histories.setdefault(session_id, [])
     if not messages:
         messages.extend(_coerce_history(cmd.get("history")))
 
-    text = cmd.get("text", "").strip()
+    raw_text = cmd.get("text", "")
+    if not isinstance(raw_text, str):
+        _emit({
+            "type": "error", "category": "Protocol",
+            "message": f"user_message.text must be a string, got {type(raw_text).__name__}",
+        })
+        return
+    text = raw_text.strip()
     if not text:
         return
     messages.append({"role": "user", "content": text})
 
-    _cancel_event = threading.Event()
+    cancel_event = _cancel_registry.begin()
 
     callbacks = TurnCallbacks(
         on_token=lambda t: _emit({"type": "token", "text": t}),
@@ -239,7 +295,7 @@ def _handle_user_message(
         on_error=lambda cat, msg: _emit(
             {"type": "error", "category": cat, "message": msg}
         ),
-        cancel_event=_cancel_event,
+        cancel_event=cancel_event,
     )
 
     try:
@@ -255,7 +311,7 @@ def _handle_user_message(
         log.write(f"[bridge] turn error: {exc}\n")
         _emit({"type": "error", "category": "Turn", "message": str(exc)})
     finally:
-        _cancel_event = None
+        _cancel_registry.end(cancel_event)
 
 
 # ── Event loop ────────────────────────────────────────────────────────────────
@@ -288,14 +344,12 @@ def _event_loop(
 
         if cmd_type == "shutdown":
             # Signal cancellation if a turn is running, then break.
-            if _cancel_event is not None:
-                _cancel_event.set()
+            _cancel_registry.cancel()
             if turn_thread is not None:
                 turn_thread.join(timeout=3.0)
             break
         elif cmd_type == "cancel":
-            if _cancel_event is not None:
-                _cancel_event.set()
+            _cancel_registry.cancel()
         elif cmd_type == "clear_session":
             raw_session_id = cmd.get("session_id")
             session_id = str(raw_session_id).strip() if isinstance(raw_session_id, str) else ""
@@ -310,7 +364,11 @@ def _event_loop(
             api_key = cmd.get("api_key", llm.api_key)
             base_url = cmd.get("base_url", str(llm.base_url))
             model = cmd.get("model", model)
-            llm = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+            llm = OpenAI(
+                api_key=api_key, base_url=base_url,
+                timeout=llm_client_timeout(),
+                max_retries=llm_client_max_retries(),
+            )
             session_histories.clear()
             _emit({"type": "configured", "model": model})
         elif cmd_type == "user_message":
@@ -348,7 +406,11 @@ def main() -> None:
     base_url = os.environ.get("SYSCONTROL_BASE_URL", "http://localhost:11434/v1")
     model = os.environ.get("SYSCONTROL_MODEL", "qwen2.5:7b")
 
-    llm = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+    llm = OpenAI(
+        api_key=api_key, base_url=base_url,
+        timeout=llm_client_timeout(),
+        max_retries=llm_client_max_retries(),
+    )
     _emit({"type": "ready", "tool_count": len(tools), "model": model})
 
     try:

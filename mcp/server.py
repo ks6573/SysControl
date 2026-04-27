@@ -2358,9 +2358,17 @@ def _tail_macos_log(lines: int, filter_str: str) -> dict:
     """Tail the macOS unified log (last 5 minutes)."""
     cmd = ["log", "show", "--last", "5m", "--style", "compact"]
     if filter_str:
-        # Escape backslashes and double quotes for NSPredicate string literal.
-        safe = filter_str.replace("\\", "\\\\").replace('"', '\\"')
-        cmd += ["--predicate", f'eventMessage CONTAINS[c] "{safe}"']
+        # Restrict to a conservative character set so the value cannot break
+        # out of the NSPredicate string literal (newlines, quotes, etc. would
+        # alter the predicate's logical structure).
+        if not re.fullmatch(r"[A-Za-z0-9 _\-.:/=]+", filter_str):
+            return {
+                "error": (
+                    "filter_str contains characters not allowed in a log predicate. "
+                    "Allowed: letters, digits, space, and _-.:/="
+                )
+            }
+        cmd += ["--predicate", f'eventMessage CONTAINS[c] "{filter_str}"']
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         all_lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
@@ -2779,12 +2787,18 @@ _IMESSAGE_RECIPIENT_RE = re.compile(
 def _escape_applescript(s: str) -> str:
     """Escape a string for safe embedding in an AppleScript double-quoted literal.
 
-    Replaces backslashes first (to avoid double-escaping), then double quotes.
-    Rejects control characters that cannot be safely represented.
+    Replaces backslashes first, then double quotes, then converts CR/LF/TAB into
+    AppleScript escape sequences so they cannot terminate the surrounding literal.
+    Strips remaining control characters.
     """
-    s = s.replace("\\", "\\\\").replace('"', '\\"')
-    # Strip any control characters (U+0000–U+001F except tab/newline)
-    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
+    s = (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
+    s = re.sub(r"[\x00-\x1f]", "", s)
     return s
 
 
@@ -3974,6 +3988,8 @@ def git_diff(path: str = ".", staged: bool = False) -> dict:
 # ── Spreadsheet tools ─────────────────────────────────────────────────────────
 
 _MAX_SPREADSHEET_ROWS = 200
+# Pre-flight size cap to avoid pathological openpyxl/csv parses on hostile inputs.
+_MAX_SPREADSHEET_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
 def read_spreadsheet(
@@ -3995,6 +4011,13 @@ def read_spreadsheet(
             return {"error": f"File not found: {p}"}
         if not p.is_file():
             return {"error": f"Not a file: {p}"}
+        if p.stat().st_size > _MAX_SPREADSHEET_BYTES:
+            return {
+                "error": (
+                    f"File exceeds {_MAX_SPREADSHEET_BYTES // (1024 * 1024)} MB "
+                    "size limit for spreadsheet reads."
+                )
+            }
 
         suffix = p.suffix.lower()
         if suffix == ".csv":
@@ -4276,6 +4299,7 @@ def edit_document(
 
 _MAX_PDF_PAGES = 200
 _DEFAULT_PDF_PAGES = 50
+_MAX_PDF_BYTES = 200 * 1024 * 1024  # pre-flight cap on .pdf input size
 
 
 def read_pdf(path: str, max_pages: int = _DEFAULT_PDF_PAGES) -> dict:
@@ -4312,6 +4336,12 @@ def read_pdf(path: str, max_pages: int = _DEFAULT_PDF_PAGES) -> dict:
             return {"error": f"Not a file: {p}"}
         if p.suffix.lower() != ".pdf":
             return {"error": f"Expected a .pdf file, got '{p.suffix}'."}
+        if p.stat().st_size > _MAX_PDF_BYTES:
+            return {
+                "error": (
+                    f"PDF exceeds {_MAX_PDF_BYTES // (1024 * 1024)} MB size limit."
+                )
+            }
 
         clamped = max(1, min(max_pages, _MAX_PDF_PAGES))
         reader = _PdfReader(str(p))
@@ -5365,6 +5395,91 @@ def append_memory_note(note: str) -> dict:
     return {"saved": note.strip(), "timestamp": timestamp}
 
 
+# Names that cannot be called or imported, directly or indirectly.
+_FORBIDDEN_CALL_NAMES: frozenset[str] = frozenset({
+    "eval", "exec", "compile", "__import__", "open",
+    "globals", "locals", "vars", "getattr", "setattr", "delattr",
+})
+_FORBIDDEN_IMPORT_MODULES: frozenset[str] = frozenset({
+    "os", "subprocess", "shutil", "socket", "ctypes", "importlib",
+    "pickle", "marshal", "pty", "popen2",
+})
+# Method/attribute names that are dangerous regardless of receiver.
+_FORBIDDEN_ATTR_NAMES: frozenset[str] = frozenset({
+    "system", "popen", "spawn", "spawnl", "spawnv", "spawnvp", "spawnve",
+    "execv", "execve", "execvp", "execvpe", "execl", "execle", "execlp",
+    "rmtree", "unlink", "remove", "rmdir", "fork", "kill",
+})
+
+
+def _ast_security_scan(tree: ast.AST) -> list[str]:
+    """Walk *tree* and return a list of human-readable security violations.
+
+    Catches:
+      * Direct calls to forbidden builtins (eval, exec, getattr, …).
+      * Imports of forbidden modules (os, subprocess, importlib, …).
+      * Attribute references whose final element is a dangerous method name
+        (e.g. ``foo.system``, ``foo.popen``, ``foo.rmtree``).
+      * Subscription of ``__builtins__`` (e.g. ``__builtins__["eval"]``).
+    """
+    violations: list[str] = []
+
+    def _attr_chain_root(node: ast.AST) -> str | None:
+        cur = node
+        while isinstance(cur, ast.Attribute):
+            cur = cur.value
+        return cur.id if isinstance(cur, ast.Name) else None
+
+    for node in ast.walk(tree):
+        # Forbidden imports.
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".", 1)[0]
+                if root in _FORBIDDEN_IMPORT_MODULES:
+                    violations.append(f"import of '{alias.name}'")
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".", 1)[0]
+            if root in _FORBIDDEN_IMPORT_MODULES:
+                violations.append(f"import from '{node.module}'")
+
+        # Forbidden direct calls (eval(...), exec(...), getattr(...), …).
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in _FORBIDDEN_CALL_NAMES:
+                violations.append(f"call to '{func.id}()'")
+            elif isinstance(func, ast.Attribute):
+                if func.attr in _FORBIDDEN_ATTR_NAMES:
+                    violations.append(f"call to '.{func.attr}()' on any receiver")
+                chain_root = _attr_chain_root(func)
+                if chain_root is not None and chain_root in _FORBIDDEN_IMPORT_MODULES:
+                    violations.append(f"call into '{chain_root}' module")
+
+        # Forbidden attribute references on builtins (e.g. __builtins__.eval).
+        elif isinstance(node, ast.Attribute):
+            if (
+                isinstance(node.value, ast.Name)
+                and node.value.id in {"__builtins__", "builtins"}
+            ):
+                violations.append(f"attribute '{node.attr}' on __builtins__")
+
+        # __builtins__["eval"] style subscript.
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in {"__builtins__", "builtins"}
+        ):
+            violations.append("subscript of __builtins__")
+
+    # De-duplicate while preserving order so the error message is stable.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for v in violations:
+        if v not in seen:
+            seen.add(v)
+            deduped.append(v)
+    return deduped
+
+
 def _validate_tool_code(
     name: str, description: str, implementation: str, server_text: str,
 ) -> tuple[str, str, list[str]] | dict:
@@ -5400,17 +5515,14 @@ def _validate_tool_code(
     func_name   = func_defs[0].name
     func_params = [a.arg for a in func_defs[0].args.args if a.arg != "self"]
 
-    # Security scan — block dangerous functions.
-    _DANGEROUS = [
-        "eval(", "exec(", "__import__(", "compile(", "os.system(",
-        "subprocess", "os.popen(", "shutil.rmtree(",
-    ]
-    security_warnings = [d for d in _DANGEROUS if d in implementation]
+    security_warnings = _ast_security_scan(tree)
     if security_warnings:
         return {
             "error": (
-                f"Implementation contains dangerous functions: "
-                f"{', '.join(security_warnings)}. These are not allowed."
+                "Implementation rejected by security scan: "
+                + "; ".join(security_warnings)
+                + ". User-defined tools cannot import os/subprocess/shutil/socket/ctypes/"
+                "importlib, call eval/exec/compile, or reach builtins indirectly."
             )
         }
 

@@ -1321,7 +1321,7 @@ wheels = [
 
 [[package]]
 name = "syscontrol"
-version = "1.4.7"
+version = "1.4.8"
 source = { editable = "." }
 dependencies = [
     { name = "matplotlib" },
@@ -1345,16 +1345,16 @@ gpu = [
 
 [package.metadata]
 requires-dist = [
-    { name = "matplotlib", specifier = ">=3.7.0" },
+    { name = "matplotlib", specifier = ">=3.7.0,<4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "nvidia-ml-py", marker = "extra == 'gpu'", specifier = ">=12.0.0" },
-    { name = "openai", specifier = ">=2.26.0" },
-    { name = "openpyxl", specifier = ">=3.1" },
-    { name = "psutil", specifier = ">=5.9.0" },
-    { name = "pypdf", specifier = ">=4.0" },
+    { name = "openai", specifier = ">=2.26.0,<3" },
+    { name = "openpyxl", specifier = ">=3.1,<4" },
+    { name = "psutil", specifier = ">=5.9.0,<8" },
+    { name = "pypdf", specifier = ">=4.0,<7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "python-docx", specifier = ">=1.1" },
+    { name = "python-docx", specifier = ">=1.1,<2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
 ]
 provides-extras = ["gpu", "dev"]

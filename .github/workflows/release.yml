@@ -17,6 +17,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify VERSION matches tag and pyproject
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VFILE=$(tr -d '[:space:]' < VERSION)
+          PYPROJ=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          if [ "$TAG" != "$VFILE" ] || [ "$VFILE" != "$PYPROJ" ]; then
+            echo "::error::version mismatch — tag=$TAG VERSION=$VFILE pyproject=$PYPROJ"
+            exit 1
+          fi
+          echo "Versions in sync: $VFILE"
+
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
 

@@ -29,8 +29,6 @@ class AgentSpec:
         allowed_tools: Tuple of tool names the sub-agent may call.
                        ``None`` means all tools are available (minus run_agent).
         max_rounds:    Upper bound on tool-call rounds per run.
-                       TODO: thread through to ``run_streaming_turn()`` via a
-                       ``MAX_TOOL_ROUNDS`` override in ``runner.py``.
     """
 
     name: str

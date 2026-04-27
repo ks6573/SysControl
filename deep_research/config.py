@@ -33,10 +33,17 @@ log = logging.getLogger("deep_research")
 # ── LLM helpers ───────────────────────────────────────────────────────────────
 
 
+class LLMCallError(RuntimeError):
+    """Raised when a deep-research LLM call fails (timeout, auth, transport)."""
+
+
 def llm_call(client: OpenAI, model: str, system: str, user: str) -> str:
     """Make a non-streaming LLM call and return the response text.
 
-    Returns an empty string on failure (never raises).
+    Raises:
+        LLMCallError: Wraps the underlying OpenAI exception so callers can
+            distinguish "model produced empty content" from "API failed".  The
+            orchestrator decides whether to abort or continue with a fallback.
     """
     try:
         resp = client.chat.completions.create(
@@ -48,21 +55,24 @@ def llm_call(client: OpenAI, model: str, system: str, user: str) -> str:
             temperature=LLM_TEMPERATURE,
             max_tokens=LLM_MAX_TOKENS,
         )
-        if not resp.choices:
-            log.warning("LLM returned no choices")
-            return ""
-        return resp.choices[0].message.content or ""
     except Exception as exc:
         log.warning("LLM call failed: %s", exc)
+        raise LLMCallError(str(exc)) from exc
+    if not resp.choices:
+        log.warning("LLM returned no choices")
         return ""
+    return resp.choices[0].message.content or ""
 
 
 def llm_json(client: OpenAI, model: str, system: str, user: str) -> dict:
     """Make an LLM call and extract JSON from the response.
 
-    Falls back to an empty dict if extraction fails.
+    Falls back to an empty dict if extraction fails or the call raises.
     """
-    text = llm_call(client, model, system, user)
+    try:
+        text = llm_call(client, model, system, user)
+    except LLMCallError:
+        return {}
     if not text:
         return {}
     return extract_json(text)

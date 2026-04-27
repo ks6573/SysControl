@@ -1,6 +1,9 @@
 import Foundation
 
 /// Persists chat sessions to JSON files in ~/.syscontrol/swift_chats/.
+///
+/// Concurrent ``saveSession`` / ``saveSessionList`` calls land in submission
+/// order via the shared ``StorageQueue`` instead of racing.
 struct PersistenceManager {
     private let baseDir: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -22,15 +25,6 @@ struct PersistenceManager {
         return d
     }()
 
-    // MARK: - Atomic Write
-
-    /// Writes data atomically: writes to a temp file then replaces the target.
-    private func atomicWrite(_ data: Data, to url: URL) throws {
-        let tmpURL = url.appendingPathExtension("tmp")
-        try data.write(to: tmpURL)
-        _ = try FileManager.default.replaceItemAt(url, withItemAt: tmpURL)
-    }
-
     // MARK: - Session List
 
     private var indexURL: URL { baseDir.appendingPathComponent("_index.json") }
@@ -38,12 +32,15 @@ struct PersistenceManager {
     func saveSessionList(_ sessions: [ChatSession]) {
         let ids = sessions.map { $0.id.uuidString }
         guard let data = try? encoder.encode(ids) else { return }
-        do {
-            try atomicWrite(data, to: indexURL)
-        } catch {
-            FileHandle.standardError.write(
-                Data("[SysControl] Failed to save session index: \(error.localizedDescription)\n".utf8)
-            )
+        let target = indexURL
+        StorageQueue.shared.async {
+            do {
+                try data.write(to: target, options: [.atomic])
+            } catch {
+                FileHandle.standardError.write(
+                    Data("[SysControl] Failed to save session index: \(error.localizedDescription)\n".utf8)
+                )
+            }
         }
     }
 
@@ -63,12 +60,15 @@ struct PersistenceManager {
     func saveSession(_ session: ChatSession) {
         let url = baseDir.appendingPathComponent("\(session.id.uuidString).json")
         guard let data = try? encoder.encode(session) else { return }
-        do {
-            try atomicWrite(data, to: url)
-        } catch {
-            FileHandle.standardError.write(
-                Data("[SysControl] Failed to save session \(session.id): \(error.localizedDescription)\n".utf8)
-            )
+        let sessionID = session.id
+        StorageQueue.shared.async {
+            do {
+                try data.write(to: url, options: [.atomic])
+            } catch {
+                FileHandle.standardError.write(
+                    Data("[SysControl] Failed to save session \(sessionID): \(error.localizedDescription)\n".utf8)
+                )
+            }
         }
     }
 

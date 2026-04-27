@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from openai import OpenAI
 
-from deep_research.config import llm_call
+from deep_research.config import LLMCallError, llm_call
 from deep_research.evidence_store import EvidenceStore
 from deep_research.schemas import ResearchTask, VerificationResult
 
@@ -54,4 +54,10 @@ def synthesize(
     for src_info in store.to_citation_list():
         parts.append(f"- {src_info['id']}: {src_info['title']} ({src_info['url']})")
 
-    return llm_call(client, model, _SYSTEM, "\n".join(parts))
+    try:
+        return llm_call(client, model, _SYSTEM, "\n".join(parts))
+    except LLMCallError as exc:
+        return (
+            "[Synthesis failed: the LLM call did not complete. "
+            f"Last error: {exc}]"
+        )

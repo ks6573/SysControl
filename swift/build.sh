@@ -148,8 +148,17 @@ if [ -d "$PROJECT_ROOT/.venv" ]; then
         fi
 
         # 4. Patch pyvenv.cfg to point at the bundled bin/
+        # Use Python instead of sed to avoid corruption when $VENV_DIR contains
+        # characters that have special meaning to sed (|, &, \, etc.).
         if [ -f "$VENV_DIR/pyvenv.cfg" ]; then
-            sed -i '' "s|^home = .*|home = $VENV_DIR/bin|" "$VENV_DIR/pyvenv.cfg"
+            VENV_BIN_DIR="$VENV_DIR/bin" python3 - <<'PYCFG'
+import os, pathlib, re
+cfg = pathlib.Path(os.environ["VENV_BIN_DIR"]).parent / "pyvenv.cfg"
+new_home = os.environ["VENV_BIN_DIR"]
+text = cfg.read_text()
+text = re.sub(r"(?m)^home\s*=.*$", f"home = {new_home}", text)
+cfg.write_text(text)
+PYCFG
         fi
 
         echo "  ✓ Venv made relocatable"

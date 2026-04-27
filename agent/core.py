@@ -8,6 +8,7 @@ CLI (agent/cli.py) and the remote bridge (agent/remote.py).
 
 import base64
 import binascii
+import collections
 import contextlib
 import hashlib
 import json
@@ -25,7 +26,6 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import IO
 
 try:
     import fcntl as fcntl_mod  # noqa: F401 — re-exported for cli.py / server.py
@@ -49,6 +49,34 @@ EXIT_PHRASES: frozenset[str] = frozenset({
 })
 
 MAX_HISTORY_MESSAGES = 40  # ~20 user turns; keeps context within model limits
+
+# OpenAI client tuning — env-controllable for slow networks / cloud environments.
+_LLM_TIMEOUT_DEFAULT = 120.0
+_LLM_MAX_RETRIES_DEFAULT = 2
+
+
+def llm_client_timeout() -> float:
+    """Return the OpenAI client timeout in seconds.
+
+    Reads ``SYSCONTROL_LLM_TIMEOUT`` from the environment; falls back to
+    ``120.0`` if unset or unparseable.
+    """
+    raw = os.environ.get("SYSCONTROL_LLM_TIMEOUT", "")
+    try:
+        value = float(raw)
+        return value if value > 0 else _LLM_TIMEOUT_DEFAULT
+    except ValueError:
+        return _LLM_TIMEOUT_DEFAULT
+
+
+def llm_client_max_retries() -> int:
+    """Return the OpenAI client max retries (env: ``SYSCONTROL_LLM_MAX_RETRIES``)."""
+    raw = os.environ.get("SYSCONTROL_LLM_MAX_RETRIES", "")
+    try:
+        value = int(raw)
+        return value if value >= 0 else _LLM_MAX_RETRIES_DEFAULT
+    except ValueError:
+        return _LLM_MAX_RETRIES_DEFAULT
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 MAX_TOKENS         = 16384
@@ -93,47 +121,7 @@ MAGENTA = "\033[35m" if _USE_COLOR else ""   # used for inline code
 
 # ── MCP Client ────────────────────────────────────────────────────────────────
 
-_STDERR_READ_TIMEOUT = 2.0   # seconds to wait for stderr output on crash
-_STDERR_MAX_BYTES    = 4096  # cap stderr reads to avoid memory bloat
-
-
-def _read_stderr_safe(
-    pipe: IO[str] | IO[bytes] | None,
-    timeout: float = _STDERR_READ_TIMEOUT,
-) -> str:
-    """Read available stderr output without blocking indefinitely.
-
-    Uses ``select()`` on Unix to check readability before reading.
-    Falls back to an empty string if nothing is available within *timeout*.
-
-    Args:
-        pipe: Stderr pipe from a subprocess (text or binary mode), or ``None``.
-        timeout: Maximum seconds to wait for data.  Defaults to 2.0.
-
-    Returns:
-        Stripped stderr text, or empty string if unavailable or on error.
-    """
-    if pipe is None:
-        return ""
-    try:
-        fd = pipe.fileno()
-    except (ValueError, OSError):
-        return ""
-    try:
-        ready, _, _ = select.select([fd], [], [], timeout)
-    except (ValueError, OSError):
-        return ""
-    if not ready:
-        return ""
-    try:
-        # Read at the fd level (raw bytes) rather than through the TextIOWrapper.
-        # This is intentional: on crash paths the wrapper's internal buffer may
-        # be in an inconsistent state, and the process is torn down immediately
-        # after this read — so wrapper coherence does not matter.
-        data = os.read(fd, _STDERR_MAX_BYTES)
-        return data.decode("utf-8", errors="replace").strip()
-    except (OSError, ValueError):
-        return ""
+_STDERR_MAX_BYTES = 4096  # cap stderr buffer size
 
 
 class MCPClient:
@@ -181,7 +169,43 @@ class MCPClient:
         self._id   = 0
         self._lock = threading.Lock()   # serialise writes/reads on this pipe
         self._chart_files: list[str] = []
-        self._initialize()
+        # A daemon thread drains stderr into a ring buffer.  Without this, a
+        # chatty server can fill the ~64 KB pipe and deadlock its own writes,
+        # hanging the parent's next readline().
+        self._stderr_lines: collections.deque[str] = collections.deque(maxlen=200)
+        self._stderr_lock = threading.Lock()
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, daemon=True,
+            name=f"mcp-stderr-drain-{self.proc.pid}",
+        )
+        self._stderr_thread.start()
+        try:
+            self._initialize()
+        except Exception:
+            # Tear down the subprocess so the drainer exits and we don't leak
+            # a hung child if the handshake never completes.
+            self.close()
+            raise
+
+    def _drain_stderr(self) -> None:
+        """Read the server's stderr line-by-line until EOF, into a ring buffer."""
+        pipe = self.proc.stderr
+        if pipe is None:
+            return
+        try:
+            for line in iter(pipe.readline, ""):
+                with self._stderr_lock:
+                    self._stderr_lines.append(line.rstrip("\n"))
+        except (OSError, ValueError):
+            pass
+
+    def _last_stderr(self, max_chars: int = _STDERR_MAX_BYTES) -> str:
+        """Return up to *max_chars* of the most recent stderr output."""
+        with self._stderr_lock:
+            text = "\n".join(self._stderr_lines).strip()
+        if len(text) > max_chars:
+            return text[-max_chars:]
+        return text
 
     def _next_id(self) -> int:
         self._id += 1
@@ -217,7 +241,7 @@ class MCPClient:
                 self.proc.stdin.write(json.dumps(msg) + "\n")
                 self.proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
-                err = _read_stderr_safe(self.proc.stderr)
+                err = self._last_stderr()
                 raise RuntimeError(
                     f"MCP server crashed."
                     f"{(' Server error: ' + err) if err else ''}"
@@ -240,7 +264,7 @@ class MCPClient:
 
             raw = self.proc.stdout.readline()
             if not raw:
-                err = _read_stderr_safe(self.proc.stderr)
+                err = self._last_stderr()
                 raise RuntimeError(
                     f"MCP server closed unexpectedly."
                     f"{(' Server error: ' + err) if err else ''}"
@@ -259,7 +283,7 @@ class MCPClient:
                 self.proc.stdin.write(json.dumps(msg) + "\n")
                 self.proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
-                err = _read_stderr_safe(self.proc.stderr)
+                err = self._last_stderr()
                 raise RuntimeError(
                     f"MCP server crashed during notification '{method}'."
                     f"{(' Server error: ' + err) if err else ''}"
@@ -278,7 +302,7 @@ class MCPClient:
         # Detect early exit before attempting the handshake — gives a clearer
         # error than a BrokenPipeError from _send.
         if self.proc.poll() is not None:
-            err = _read_stderr_safe(self.proc.stderr)
+            err = self._last_stderr()
             raise RuntimeError(
                 f"MCP server exited before handshake (code {self.proc.returncode})."
                 f"{(' Server error: ' + err) if err else ''}"
@@ -357,6 +381,8 @@ class MCPClient:
         Each step is guarded so a failure at any stage does not prevent the
         next attempt.  A final ``wait()`` confirms the process is reaped.
         Chart temp files created by ``call_tool()`` are cleaned up here.
+        Stdout/stderr are closed before termination so the server is not left
+        blocked on a full pipe buffer.
         """
         # Clean up chart temp files
         for path in self._chart_files:
@@ -365,21 +391,36 @@ class MCPClient:
         self._chart_files.clear()
 
         pid = self.proc.pid
-        try:
-            self.proc.stdin.close()
-        except Exception as exc:
-            sys.stderr.write(f"[syscontrol] MCPClient.close stdin (pid={pid}): {exc}\n")
+
+        # Close stdin first so the server sees EOF on its read loop.
+        with contextlib.suppress(Exception):
+            if self.proc.stdin is not None:
+                self.proc.stdin.close()
+
+        # Drain stdout to unblock any pending server write.  Bounded by a short
+        # read budget — we don't care about the data, just about not deadlocking.
+        with contextlib.suppress(Exception):
+            if self.proc.stdout is not None:
+                self.proc.stdout.close()
+
         try:
             self.proc.terminate()
             self.proc.wait(timeout=2)
-            return  # clean exit — no need to escalate
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(Exception):
+                self.proc.kill()
+                self.proc.wait(timeout=2)
         except Exception as exc:
-            sys.stderr.write(f"[syscontrol] MCPClient.close terminate (pid={pid}): {exc}\n")
-        try:
-            self.proc.kill()
-            self.proc.wait(timeout=2)  # reap to avoid zombie
-        except Exception:
-            pass  # best-effort — process may already be gone
+            sys.stderr.write(
+                f"[syscontrol] MCPClient.close terminate (pid={pid}): {exc}\n"
+            )
+            with contextlib.suppress(Exception):
+                self.proc.kill()
+                self.proc.wait(timeout=2)
+
+        # Drainer thread will exit on stderr EOF.  Join briefly to reap it.
+        with contextlib.suppress(Exception):
+            self._stderr_thread.join(timeout=1.0)
 
 
 # ── MCP Client Pool ───────────────────────────────────────────────────────────
@@ -425,7 +466,11 @@ class MCPClientPool:
         """
         self._clients: dict[int, MCPClient] = {0: primary}
         self._pool_size = pool_size
-        self._pool_lock = threading.Lock()
+        self._pool_lock = threading.Lock()  # guards _clients and _slot_locks
+        # Per-slot locks let two threads spawning different slots proceed in
+        # parallel, while two threads racing on the same slot serialise so
+        # only one MCPClient is created.
+        self._slot_locks: dict[int, threading.Lock] = {}
         self._parallel_safe: set[str] | None = None  # lazily populated
 
     def _get_or_create(self, index: int) -> MCPClient:
@@ -437,20 +482,18 @@ class MCPClientPool:
         with self._pool_lock:
             if index in self._clients:
                 return self._clients[index]
+            slot_lock = self._slot_locks.setdefault(index, threading.Lock())
 
-        # Construct the new client OUTSIDE the lock — MCPClient.__init__ spawns
-        # a subprocess and runs the MCP handshake, which can take 100–200 ms.
-        # Holding the lock for that entire time would block every other thread.
-        new_client = MCPClient()
-
-        with self._pool_lock:
-            # Re-check under lock: another thread may have beaten us.
-            # If so, discard our new_client to avoid a leaked subprocess.
-            if index in self._clients:
-                new_client.close()
-                return self._clients[index]
-            self._clients[index] = new_client
-            return new_client
+        # Slow path — spawn under a per-slot lock so concurrent callers for
+        # the same index serialise without blocking other indexes.
+        with slot_lock:
+            with self._pool_lock:
+                if index in self._clients:
+                    return self._clients[index]
+            new_client = MCPClient()
+            with self._pool_lock:
+                self._clients[index] = new_client
+                return new_client
 
     def warm_up(self, count: int | None = None) -> None:
         """Pre-spawn worker clients in background threads.
@@ -933,6 +976,7 @@ def run_streaming_turn(
     messages: list[dict],
     model: str,
     callbacks: TurnCallbacks,
+    max_rounds: int | None = None,
 ) -> tuple[str, float]:
     """Run one user-turn: stream response, execute tool calls, repeat.
 
@@ -947,6 +991,9 @@ def run_streaming_turn(
         messages: Mutable conversation history — modified in-place.
         model: Model identifier string.
         callbacks: Presentation callbacks.
+        max_rounds: Optional override for the per-turn tool-call round cap.
+            Defaults to ``MAX_TOOL_ROUNDS``.  Used by sub-agents to honour
+            their per-spec ``max_rounds`` budget.
 
     Returns:
         A ``(finish_reason, elapsed_seconds)`` tuple.  *finish_reason* is the
@@ -954,8 +1001,9 @@ def run_streaming_turn(
         ``"length"``, etc.) or ``"error"`` if an exception was raised.
     """
     start_time = time.monotonic()
+    rounds = max_rounds if max_rounds is not None else MAX_TOOL_ROUNDS
 
-    for _round in range(MAX_TOOL_ROUNDS):
+    for _round in range(rounds):
         if callbacks.cancel_event and callbacks.cancel_event.is_set():
             return "cancelled", time.monotonic() - start_time
 
@@ -972,9 +1020,9 @@ def run_streaming_turn(
         if result is not None:
             return result
 
-    # Loop exhausted MAX_TOOL_ROUNDS without a terminal finish_reason.
+    # Loop exhausted the round budget without a terminal finish_reason.
     callbacks.on_error(
-        "Loop", f"Exceeded {MAX_TOOL_ROUNDS} tool-call rounds — aborting turn"
+        "Loop", f"Exceeded {rounds} tool-call rounds — aborting turn"
     )
     return "error", time.monotonic() - start_time
 

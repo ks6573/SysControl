@@ -22,12 +22,25 @@ struct PermissionConfigStore {
     /// Merge a single key change into the existing dict and persist.
     /// Other permission flags (allow_shell, etc.) are preserved.
     func set(_ key: String, _ value: Bool) {
-        var permissions = load()
-        permissions[key] = value
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: permissions,
-            options: [.prettyPrinted, .sortedKeys]
-        ) else { return }
-        try? data.write(to: configURL)
+        let url = configURL
+        StorageQueue.shared.async {
+            var permissions: [String: Bool] = {
+                guard let data = try? Data(contentsOf: url),
+                      let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Bool]
+                else { return [:] }
+                return dict
+            }()
+            if permissions[key] == value { return }
+            permissions[key] = value
+            guard let data = try? JSONSerialization.data(
+                withJSONObject: permissions,
+                options: [.prettyPrinted, .sortedKeys]
+            ) else { return }
+            do {
+                try data.write(to: url, options: [.atomic])
+            } catch {
+                NSLog("[syscontrol] PermissionConfigStore.set failed: \(error)")
+            }
+        }
     }
 }

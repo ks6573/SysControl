@@ -200,6 +200,8 @@ final class BackendService: @unchecked Sendable {
     }
 
     private func dispatchEvent(type: String, json: [String: Any]) {
+        // Callers (AppState) re-enter MainActor on every callback, so this
+        // function stays on the read-loop background thread.
         switch type {
         case "ready":
             let toolCount = json["tool_count"] as? Int ?? 0
@@ -227,7 +229,8 @@ final class BackendService: @unchecked Sendable {
             onToolFinished(name, result)
 
         case "chart_image":
-            if let path = json["path"] as? String {
+            if let path = json["path"] as? String,
+               BackendService.isAllowedChartPath(path) {
                 onChartImage?(path)
             }
 
@@ -244,5 +247,19 @@ final class BackendService: @unchecked Sendable {
         default:
             break
         }
+    }
+
+    /// Reject chart-image paths that don't live in the temp dir under the
+    /// expected ``syscontrol_chart_`` prefix — the bridge already enforces
+    /// this server-side, but a hostile MCP tool could emit arbitrary paths.
+    static func isAllowedChartPath(_ path: String) -> Bool {
+        let resolved = (path as NSString).resolvingSymlinksInPath
+        let lastComponent = (resolved as NSString).lastPathComponent
+        guard lastComponent.hasPrefix("syscontrol_chart_"),
+              lastComponent.hasSuffix(".png") else {
+            return false
+        }
+        let tmpDir = (NSTemporaryDirectory() as NSString).resolvingSymlinksInPath
+        return ["/tmp", "/private/tmp", tmpDir].contains { resolved.hasPrefix($0 + "/") }
     }
 }
