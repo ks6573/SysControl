@@ -7,26 +7,45 @@ struct SidebarView: View {
     @State private var isImporterPresented = false
     @State private var sessionToDelete: ChatSession?
     @State private var savedChatToDelete: SavedChat?
+    @State private var pinnedSessions: [ChatSession] = []
+    @State private var recentSessionGroups: [SessionGroup] = []
 
     private var markdownType: UTType {
         UTType(filenameExtension: "md") ?? .plainText
     }
 
-    private var pinnedSessions: [ChatSession] {
-        appState.sessions.filter(\.isPinned)
+    private static func computePinned(_ sessions: [ChatSession]) -> [ChatSession] {
+        sessions.filter(\.isPinned)
     }
 
-    private var recentSessionGroups: [SessionGroup] {
+    private static func computeRecentGroups(_ sessions: [ChatSession]) -> [SessionGroup] {
         var grouped: [SessionBucket: [ChatSession]] = [:]
-        for session in appState.sessions where !session.isPinned {
+        for session in sessions where !session.isPinned {
             let bucket = SessionBucket.bucket(for: session.createdAt)
             grouped[bucket, default: []].append(session)
         }
-
         return SessionBucket.allCases.compactMap { bucket in
             guard let sessions = grouped[bucket], !sessions.isEmpty else { return nil }
             return SessionGroup(bucket: bucket, sessions: sessions)
         }
+    }
+
+    private func refreshSessionGroups() {
+        let sessions = appState.sessions
+        pinnedSessions = Self.computePinned(sessions)
+        recentSessionGroups = Self.computeRecentGroups(sessions)
+    }
+
+    /// Equatable digest of every input the cached groupings depend on.  When
+    /// this changes we recompute; otherwise body re-evaluations are cheap.
+    private var sessionsFingerprint: [SessionFingerprint] {
+        appState.sessions.map { SessionFingerprint(id: $0.id, isPinned: $0.isPinned, createdAt: $0.createdAt) }
+    }
+
+    private struct SessionFingerprint: Equatable {
+        let id: UUID
+        let isPinned: Bool
+        let createdAt: Date
     }
 
     var body: some View {
@@ -83,6 +102,8 @@ struct SidebarView: View {
         } message: {
             Text("Are you sure you want to delete \"\(savedChatToDelete?.title ?? "")\"?")
         }
+        .onAppear { refreshSessionGroups() }
+        .onChange(of: sessionsFingerprint) { _, _ in refreshSessionGroups() }
     }
 
     private var header: some View {

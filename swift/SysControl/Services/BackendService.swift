@@ -172,6 +172,8 @@ final class BackendService: @unchecked Sendable {
         pipe.fileHandleForWriting.write(payload)
     }
 
+    private static let newlineByte: UInt8 = 0x0A
+
     private func readLoop(_ pipe: Pipe) {
         let handle = pipe.fileHandleForReading
         var buffer = Data()
@@ -184,14 +186,14 @@ final class BackendService: @unchecked Sendable {
             }
             buffer.append(chunk)
 
-            // Split on newlines
-            while let newlineRange = buffer.range(of: Data("\n".utf8)) {
-                let lineData = buffer[buffer.startIndex..<newlineRange.lowerBound]
-                buffer.removeSubrange(buffer.startIndex...newlineRange.lowerBound)
-
-                guard let line = String(data: lineData, encoding: .utf8),
-                      !line.isEmpty,
-                      let json = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+            // Split on newlines.  Walk the buffer once per chunk; each event
+            // is decoded directly from the slice so we don't allocate a new
+            // String for the line and a separate Data for json parsing.
+            while let newlineIdx = buffer.firstIndex(of: BackendService.newlineByte) {
+                let lineData = buffer[buffer.startIndex..<newlineIdx]
+                defer { buffer.removeSubrange(buffer.startIndex...newlineIdx) }
+                guard !lineData.isEmpty,
+                      let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                       let type = json["type"] as? String else { continue }
 
                 dispatchEvent(type: type, json: json)

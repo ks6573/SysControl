@@ -276,7 +276,9 @@ private final class SavedChatMetadataCache {
         let title: String
     }
 
+    private static let maxEntries = 1000
     private var entries: [String: Entry] = [:]
+    private var insertionOrder: [String] = []
     private let lock = NSLock()
 
     func title(for path: String, modifiedAt: Date?, fileSize: Int?, loader: () -> String) -> String {
@@ -294,9 +296,15 @@ private final class SavedChatMetadataCache {
 
         lock.lock()
         defer { lock.unlock() }
+        if entries[path] == nil {
+            insertionOrder.append(path)
+        }
         entries[path] = Entry(modifiedAt: modifiedAt, fileSize: fileSize, title: loaded)
-        if entries.count > 1000 {
-            entries.removeAll(keepingCapacity: true)
+        // Trim the oldest entry rather than dumping the whole cache; otherwise
+        // a single overflow forces a full rescan on the next sidebar refresh.
+        while entries.count > Self.maxEntries, let oldest = insertionOrder.first {
+            insertionOrder.removeFirst()
+            entries.removeValue(forKey: oldest)
         }
         return loaded
     }
@@ -304,6 +312,9 @@ private final class SavedChatMetadataCache {
     func remove(path: String) {
         lock.lock()
         entries.removeValue(forKey: path)
+        if let idx = insertionOrder.firstIndex(of: path) {
+            insertionOrder.remove(at: idx)
+        }
         lock.unlock()
     }
 }

@@ -948,12 +948,10 @@ private enum SyntaxHighlighter {
         }
 
         var result = AttributedString(code)
+        let nsRange = NSRange(code.startIndex..., in: code)
 
         for rule in rules {
-            guard let regex = try? NSRegularExpression(pattern: rule.pattern, options: rule.options) else {
-                continue
-            }
-            let nsRange = NSRange(code.startIndex..., in: code)
+            guard let regex = rule.regex else { continue }
             for match in regex.matches(in: code, range: nsRange) {
                 guard let range = Range(match.range, in: code),
                       let attrRange = Range(range, in: result) else { continue }
@@ -968,6 +966,33 @@ private enum SyntaxHighlighter {
         let pattern: String
         let color: NSColor
         var options: NSRegularExpression.Options = []
+
+        /// Compiled regex, cached per (pattern, options) combo.  Compilation
+        /// is ~1–5 ms each — caching avoids paying that on every render.
+        var regex: NSRegularExpression? { RegexCache.shared.regex(pattern: pattern, options: options) }
+    }
+
+    private final class RegexCache: @unchecked Sendable {
+        static let shared = RegexCache()
+        private let lock = NSLock()
+        private var cache: [String: NSRegularExpression] = [:]
+
+        func regex(pattern: String, options: NSRegularExpression.Options) -> NSRegularExpression? {
+            let key = "\(options.rawValue):\(pattern)"
+            lock.lock()
+            if let cached = cache[key] {
+                lock.unlock()
+                return cached
+            }
+            lock.unlock()
+            guard let compiled = try? NSRegularExpression(pattern: pattern, options: options) else {
+                return nil
+            }
+            lock.lock()
+            cache[key] = compiled
+            lock.unlock()
+            return compiled
+        }
     }
 
     // Shared token patterns

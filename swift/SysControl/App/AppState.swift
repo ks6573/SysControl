@@ -389,8 +389,19 @@ final class AppState {
 
     // MARK: - Token Batching
 
+    /// Force-flush threshold for the token buffer.  Without it, a producer
+    /// that streams faster than the 50 ms timer can fire (or a single huge
+    /// token) lets the buffer grow unbounded between flushes.
+    private static let tokenBufferFlushThreshold = 64 * 1024
+
     private func bufferToken(_ text: String) {
         tokenBuffer += text
+        if tokenBuffer.utf8.count >= Self.tokenBufferFlushThreshold {
+            tokenFlushWorkItem?.cancel()
+            tokenFlushWorkItem = nil
+            flushTokenBuffer()
+            return
+        }
         if tokenFlushWorkItem == nil {
             let work = DispatchWorkItem { [weak self] in
                 self?.flushTokenBuffer()
