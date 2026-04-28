@@ -106,6 +106,7 @@ CLOUD_BASE_URL = "https://ollama.com/v1"
 LOCAL_MODEL    = "qwen3:30b"  # any model pulled via: ollama pull <model>
 LOCAL_BASE_URL = "http://localhost:11434/v1"
 LOCAL_API_KEY  = "ollama"   # Ollama doesn't require a real key
+LOCAL_TAGS_URL_FALLBACK = "http://localhost:11434/api/tags"
 
 # ANSI colours — only emitted when stdout is a real terminal.
 _USE_COLOR = sys.stdout.isatty()
@@ -669,14 +670,25 @@ def prune_history(messages: list[dict], max_messages: int = MAX_HISTORY_MESSAGES
     return [msg for group in groups[cutoff:] for msg in group]
 
 
-def fetch_ollama_models(base_url: str = "http://localhost:11434") -> list[str]:
+def ollama_tags_url(base_url: str = LOCAL_BASE_URL) -> str:
+    """Derive Ollama /api/tags endpoint from an OpenAI-compatible base URL."""
+    normalized = base_url.strip().rstrip("/")
+    if not normalized:
+        return LOCAL_TAGS_URL_FALLBACK
+    if normalized.lower().endswith("/v1"):
+        normalized = normalized[:-3]
+    return f"{normalized}/api/tags"
+
+
+def fetch_ollama_models(base_url: str = LOCAL_BASE_URL) -> list[str]:
     """Return sorted list of locally installed Ollama model names.
 
     Returns an empty list if Ollama is not running or unreachable (3 s timeout).
     """
     try:
+        tags_url = ollama_tags_url(base_url)
         req = urllib.request.Request(
-            f"{base_url}/api/tags",
+            tags_url,
             headers={"Accept": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=3) as r:
@@ -1025,4 +1037,3 @@ def run_streaming_turn(
         "Loop", f"Exceeded {rounds} tool-call rounds — aborting turn"
     )
     return "error", time.monotonic() - start_time
-

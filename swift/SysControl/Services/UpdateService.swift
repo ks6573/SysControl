@@ -130,11 +130,23 @@ final class UpdateService {
                 process.waitUntilExit()
 
                 let code = process.terminationStatus
+                let outputData = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outputData, encoding: .utf8) ?? ""
                 await MainActor.run { [weak self] in
                     if code == 0 {
                         self?.relaunchApp()
                     } else {
-                        self?.status = .failed("Update script exited with code \(code)")
+                        let lastLogLine = output
+                            .split(whereSeparator: \.isNewline)
+                            .map { $0.trimmingCharacters(in: .whitespaces) }
+                            .last(where: { !$0.isEmpty })
+                        if let lastLogLine {
+                            self?.status = .failed("Update failed (\(code)): \(lastLogLine)")
+                        } else if code == 127 {
+                            self?.status = .failed("Update failed (127: command not found). Check ~/.syscontrol/install.log")
+                        } else {
+                            self?.status = .failed("Update script exited with code \(code)")
+                        }
                     }
                 }
             } catch {

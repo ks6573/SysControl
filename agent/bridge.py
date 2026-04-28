@@ -35,6 +35,7 @@ from typing import IO
 from openai import OpenAI
 
 from agent.core import (
+    LOCAL_BASE_URL,
     RESPONSE_STYLE_GUIDANCE,
     MCPClient,
     MCPClientPool,
@@ -403,7 +404,7 @@ def main() -> None:
         sys.exit(1)
 
     api_key = os.environ.get("SYSCONTROL_API_KEY", "ollama")
-    base_url = os.environ.get("SYSCONTROL_BASE_URL", "http://localhost:11434/v1")
+    base_url = os.environ.get("SYSCONTROL_BASE_URL", LOCAL_BASE_URL)
     model = os.environ.get("SYSCONTROL_MODEL", "qwen2.5:7b")
 
     llm = OpenAI(

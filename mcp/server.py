@@ -91,6 +91,10 @@ IS_MACOS = _SYSTEM == "Darwin"
 IS_LINUX = _SYSTEM == "Linux"
 IS_WIN   = _SYSTEM == "Windows"
 
+DEFAULT_API_KEY = "ollama"
+DEFAULT_BASE_URL = "http://localhost:11434/v1"
+DEFAULT_LOCAL_MODEL = "qwen3:30b"
+
 # ── Shared thread pool for parallel metric collection ─────────────────────────
 # Reused across calls — avoids per-call thread creation/teardown overhead.
 _METRICS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="syscontrol-metrics")
@@ -4695,9 +4699,9 @@ def _run_agent(agent_name: str, task: str) -> dict:
     if not task or not task.strip():
         return {"error": "task is required."}
 
-    api_key  = os.environ.get("SYSCONTROL_API_KEY", "ollama")
-    base_url = os.environ.get("SYSCONTROL_BASE_URL", "http://localhost:11434/v1")
-    model    = os.environ.get("SYSCONTROL_MODEL", "qwen3:30b")
+    api_key  = os.environ.get("SYSCONTROL_API_KEY", DEFAULT_API_KEY)
+    base_url = os.environ.get("SYSCONTROL_BASE_URL", DEFAULT_BASE_URL)
+    model    = os.environ.get("SYSCONTROL_MODEL", DEFAULT_LOCAL_MODEL)
 
     try:
         # Lazy imports keep server startup fast and avoid circular references.
@@ -4732,9 +4736,9 @@ def _run_deep_research(
     if not question or not question.strip():
         return {"error": "question is required."}
 
-    api_key = os.environ.get("SYSCONTROL_API_KEY", "ollama")
-    base_url = os.environ.get("SYSCONTROL_BASE_URL", "http://localhost:11434/v1")
-    model = os.environ.get("SYSCONTROL_MODEL", "qwen3:30b")
+    api_key = os.environ.get("SYSCONTROL_API_KEY", DEFAULT_API_KEY)
+    base_url = os.environ.get("SYSCONTROL_BASE_URL", DEFAULT_BASE_URL)
+    model = os.environ.get("SYSCONTROL_MODEL", DEFAULT_LOCAL_MODEL)
 
     try:
         from deep_research.orchestrator import orchestrate  # lazy import

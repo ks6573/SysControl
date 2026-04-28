@@ -291,12 +291,12 @@ struct SettingsView: View {
             baseURL = trimmed.isEmpty ? ProviderConfiguration.cloudBaseURL : trimmed
         }
 
-        // Use /api/tags for Ollama, /models for OpenAI-compatible APIs
+        // Use /api/tags for local Ollama, /models for OpenAI-compatible APIs.
         let testURL: String
-        if baseURL.contains("localhost") || baseURL.contains("127.0.0.1") {
-            testURL = "http://localhost:11434/api/tags"
+        if provider == .local {
+            testURL = ProviderConfiguration.localTagsURL
         } else {
-            testURL = baseURL.hasSuffix("/") ? "\(baseURL)models" : "\(baseURL)/models"
+            testURL = ProviderConfiguration.openAIModelsURL(fromBaseURL: baseURL)
         }
 
         guard let url = URL(string: testURL) else {
@@ -330,7 +330,7 @@ struct SettingsView: View {
         isRefreshingModels = true
         defer { isRefreshingModels = false }
 
-        guard let url = URL(string: "http://localhost:11434/api/tags") else {
+        guard let url = URL(string: ProviderConfiguration.localTagsURL) else {
             if localModels.isEmpty {
                 localModels = [ProviderConfiguration.localDefaultModel]
             }

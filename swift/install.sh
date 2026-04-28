@@ -17,6 +17,17 @@ LOG_FILE="$HOME/.syscontrol/install.log"
 DEST="/Applications/$APP_NAME.app"
 MIN_MACOS_MAJOR=14
 
+normalize_repo_slug() {
+    local url="$1"
+    url="${url#git@github.com:}"
+    url="${url#https://github.com/}"
+    url="${url#http://github.com/}"
+    url="${url%.git}"
+    printf "%s" "$url" | tr '[:upper:]' '[:lower:]'
+}
+
+EXPECTED_REPO_SLUG="$(normalize_repo_slug "$REPO_URL")"
+
 # ── Uninstall flag ────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--uninstall" ]]; then
     echo ""
@@ -96,9 +107,22 @@ echo "[2/5] Downloading SysControl..."
 # Create ~/.syscontrol early so we can write the log
 mkdir -p "$HOME/.syscontrol"
 
-if [ -d "$INSTALL_DIR" ]; then
+if [ -d "$INSTALL_DIR/.git" ]; then
     echo "  Updating existing installation..."
     cd "$INSTALL_DIR"
+
+    CURRENT_REMOTE_URL="$(git remote get-url origin 2>/dev/null || true)"
+    if [ -n "$CURRENT_REMOTE_URL" ]; then
+        CURRENT_REMOTE_SLUG="$(normalize_repo_slug "$CURRENT_REMOTE_URL")"
+        if [ "$CURRENT_REMOTE_SLUG" != "$EXPECTED_REPO_SLUG" ]; then
+            echo "  Correcting git remote origin -> $REPO_URL"
+            git remote set-url origin "$REPO_URL" 2>>"$LOG_FILE"
+        fi
+    else
+        echo "  No origin remote found — setting origin to $REPO_URL"
+        git remote add origin "$REPO_URL" 2>>"$LOG_FILE" || git remote set-url origin "$REPO_URL" 2>>"$LOG_FILE"
+    fi
+
     git pull --ff-only 2>>"$LOG_FILE" || {
         echo "  Could not fast-forward — re-cloning..."
         cd /
@@ -107,6 +131,10 @@ if [ -d "$INSTALL_DIR" ]; then
         cd "$INSTALL_DIR"
     }
 else
+    if [ -d "$INSTALL_DIR" ]; then
+        echo "  Existing install directory is not a git checkout — re-cloning..."
+        rm -rf "$INSTALL_DIR"
+    fi
     mkdir -p "$(dirname "$INSTALL_DIR")"
     git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" 2>>"$LOG_FILE"
     cd "$INSTALL_DIR"
@@ -168,6 +196,20 @@ set -euo pipefail
 INSTALL_DIR="$HOME/.syscontrol/build"
 LOG_FILE="$HOME/.syscontrol/install.log"
 DEST="/Applications/SysControl.app"
+REPO_URL="https://github.com/ks6573/SysControl.git"
+# GUI-launched shells often miss user-local binaries.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+normalize_repo_slug() {
+    local url="$1"
+    url="${url#git@github.com:}"
+    url="${url#https://github.com/}"
+    url="${url#http://github.com/}"
+    url="${url%.git}"
+    printf "%s" "$url" | tr '[:upper:]' '[:lower:]'
+}
+
+EXPECTED_REPO_SLUG="$(normalize_repo_slug "$REPO_URL")"
 
 echo "══════════════════════════════════════════"
 echo " SysControl Updater"
@@ -182,12 +224,32 @@ if [ ! -d "$INSTALL_DIR" ]; then
 fi
 
 echo "[1/3] Pulling latest changes..."
+
+if [ ! -d "$INSTALL_DIR/.git" ]; then
+    echo "  Existing source is missing git metadata — re-cloning..."
+    cd /
+    rm -rf "$INSTALL_DIR"
+    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" 2>>"$LOG_FILE"
+fi
+
 cd "$INSTALL_DIR"
+CURRENT_REMOTE_URL="$(git remote get-url origin 2>/dev/null || true)"
+if [ -n "$CURRENT_REMOTE_URL" ]; then
+    CURRENT_REMOTE_SLUG="$(normalize_repo_slug "$CURRENT_REMOTE_URL")"
+    if [ "$CURRENT_REMOTE_SLUG" != "$EXPECTED_REPO_SLUG" ]; then
+        echo "  Correcting git remote origin -> $REPO_URL"
+        git remote set-url origin "$REPO_URL" 2>>"$LOG_FILE"
+    fi
+else
+    echo "  No origin remote found — setting origin to $REPO_URL"
+    git remote add origin "$REPO_URL" 2>>"$LOG_FILE" || git remote set-url origin "$REPO_URL" 2>>"$LOG_FILE"
+fi
+
 git pull --ff-only 2>>"$LOG_FILE" || {
     echo "  Fast-forward failed — re-cloning..."
     cd /
     rm -rf "$INSTALL_DIR"
-    git clone --depth 1 https://github.com/ks6573/SysControl.git "$INSTALL_DIR" 2>>"$LOG_FILE"
+    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" 2>>"$LOG_FILE"
     cd "$INSTALL_DIR"
 }
 VERSION=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "?")
@@ -195,6 +257,17 @@ echo "  Version: $VERSION"
 
 echo ""
 echo "[2/3] Updating Python backend..."
+if ! command -v uv &>/dev/null; then
+    echo "  uv not found on PATH — installing..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh >>"$LOG_FILE" 2>&1
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
+if ! command -v uv &>/dev/null; then
+    echo "✗ uv is still unavailable after install attempt. Check: $LOG_FILE"
+    exit 127
+fi
+
 uv sync >>"$LOG_FILE" 2>&1
 echo "  Done"
 
