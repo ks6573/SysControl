@@ -123,10 +123,8 @@ def _bytes_to_mb(b: float, ndigits: int = 2) -> float:
 
 def _log_warning(context: str, exc: BaseException) -> None:
     """Write a single-line warning to stderr; never raises."""
-    try:
+    with contextlib.suppress(Exception):  # stderr write itself can fail in odd setups
         sys.stderr.write(f"[syscontrol] {context}: {type(exc).__name__}: {exc}\n")
-    except Exception:  # pragma: no cover — stderr write itself failed
-        pass
 
 
 # ── Common inputSchema shapes ─────────────────────────────────────────────────
