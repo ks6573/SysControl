@@ -10,6 +10,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var isError: Bool
     var chartImagePaths: [String]?
     var attachedFilePath: String?
+    var toolCalls: [ToolCall]?
 
     enum Role: String, Codable {
         case user
@@ -25,5 +26,21 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         self.timestamp = Date()
         self.toolNames = toolNames
         self.isError = isError
+    }
+}
+
+/// One executed MCP tool call attached to an assistant turn — rendered as
+/// an expandable inline card. `result` is nil while the call is in-flight.
+struct ToolCall: Identifiable, Codable, Equatable {
+    let id: UUID
+    let name: String
+    var result: String?
+    let startedAt: Date
+
+    init(name: String) {
+        self.id = UUID()
+        self.name = name
+        self.result = nil
+        self.startedAt = Date()
     }
 }

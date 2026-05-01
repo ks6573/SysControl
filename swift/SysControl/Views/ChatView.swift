@@ -172,6 +172,56 @@ struct ChatView: View {
             focusedSearchMatchIndex = 0
             searchMatchMessageIDs = []
         }
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text(toolbarTitle)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 380)
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                modelBadge
+                Button {
+                    isSearchVisible.toggle()
+                    if !isSearchVisible {
+                        searchText = ""
+                        searchMatchMessageIDs = []
+                        focusedSearchMatchIndex = 0
+                    }
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .help("Search messages (⌘F)")
+                .keyboardShortcut("f", modifiers: .command)
+            }
+        }
+    }
+
+    private var toolbarTitle: String {
+        if let title = appState.activeSession?.title, !title.isEmpty, title != "New Chat" {
+            return title
+        }
+        return "SysControl"
+    }
+
+    private var modelBadge: some View {
+        let cfg = appState.providerConfiguration
+        let icon = cfg.isLocal ? "desktopcomputer" : "cloud"
+        return HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .medium))
+            Text(cfg.model)
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            Capsule().fill(Color.primary.opacity(0.07))
+        )
+        .help("\(cfg.label) · \(cfg.model) — change in Settings (⌘,)")
     }
 
     // MARK: - Messages
@@ -250,8 +300,9 @@ struct ChatView: View {
                 }
             }
             .onChange(of: session.activeToolNames) { _, _ in
-                if !session.activeToolNames.isEmpty && autoScrollEnabled {
-                    scheduleScroll(proxy: proxy, target: "tool-indicator", animated: false, debounce: 0.05)
+                if !session.activeToolNames.isEmpty && autoScrollEnabled,
+                   let last = session.messages.last {
+                    scheduleScroll(proxy: proxy, target: last.id, animated: false, debounce: 0.05)
                 }
             }
             .onDisappear {
@@ -307,19 +358,51 @@ struct ChatView: View {
     // MARK: - Welcome
 
     private var welcomeView: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 18) {
             Spacer()
-            Text(greeting)
-                .font(.system(size: 28, weight: .medium, design: .serif))
-                .foregroundStyle(.primary.opacity(0.85))
-                .multilineTextAlignment(.center)
-            Text("Ask about CPU, memory, disk, network, processes, or anything on your system.")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+            VStack(spacing: 8) {
+                Text(greeting)
+                    .font(.system(size: 30, weight: .medium, design: .serif))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .multilineTextAlignment(.center)
+                Text("How can I help with your system?")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.bottom, 8)
+
+            starterPrompts
+                .frame(maxWidth: 620)
+
             Spacer()
         }
+        .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var starterPrompts: some View {
+        let prompts: [(icon: String, label: String, prompt: String)] = [
+            ("cpu", "CPU usage right now", "Show me current CPU usage broken down by process."),
+            ("memorychip", "Memory pressure", "Check memory pressure and what's using the most RAM."),
+            ("internaldrive", "Disk space overview", "How much disk space is free, and which directories are largest?"),
+            ("bolt", "Top energy hogs", "Which processes are using the most energy and CPU right now?"),
+        ]
+        return LazyVGrid(
+            columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
+            spacing: 10
+        ) {
+            ForEach(prompts, id: \.label) { item in
+                StarterPromptCard(
+                    icon: item.icon,
+                    label: item.label,
+                    onTap: {
+                        autoScrollEnabled = true
+                        appState.sendMessage(item.prompt)
+                    }
+                )
+            }
+        }
     }
 
     private var greeting: String {
@@ -437,11 +520,6 @@ private struct ChatMessageListContent: View {
                         .id(message.id)
                     }
 
-                    if !session.activeToolNames.isEmpty {
-                        ToolIndicatorRow(names: session.activeToolNames)
-                            .id("tool-indicator")
-                    }
-
                     if session.isStreaming && showStreamingIndicator {
                         ThinkingIndicator()
                             .id("streaming-indicator")
@@ -536,33 +614,45 @@ private struct ConnectionStatusBanner: View {
 
 // MARK: - Typing Indicator
 
-private struct ToolIndicatorRow: View {
-    let names: [String]
+private struct StarterPromptCard: View {
+    let icon: String
+    let label: String
+    let onTap: () -> Void
 
-    private var label: String {
-        guard let first = names.first else { return "Running tool…" }
-        if names.count == 1 {
-            return "\(first)…"
-        }
-        return "\(first) +\(names.count - 1) more…"
-    }
+    @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "gear")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.orange)
-                .symbolEffect(.pulse, options: .repeating, value: names)
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+        Button(action: onTap) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Theme.accent.opacity(0.9))
+                    .frame(width: 22)
+                Text(label)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 4)
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary.opacity(isHovering ? 1 : 0.45))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(isHovering ? 0.08 : 0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.primary.opacity(isHovering ? 0.14 : 0.08), lineWidth: 1)
+            )
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(
-            Capsule().fill(Color.primary.opacity(0.06))
-        )
-        .padding(.vertical, 2)
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .animation(.easeInOut(duration: 0.12), value: isHovering)
     }
 }
 

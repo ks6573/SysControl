@@ -3,6 +3,7 @@ import SwiftUI
 /// Root view — split layout with active chat sessions and saved markdown chats.
 struct ContentView: View {
     @Environment(AppState.self) private var appState
+    @State private var isPaletteVisible = false
 
     var body: some View {
         NavigationSplitView {
@@ -25,6 +26,18 @@ struct ContentView: View {
         )) {
             OnboardingView().environment(appState)
         }
+        .sheet(isPresented: $isPaletteVisible) {
+            CommandPalette()
+                .environment(appState)
+                .presentationBackground(.clear)
+        }
+        .background(
+            Button("") {
+                isPaletteVisible.toggle()
+            }
+            .keyboardShortcut("k", modifiers: .command)
+            .opacity(0)
+        )
         .onAppear {
             appState.startBackend()
         }

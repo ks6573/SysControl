@@ -37,6 +37,7 @@ let package = Package(
                 "Views/InputBar.swift",
                 "Views/SettingsView.swift",
                 "Views/OnboardingView.swift",
+                "Views/CommandPalette.swift",
             ]
         ),
     ]

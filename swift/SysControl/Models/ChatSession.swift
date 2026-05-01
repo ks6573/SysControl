@@ -79,11 +79,30 @@ final class ChatSession: Identifiable, Codable {
 
     func toolStarted(_ names: [String]) {
         activeToolNames = names
+        guard let idx = _streamingMessageIndex,
+              idx < messages.count,
+              messages[idx].id == _streamingMessageID else { return }
+        var existing = messages[idx].toolCalls ?? []
+        for name in names where !existing.contains(where: { $0.name == name && $0.result == nil }) {
+            existing.append(ToolCall(name: name))
+        }
+        messages[idx].toolCalls = existing
     }
 
     func toolFinished(_ name: String, result: String) {
-        _ = (name, result)
         activeToolNames = []
+        guard let idx = _streamingMessageIndex,
+              idx < messages.count,
+              messages[idx].id == _streamingMessageID else { return }
+        guard var calls = messages[idx].toolCalls else { return }
+        if let pendingIdx = calls.firstIndex(where: { $0.name == name && $0.result == nil }) {
+            calls[pendingIdx].result = result
+        } else {
+            var call = ToolCall(name: name)
+            call.result = result
+            calls.append(call)
+        }
+        messages[idx].toolCalls = calls
     }
 
     func appendChartImage(_ path: String) {

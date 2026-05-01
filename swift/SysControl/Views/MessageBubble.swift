@@ -142,6 +142,14 @@ struct MessageBubble: View {
 
     private var assistantBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let calls = message.toolCalls, !calls.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(calls) { call in
+                        ToolCallCard(call: call)
+                    }
+                }
+            }
+
             if message.isError {
                 Text(message.content)
                     .font(.system(size: 14))
@@ -251,6 +259,117 @@ struct MessageBubble: View {
             Capsule().fill(Theme.toolFill)
         )
         .padding(.vertical, 1)
+    }
+}
+
+/// Inline expandable card for an executed MCP tool call.
+private struct ToolCallCard: View {
+    let call: ToolCall
+
+    @State private var isExpanded = false
+    @State private var copied = false
+
+    private var isPending: Bool { call.result == nil }
+
+    private var statusIcon: String {
+        if isPending { return "gear" }
+        return "checkmark.circle.fill"
+    }
+
+    private var statusTint: Color {
+        isPending ? .orange : .green
+    }
+
+    private var resultPreview: String {
+        guard let result = call.result else { return "" }
+        let collapsed = result
+            .split(whereSeparator: \.isNewline)
+            .joined(separator: " ")
+        return collapsed.count > 80 ? String(collapsed.prefix(80)) + "…" : collapsed
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: statusIcon)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(statusTint)
+                        .frame(width: 14)
+                        .symbolEffect(.pulse, options: .repeating, isActive: isPending)
+                    Text(call.name)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.primary.opacity(0.85))
+                    if !isPending && !isExpanded {
+                        Text(resultPreview)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Spacer(minLength: 6)
+                    if !isPending {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                    } else {
+                        Text("running")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isPending)
+
+            if isExpanded, let result = call.result, !result.isEmpty {
+                Divider().opacity(0.3)
+                HStack(alignment: .top, spacing: 0) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(result)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(.primary.opacity(0.85))
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(result, forType: .string)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                            copied = false
+                        }
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 10))
+                            .foregroundStyle(copied ? .green : .secondary)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 6)
+                    .padding(.top, 6)
+                }
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Theme.toolFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Theme.toolStroke, lineWidth: 1)
+        )
     }
 }
 
