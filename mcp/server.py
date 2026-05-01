@@ -116,6 +116,19 @@ def _bytes_to_mb(b: float, ndigits: int = 2) -> float:
     return round(b / 1e6, ndigits)
 
 
+# ── Diagnostic logging helper ─────────────────────────────────────────────────
+# Lightweight stderr writer for best-effort code paths that intentionally
+# swallow exceptions but should still leave a breadcrumb for debugging.
+# Tagged with [syscontrol] so users can grep their backend logs.
+
+def _log_warning(context: str, exc: BaseException) -> None:
+    """Write a single-line warning to stderr; never raises."""
+    try:
+        sys.stderr.write(f"[syscontrol] {context}: {type(exc).__name__}: {exc}\n")
+    except Exception:  # pragma: no cover — stderr write itself failed
+        pass
+
+
 # ── Common inputSchema shapes ─────────────────────────────────────────────────
 # Tools that take no arguments share this schema — defining it once avoids 30+
 # copies of the same dict literal in the TOOLS registry.
@@ -152,7 +165,8 @@ def _get_nvml_handles() -> list:
         try:
             count = pynvml.nvmlDeviceGetCount()
             _NVML_HANDLES = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(count)]
-        except Exception:
+        except pynvml.NVMLError as e:
+            _log_warning("NVML handle init failed", e)
             _NVML_HANDLES = []
         _NVML_HANDLES_READY = True
     return _NVML_HANDLES
@@ -287,8 +301,8 @@ class ReminderChecker:
                 with log_path.open("a") as f:
                     ts = datetime.datetime.now().isoformat(timespec="seconds")
                     f.write(f"[{ts}] _fire exception: {exc}\n")
-            except Exception:
-                pass
+            except OSError:
+                pass  # log write itself failed — nothing more to do
 
 
 def _start_reminder_checker_once() -> None:
@@ -1253,8 +1267,8 @@ def get_device_specs() -> dict:
                         "name": name,
                         "vram_total_mb": round(mem.total / 1024 / 1024, 1),
                     })
-        except Exception:
-            pass
+        except pynvml.NVMLError as e:
+            _log_warning("NVML device specs query failed", e)
 
     return {
         "os": {
@@ -2189,8 +2203,8 @@ def network_latency_check() -> dict:
             if parts and parts[0] in ("default", "0.0.0.0") and len(parts) >= 2:
                 gateway = parts[1]
                 break
-    except Exception:
-        pass
+    except (subprocess.TimeoutExpired, OSError):
+        pass  # gateway is optional — fall through to DNS-only ping
 
     targets: dict[str, str] = {}
     if gateway:
@@ -2358,8 +2372,8 @@ def _tmutil_dest(result: dict, lock: threading.Lock) -> None:
         if m:
             with lock:
                 result["destination_kind"] = m.group(1).strip()
-    except Exception:
-        pass
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _log_warning("tmutil destinationinfo failed", e)
 
 
 def get_time_machine_status() -> dict:
@@ -2516,8 +2530,8 @@ def _running_browser() -> str | None:
         for app in _CHROMIUM_APPS + [_SAFARI_APP]:
             if app in running:
                 return app
-    except Exception:
-        pass
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+        pass  # no browser detected
     return None
 
 
@@ -3435,8 +3449,9 @@ end tell
             "position_sec": round(float(parts[4]), 1) if len(parts) > 4 else None,
             "duration_sec": round(float(parts[5]), 1) if len(parts) > 5 else None,
         }
-    except Exception:
-        return None
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError,
+            ValueError, IndexError, OSError):
+        return None  # nothing playing or AppleScript output unparseable
 
 
 def get_now_playing() -> dict:
@@ -3638,8 +3653,8 @@ def get_wifi_networks() -> dict:
                 return result
         except subprocess.TimeoutExpired:
             return {"error": "Wi-Fi scan timed out (20s). Enable Wi-Fi and try again."}
-        except Exception:
-            pass  # fall through to system_profiler
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
+            _log_warning("airport wifi scan failed (falling back to system_profiler)", e)
 
     # ── Fallback: system_profiler SPAirPortDataType (macOS 14+) ─────────────
     try:
@@ -4401,7 +4416,8 @@ def read_pdf(path: str, max_pages: int = _DEFAULT_PDF_PAGES) -> dict:
             # abort the entire document.
             try:
                 text = (page.extract_text() or "").strip()
-            except Exception:
+            except Exception as e:  # noqa: BLE001 — pypdf raises a wide variety per page
+                _log_warning(f"pdf page {i + 1} extract failed", e)
                 text = ""
             if text:
                 pages.append({"page": i + 1, "text": text})
@@ -5353,8 +5369,8 @@ def toggle_do_not_disturb(enabled: bool) -> dict:
         )
         if proc2.returncode == 0:
             return {"status": "ok", "dnd_enabled": enabled}
-    except Exception:
-        pass
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as e:
+        _log_warning("Focus mode toggle fallback failed", e)
 
     return {
         "error": last_err or "Could not toggle Focus mode.",
@@ -5656,8 +5672,9 @@ def _update_prompt_json(name: str, description: str, prompt_doc: str) -> bool:
         with open(_PROMPT_FILE, "w") as fh:
             json.dump(pdata, fh, indent=2, ensure_ascii=False)
         return True
-    except Exception:
-        return False  # prompt.json update is best-effort; don't fail the whole call
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
+        _log_warning("prompt.json update failed", e)
+        return False  # best-effort: don't fail the whole tool-creation call
 
 
 def create_tool(
