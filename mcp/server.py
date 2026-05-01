@@ -99,6 +99,28 @@ DEFAULT_LOCAL_MODEL = "qwen3:30b"
 # Reused across calls — avoids per-call thread creation/teardown overhead.
 _METRICS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="syscontrol-metrics")
 
+
+# ── Unit conversion helpers ────────────────────────────────────────────────────
+# Decimal (SI) units match how storage and network throughput are conventionally
+# reported (1 GB = 10⁹ bytes), aligning with disk advertisements and ISP speeds.
+# Use raw `/1024/1024` only where the binary unit (MiB) is the right semantic —
+# typically RAM/VRAM hardware sizes that are physically powers of two.
+
+def _bytes_to_gb(b: float) -> float:
+    """Convert bytes to decimal gigabytes, rounded to 2 decimal places."""
+    return round(b / 1e9, 2)
+
+
+def _bytes_to_mb(b: float, ndigits: int = 2) -> float:
+    """Convert bytes to decimal megabytes, rounded to ``ndigits``."""
+    return round(b / 1e6, ndigits)
+
+
+# ── Common inputSchema shapes ─────────────────────────────────────────────────
+# Tools that take no arguments share this schema — defining it once avoids 30+
+# copies of the same dict literal in the TOOLS registry.
+_NO_ARGS_SCHEMA: dict = {"type": "object", "properties": {}, "required": []}
+
 # ── pynvml handle cache (handles are stable for the process lifetime) ─────────
 _NVML_HANDLES: list = []
 _NVML_HANDLES_READY = False  # sentinel — safe to read without lock
@@ -478,14 +500,14 @@ def get_ram_usage() -> dict:
     sw = psutil.swap_memory()
     return {
         "ram": {
-            "total_gb": round(vm.total / 1e9, 2),
-            "available_gb": round(vm.available / 1e9, 2),
-            "used_gb": round(vm.used / 1e9, 2),
+            "total_gb": _bytes_to_gb(vm.total),
+            "available_gb": _bytes_to_gb(vm.available),
+            "used_gb": _bytes_to_gb(vm.used),
             "percent_used": vm.percent,
         },
         "swap": {
-            "total_gb": round(sw.total / 1e9, 2),
-            "used_gb": round(sw.used / 1e9, 2),
+            "total_gb": _bytes_to_gb(sw.total),
+            "used_gb": _bytes_to_gb(sw.used),
             "percent_used": sw.percent,
         }
     }
@@ -539,9 +561,9 @@ def get_disk_usage() -> dict:
                 "device": part.device,
                 "mountpoint": part.mountpoint,
                 "fstype": part.fstype,
-                "total_gb": round(usage.total / 1e9, 2),
-                "used_gb": round(usage.used / 1e9, 2),
-                "free_gb": round(usage.free / 1e9, 2),
+                "total_gb": _bytes_to_gb(usage.total),
+                "used_gb": _bytes_to_gb(usage.used),
+                "free_gb": _bytes_to_gb(usage.free),
                 "percent_used": usage.percent,
             })
         except (PermissionError, OSError):
@@ -550,8 +572,8 @@ def get_disk_usage() -> dict:
     return {
         "partitions": partitions,
         "io_counters": {
-            "read_mb": round(disk_io.read_bytes / 1e6, 2) if disk_io else None,
-            "write_mb": round(disk_io.write_bytes / 1e6, 2) if disk_io else None,
+            "read_mb": _bytes_to_mb(disk_io.read_bytes) if disk_io else None,
+            "write_mb": _bytes_to_mb(disk_io.write_bytes) if disk_io else None,
         }
     }
 
@@ -567,8 +589,8 @@ def get_network_usage() -> dict:
     total_io: dict[str, float | int | None]
     if net_io is not None:
         total_io = {
-            "bytes_sent_mb": round(net_io.bytes_sent / 1e6, 2),
-            "bytes_recv_mb": round(net_io.bytes_recv / 1e6, 2),
+            "bytes_sent_mb": _bytes_to_mb(net_io.bytes_sent),
+            "bytes_recv_mb": _bytes_to_mb(net_io.bytes_recv),
             "packets_sent": net_io.packets_sent,
             "packets_recv": net_io.packets_recv,
         }
@@ -1108,8 +1130,8 @@ def get_process_details(pid: int) -> dict:
                 "created": datetime.datetime.fromtimestamp(p.create_time()).isoformat(),
                 "cpu_percent": p.cpu_percent(interval=0.2),
                 "memory": {
-                    "rss_mb": round(mem.rss / 1e6, 2),
-                    "vms_mb": round(mem.vms / 1e6, 2),
+                    "rss_mb": _bytes_to_mb(mem.rss),
+                    "vms_mb": _bytes_to_mb(mem.vms),
                     "percent": round(p.memory_percent(), 2),
                 },
                 "threads": p.num_threads(),
@@ -1205,7 +1227,7 @@ def get_device_specs() -> dict:
                 "device": part.device,
                 "mountpoint": part.mountpoint,
                 "fstype": part.fstype,
-                "total_gb": round(usage.total / 1e9, 2),
+                "total_gb": _bytes_to_gb(usage.total),
             })
         except PermissionError:
             continue
@@ -1241,7 +1263,7 @@ def get_device_specs() -> dict:
             "max_frequency_mhz": round(freq.max, 1) if freq else None,
         },
         "ram": {
-            "total_gb": round(vm.total / 1e9, 2),
+            "total_gb": _bytes_to_gb(vm.total),
         },
         "gpus": gpu_specs or [{"error": "pynvml not available or no NVIDIA GPUs detected"}],
         "disks": disks,
@@ -2077,7 +2099,7 @@ def find_large_files(path: str = "", n: int = 10) -> dict:
         "search_root": str(root),
         "files_scanned": scanned,
         "top_files": [
-            {"path": p, "size_mb": round(s / 1e6, 2), "size_bytes": s}
+            {"path": p, "size_mb": _bytes_to_mb(s), "size_bytes": s}
             for s, p in top
         ],
     }
@@ -5688,31 +5710,31 @@ TOOLS = {
     "get_cpu_usage": {
         "description": "Returns CPU usage percentage (total and per-core), core count, and frequency, with an inline bar chart.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: _cpu_with_chart(),
     },
     "get_ram_usage": {
         "description": "Returns RAM and swap memory usage (total, used, available, percent), with an inline stacked bar chart.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: _ram_with_chart(),
     },
     "get_gpu_usage": {
         "description": "Returns GPU load, VRAM usage, and temperature (requires nvidia-ml-py on NVIDIA hardware), with an inline grouped bar chart.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: _gpu_with_chart(),
     },
     "get_disk_usage": {
         "description": "Returns disk partition usage and I/O counters.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_disk_usage(),
     },
     "get_network_usage": {
         "description": "Returns total bytes sent/received and network interface status.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_network_usage(),
     },
     "get_realtime_io": {
@@ -5749,49 +5771,49 @@ TOOLS = {
     "get_full_snapshot": {
         "description": "Returns a full system snapshot: CPU, RAM, GPU, disk, network, and top processes.",
         "parallel": False,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_full_snapshot(),
     },
     "get_device_specs": {
         "description": "Returns static hardware specifications: CPU model, core count, total RAM, GPU model and VRAM, disk capacities, and OS details.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_device_specs(),
     },
     "get_battery_status": {
         "description": "Returns battery percentage, charging state, and estimated time remaining. Returns an error on desktops with no battery.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_battery_status(),
     },
     "get_temperature_sensors": {
         "description": "Returns CPU and motherboard temperature sensor readings. On macOS, returns a helpful message with alternatives (psutil cannot access kernel sensors on Darwin). On Linux/Windows, returns sensor groups with current, high, and critical thresholds.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_temperature_sensors(),
     },
     "get_system_uptime": {
         "description": "Returns how long the system has been running, the last boot time, and the 1/5/15-minute load averages.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_system_uptime(),
     },
     "get_system_alerts": {
         "description": "Scans all key system metrics (CPU, RAM, swap, disk partitions, GPU, battery) and returns a prioritized list of critical/warning alerts. Call this first for general 'why is my machine slow?' questions as a quick triage tool.",
         "parallel": False,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_system_alerts(),
     },
     "get_network_connections": {
         "description": "Returns all active TCP/UDP connections with local/remote addresses, status, and the owning process name.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_network_connections(),
     },
     "get_startup_items": {
         "description": "Lists applications and services configured to launch automatically at startup/login. macOS: scans ~/Library/LaunchAgents, /Library/LaunchAgents, /Library/LaunchDaemons. Windows: reads Run registry keys. Linux: scans ~/.config/autostart. Use when the user asks what runs at startup or wants to speed up boot times.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_startup_items(),
     },
     "get_process_details": {
@@ -5876,7 +5898,7 @@ TOOLS = {
     "list_reminders": {
         "description": "List all pending (unfired) reminders with their IDs, messages, and scheduled fire times.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: list_reminders(),
     },
     "cancel_reminder": {
@@ -5927,7 +5949,7 @@ TOOLS = {
             "and macOS system software updates. Returns lists of outdated apps with current vs available versions."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: check_app_updates(),
     },
     # ── Homebrew management ───────────────────────────────────────────────────
@@ -6060,7 +6082,7 @@ TOOLS = {
             "Use when the user asks if their internet is slow or to locate where latency is introduced."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: network_latency_check(),
     },
     "get_docker_status": {
@@ -6070,7 +6092,7 @@ TOOLS = {
             "Returns an actionable error if Docker is not installed or the daemon is not running."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_docker_status(),
     },
     "get_time_machine_status": {
@@ -6080,7 +6102,7 @@ TOOLS = {
             "Uses tmutil status, latestbackup, and destinationinfo (run in parallel)."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_time_machine_status(),
     },
     "tail_system_logs": {
@@ -6158,7 +6180,7 @@ TOOLS = {
             "Writes a permission flag; subsequent browser_* calls will then work."
         ),
         "parallel": False,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: grant_browser_access(),
     },
     "browser_open_url": {
@@ -6201,7 +6223,7 @@ TOOLS = {
             "summarise a page, or answer questions about its content."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: browser_get_page(),
     },
     # ── iMessage ──────────────────────────────────────────────────────────────
@@ -6336,7 +6358,7 @@ TOOLS = {
             "macOS only (uses pbpaste)."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_clipboard(),
     },
     "set_clipboard": {
@@ -6428,7 +6450,7 @@ TOOLS = {
             "macOS only."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_volume(),
     },
     "set_volume": {
@@ -6459,7 +6481,7 @@ TOOLS = {
             "Returns 'nothing_playing' if no media app is active. macOS only."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_now_playing(),
     },
     "media_control": {
@@ -6495,7 +6517,7 @@ TOOLS = {
             "Sorted strongest-first. macOS only (uses airport utility)."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_wifi_networks(),
     },
     # ── File I/O ──────────────────────────────────────────────────────────────
@@ -7234,7 +7256,7 @@ TOOLS = {
             "macOS only."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: get_frontmost_app(),
     },
     "toggle_do_not_disturb": {
@@ -7281,7 +7303,7 @@ TOOLS = {
     "list_user_tools": {
         "description": "Lists all custom tools installed via create_tool.",
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: list_user_tools(),
     },
     "create_tool": {
@@ -7336,7 +7358,7 @@ TOOLS = {
             "or when prior context seems relevant to their request."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: read_memory(),
     },
     "append_memory_note": {
@@ -7402,7 +7424,7 @@ TOOLS = {
             "Call this before run_agent if you are unsure which agent to delegate to."
         ),
         "parallel": True,
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": _NO_ARGS_SCHEMA,
         "fn": lambda _: _list_agents(),
     },
     "run_agent": {
