@@ -3146,7 +3146,14 @@ return output
 # ── Clipboard tools ───────────────────────────────────────────────────────────
 
 def get_clipboard() -> dict:
-    """Return the current contents of the system clipboard."""
+    """Return the current contents of the system clipboard.
+
+    Requires ``allow_clipboard: true`` in ~/.syscontrol/config.json — clipboards
+    routinely contain passwords, 2FA codes, and copied API keys.
+    """
+    denied = _permission_check("allow_clipboard", "get_clipboard")
+    if denied:
+        return denied
     if not IS_MACOS:
         return {"error": "get_clipboard is currently macOS only (uses pbpaste)."}
     try:
@@ -3157,12 +3164,18 @@ def get_clipboard() -> dict:
             "length": len(text),
             "has_content": bool(text.strip()),
         }
-    except Exception as e:
+    except (subprocess.TimeoutExpired, OSError) as e:
         return {"error": str(e)}
 
 
 def set_clipboard(text: str) -> dict:
-    """Write text to the system clipboard."""
+    """Write text to the system clipboard.
+
+    Requires ``allow_clipboard: true`` in ~/.syscontrol/config.json.
+    """
+    denied = _permission_check("allow_clipboard", "set_clipboard")
+    if denied:
+        return denied
     if not IS_MACOS:
         return {"error": "set_clipboard is currently macOS only (uses pbcopy)."}
     try:
@@ -3171,7 +3184,7 @@ def set_clipboard(text: str) -> dict:
             input=text, text=True, timeout=5, check=True,
         )
         return {"status": "ok", "length": len(text)}
-    except Exception as e:
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError) as e:
         return {"error": str(e)}
 
 
@@ -4777,7 +4790,8 @@ def _run_deep_research(
 #     "allow_email":           true,
 #     "allow_notes":           true,
 #     "allow_brew":            true,
-#     "allow_agents":          true
+#     "allow_agents":          true,
+#     "allow_clipboard":       true
 #   }
 
 _SYSCONTROL_CONFIG_FILE = _REMINDER_DIR / "config.json"

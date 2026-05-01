@@ -174,7 +174,7 @@ pytest                               # tests (testpaths = ["tests"])
 
 Sensitive tools disabled by default. Enabled via `~/.syscontrol/config.json`:
 
-`allow_shell`, `allow_messaging`, `allow_message_history`, `allow_screenshot`, `allow_file_read`, `allow_file_write`, `allow_calendar`, `allow_contacts`, `allow_accessibility`, `allow_tool_creation`, `allow_deep_research`, `allow_email`, `allow_notes`, `allow_brew`, `allow_agents`
+`allow_shell`, `allow_messaging`, `allow_message_history`, `allow_screenshot`, `allow_file_read`, `allow_file_write`, `allow_calendar`, `allow_contacts`, `allow_accessibility`, `allow_tool_creation`, `allow_deep_research`, `allow_email`, `allow_notes`, `allow_brew`, `allow_agents`, `allow_clipboard`
 
 ---
 

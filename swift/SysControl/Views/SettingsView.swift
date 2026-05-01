@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var validationError: String?
     @State private var isRefreshingModels = false
     @State private var allowDeepResearch: Bool = false
+    @State private var allowClipboard: Bool = false
     @State private var connectionTestResult: ConnectionTestResult?
     @State private var isTestingConnection = false
 
@@ -87,6 +88,18 @@ struct SettingsView: View {
                 }
                 .onChange(of: allowDeepResearch) { _, newValue in
                     permissionStore.set("allow_deep_research", newValue)
+                }
+
+                Toggle(isOn: $allowClipboard) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Clipboard Access")
+                        Text("Read and write the system clipboard. Off by default — clipboards often hold passwords or 2FA codes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: allowClipboard) { _, newValue in
+                    permissionStore.set("allow_clipboard", newValue)
                 }
             }
 
@@ -241,7 +254,9 @@ struct SettingsView: View {
             cloudBaseURL = config.baseURL
             cloudModel = config.model
         }
-        allowDeepResearch = permissionStore.load()["allow_deep_research"] ?? false
+        let permissions = permissionStore.load()
+        allowDeepResearch = permissions["allow_deep_research"] ?? false
+        allowClipboard = permissions["allow_clipboard"] ?? false
     }
 
     private func apply() {
