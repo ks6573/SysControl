@@ -14,10 +14,8 @@ struct ContentView: View {
                     content: appState.selectedSavedChatContent,
                     onClose: { appState.closeSavedChat() }
                 )
-            } else if appState.activeSession != nil {
-                ChatView()
             } else {
-                emptyState
+                ChatView()
             }
         }
         .navigationSplitViewStyle(.balanced)
@@ -35,18 +33,6 @@ struct ContentView: View {
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "message.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text("Select or create a chat")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
-    }
 }
 
 private struct SavedChatDetailView: View {

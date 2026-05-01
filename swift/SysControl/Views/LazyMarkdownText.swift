@@ -382,7 +382,7 @@ private struct StructuredMarkdownTextView: View {
                             CodeBlockView(language: language, code: code)
                         case .spacer:
                             Spacer()
-                                .frame(height: 4)
+                                .frame(height: 8)
                         }
                     }
                 }
@@ -433,10 +433,10 @@ private struct StructuredMarkdownTextView: View {
 
     private func headingFont(_ level: Int) -> Font {
         switch level {
-        case 1: return .system(size: 22, weight: .bold)
-        case 2: return .system(size: 19, weight: .semibold)
-        case 3: return .system(size: 17, weight: .semibold)
-        default: return .system(size: 16, weight: .semibold)
+        case 1: return .system(size: 19, weight: .semibold)
+        case 2: return .system(size: 17, weight: .semibold)
+        case 3: return .system(size: 15, weight: .semibold)
+        default: return .system(size: 14, weight: .semibold)
         }
     }
 }
@@ -491,7 +491,11 @@ private struct CodeBlockView: View {
         }
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color.primary.opacity(0.08))
+                .fill(Color.primary.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
         )
     }
 }

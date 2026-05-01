@@ -98,12 +98,27 @@ struct ChatView: View {
             }
 
             // Messages
-            if let session = appState.activeSession {
-                if session.messages.isEmpty {
-                    welcomeView
-                } else {
-                    messageList(session)
+            ZStack(alignment: .bottom) {
+                if let session = appState.activeSession {
+                    if session.messages.isEmpty {
+                        welcomeView
+                    } else {
+                        messageList(session)
+                    }
                 }
+
+                // Bottom scrim — fades content behind the input bar.
+                LinearGradient(
+                    colors: [
+                        Color(nsColor: .windowBackgroundColor).opacity(0),
+                        Color(nsColor: .windowBackgroundColor).opacity(0.85),
+                        Color(nsColor: .windowBackgroundColor),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 36)
+                .allowsHitTesting(false)
             }
 
             if case .ready = appState.backendStatus { } else {
@@ -112,9 +127,7 @@ struct ChatView: View {
                 }
             }
 
-            Divider()
-
-            // Input bar
+            // Input bar — no divider, blends into the scroll fade above.
             InputBar(
                 onSend: { text, filePath in
                     autoScrollEnabled = true
@@ -294,24 +307,32 @@ struct ChatView: View {
     // MARK: - Welcome
 
     private var welcomeView: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 14) {
             Spacer()
-            Image(nsImage: NSApplication.shared.applicationIconImage)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 84, height: 84)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
-            Text("SysControl")
-                .font(.title)
-                .fontWeight(.semibold)
-            Text("Your AI system monitor. Ask about CPU, memory,\ndisk, network, or any system question.")
-                .font(.body)
+            Text(greeting)
+                .font(.system(size: 28, weight: .medium, design: .serif))
+                .foregroundStyle(.primary.opacity(0.85))
+                .multilineTextAlignment(.center)
+            Text("Ask about CPU, memory, disk, network, processes, or anything on your system.")
+                .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var greeting: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        let timeOfDay: String
+        switch hour {
+        case 5..<12:  timeOfDay = "morning"
+        case 12..<17: timeOfDay = "afternoon"
+        case 17..<22: timeOfDay = "evening"
+        default:      timeOfDay = "night"
+        }
+        let name = NSFullUserName().split(separator: " ").first.map(String.init) ?? ""
+        return name.isEmpty ? "Good \(timeOfDay)" : "Good \(timeOfDay), \(name)"
     }
 
     private func scheduleScroll(
@@ -400,35 +421,38 @@ private struct ChatMessageListContent: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 2) {
-                ForEach(session.messages) { message in
-                    ChatMessageRow(
-                        message: message,
-                        isStreaming: session.isStreaming
-                            && message.role == .assistant
-                            && message.id == session.messages.last?.id,
-                        searchQuery: searchQuery,
-                        isSearchMatch: matchingIDs.contains(message.id),
-                        isFocusedSearchMatch: focusedMatchID == message.id
-                    )
-                    .id(message.id)
-                }
-
-                if !session.activeToolNames.isEmpty {
-                    ToolIndicatorRow(names: session.activeToolNames)
-                        .id("tool-indicator")
-                }
-
-                if session.isStreaming && showStreamingIndicator {
-                    HStack {
-                        ThinkingIndicator()
-                            .padding(.leading, 52)
-                        Spacer()
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ForEach(session.messages) { message in
+                        ChatMessageRow(
+                            message: message,
+                            isStreaming: session.isStreaming
+                                && message.role == .assistant
+                                && message.id == session.messages.last?.id,
+                            searchQuery: searchQuery,
+                            isSearchMatch: matchingIDs.contains(message.id),
+                            isFocusedSearchMatch: focusedMatchID == message.id
+                        )
+                        .id(message.id)
                     }
-                    .id("streaming-indicator")
+
+                    if !session.activeToolNames.isEmpty {
+                        ToolIndicatorRow(names: session.activeToolNames)
+                            .id("tool-indicator")
+                    }
+
+                    if session.isStreaming && showStreamingIndicator {
+                        ThinkingIndicator()
+                            .id("streaming-indicator")
+                    }
                 }
+                .frame(maxWidth: Theme.readingColumn, alignment: .leading)
+                Spacer(minLength: 0)
             }
-            .padding(.vertical, 16)
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
+            .padding(.bottom, 96)
         }
     }
 }
@@ -518,65 +542,41 @@ private struct ToolIndicatorRow: View {
     private var label: String {
         guard let first = names.first else { return "Running tool…" }
         if names.count == 1 {
-            return "●  \(first)…"
+            return "\(first)…"
         }
-        return "●  \(first) +\(names.count - 1) more…"
+        return "\(first) +\(names.count - 1) more…"
     }
 
     var body: some View {
-        HStack {
+        HStack(spacing: 6) {
+            Image(systemName: "gear")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.orange)
+                .symbolEffect(.pulse, options: .repeating, value: names)
             Text(label)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    Capsule().fill(Color.primary.opacity(0.07))
-                )
-            Spacer()
         }
-        .padding(.leading, 52)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule().fill(Color.primary.opacity(0.06))
+        )
         .padding(.vertical, 2)
     }
 }
 
 private struct ThinkingIndicator: View {
-    @State private var startedAt = Date()
-    private let baseText = "Thinking"
-    private let tickSeconds = 0.11
-    private let pulseFrequency = 3.1
-
     var body: some View {
-        TimelineView(.periodic(from: .now, by: tickSeconds)) { timeline in
-            let elapsed = timeline.date.timeIntervalSince(startedAt)
-            let tick = Int(elapsed / tickSeconds)
-            let cycle = baseText.count + 6
-            let step = tick % max(cycle, 1)
-
-            let letters = min(baseText.count, step + 1)
-            let dots = step < baseText.count ? 0 : min(3, (step - baseText.count) % 4)
-            let animatedText = String(baseText.prefix(letters)) + String(repeating: ".", count: dots)
-
-            let pulse = 0.65 + 0.35 * (sin(elapsed * pulseFrequency) * 0.5 + 0.5)
-
-            HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary.opacity(pulse))
-
-                ZStack(alignment: .leading) {
-                    Text("Thinking...")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(.clear)
-                    Text(animatedText)
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.vertical, 8)
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color.primary.opacity(0.6))
+                .frame(width: 7, height: 7)
+                .symbolEffect(.pulse, options: .repeating)
+            Text("Thinking")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
         }
-        .onAppear {
-            startedAt = Date()
-        }
+        .padding(.vertical, 6)
     }
 }

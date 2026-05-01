@@ -11,77 +11,95 @@ struct InputBar: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        VStack(spacing: 6) {
-            // Attached file chip
-            if let filePath = attachedFilePath {
-                attachmentChip(filePath)
-            }
-
-            HStack(alignment: .bottom, spacing: 10) {
-                // Text editor
-                ZStack(alignment: .topLeading) {
-                    // Placeholder
-                    if text.isEmpty {
-                        Text(attachedFilePath != nil ? "Ask about this file…" : "Message SysControl…")
-                            .foregroundStyle(.tertiary)
-                            .font(.system(size: 14))
-                            .padding(.leading, 5)
-                            .allowsHitTesting(false)
-                    }
-
-                    TextEditor(text: $text)
-                        .font(.system(size: 14))
-                        .scrollContentBackground(.hidden)
-                        .focused($isFocused)
-                        .frame(minHeight: 20, maxHeight: 120)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .onKeyPress(.return, phases: .down) { press in
-                            if press.modifiers.contains(.shift) {
-                                return .ignored  // Let shift+enter insert newline
-                            }
-                            submitIfReady()
-                            return .handled
-                        }
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            VStack(spacing: 8) {
+                // Attached file chip
+                if let filePath = attachedFilePath {
+                    attachmentChip(filePath)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+
+                HStack(alignment: .bottom, spacing: 8) {
+                    // Text editor
+                    ZStack(alignment: .topLeading) {
+                        if text.isEmpty {
+                            Text(attachedFilePath != nil ? "Ask about this file…" : "Message SysControl…")
+                                .foregroundStyle(.secondary.opacity(0.55))
+                                .font(.system(size: 14))
+                                .padding(.leading, 5)
+                                .allowsHitTesting(false)
+                        }
+
+                        TextEditor(text: $text)
+                            .font(.system(size: 14))
+                            .scrollContentBackground(.hidden)
+                            .focused($isFocused)
+                            .frame(minHeight: 22, maxHeight: 160)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .onKeyPress(.return, phases: .down) { press in
+                                if press.modifiers.contains(.shift) {
+                                    return .ignored
+                                }
+                                submitIfReady()
+                                return .handled
+                            }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+
+                    // Send or Stop button
+                    if isStreaming {
+                        Button {
+                            onCancel?()
+                        } label: {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 26, height: 26)
+                                .background(
+                                    Circle().fill(Color.red.opacity(0.85))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.bottom, 4)
+                        .padding(.trailing, 4)
+                        .help("Stop generating")
+                    } else {
+                        Button {
+                            submitIfReady()
+                        } label: {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(canSend ? .white : .secondary)
+                                .frame(width: 26, height: 26)
+                                .background(
+                                    Circle().fill(canSend ? Theme.accent : Color.primary.opacity(0.10))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.bottom, 4)
+                        .padding(.trailing, 4)
+                        .help("Send message")
+                        .disabled(!canSend)
+                        .keyboardShortcut(.return, modifiers: .command)
+                    }
+                }
                 .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color(nsColor: .controlBackgroundColor))
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.95))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.primary.opacity(isFocused ? 0.14 : 0.08), lineWidth: 1)
                 )
-
-                // Send or Stop button
-                if isStreaming {
-                    Button {
-                        onCancel?()
-                    } label: {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.red.opacity(0.8))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop generating")
-                } else {
-                    Button {
-                        submitIfReady()
-                    } label: {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 28))
-                            .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.3))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Send message")
-                    .disabled(!canSend)
-                    .keyboardShortcut(.return, modifiers: .command)
-                }
+                .animation(.easeInOut(duration: 0.15), value: isFocused)
             }
+            .frame(maxWidth: 740)
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 14)
+        .padding(.top, 4)
         .onAppear { isFocused = true }
     }
 
@@ -112,7 +130,7 @@ struct InputBar: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(
-            Capsule().fill(Color.accentColor.opacity(0.12))
+            Capsule().fill(Color.primary.opacity(0.06))
         )
         .frame(maxWidth: .infinity, alignment: .leading)
     }

@@ -1,7 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// A single message bubble — styled by role (user, assistant, tool).
+/// A single message — styled by role (user, assistant, tool).
+/// Assistant text is unboxed and flows directly on the window background;
+/// user messages get a soft tinted bubble.
 struct MessageBubble: View {
     let message: ChatMessage
     let isStreaming: Bool
@@ -10,10 +12,7 @@ struct MessageBubble: View {
     let isFocusedSearchMatch: Bool
 
     @State private var showCopied = false
-    @State private var isHoveringAssistantBubble = false
-
-    private let assistantMaxReadWidth: CGFloat = 760
-    private let userMaxReadWidth: CGFloat = 700
+    @State private var isHoveringAssistant = false
 
     init(
         message: ChatMessage,
@@ -34,7 +33,7 @@ struct MessageBubble: View {
         case .user:
             userBubble
         case .assistant:
-            assistantBubble
+            assistantBlock
         case .tool:
             toolIndicator
         case .system:
@@ -75,12 +74,8 @@ struct MessageBubble: View {
 
     private var bubbleHighlightStroke: Color {
         guard hasSearchQuery else { return .clear }
-        if isFocusedSearchMatch {
-            return Color.yellow.opacity(0.85)
-        }
-        if isSearchMatch {
-            return Color.yellow.opacity(0.45)
-        }
+        if isFocusedSearchMatch { return Color.yellow.opacity(0.85) }
+        if isSearchMatch { return Color.yellow.opacity(0.45) }
         return .clear
     }
 
@@ -93,12 +88,8 @@ struct MessageBubble: View {
 
     private var bubbleHighlightBackdrop: Color {
         guard hasSearchQuery else { return .clear }
-        if isFocusedSearchMatch {
-            return Color.yellow.opacity(0.14)
-        }
-        if isSearchMatch {
-            return Color.yellow.opacity(0.07)
-        }
+        if isFocusedSearchMatch { return Color.yellow.opacity(0.14) }
+        if isSearchMatch { return Color.yellow.opacity(0.07) }
         return .clear
     }
 
@@ -106,8 +97,8 @@ struct MessageBubble: View {
 
     private var userBubble: some View {
         HStack(alignment: .top) {
-            Spacer(minLength: 80)
-            VStack(alignment: .trailing, spacing: 4) {
+            Spacer(minLength: 60)
+            VStack(alignment: .trailing, spacing: 5) {
                 if let filePath = message.attachedFilePath {
                     HStack(spacing: 5) {
                         Image(systemName: "paperclip")
@@ -116,147 +107,119 @@ struct MessageBubble: View {
                             .font(.system(size: 11))
                             .lineLimit(1)
                     }
-                    .foregroundStyle(.white.opacity(0.7))
-                    .padding(.horizontal, 10)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
                     .padding(.vertical, 3)
                     .background(
-                        Capsule().fill(Color.white.opacity(0.15))
+                        Capsule().fill(Color.primary.opacity(0.06))
                     )
                 }
                 Text(highlightedUserContent)
                     .font(.system(size: 14))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.primary)
                     .lineSpacing(2)
                     .textSelection(.enabled)
             }
-            .frame(maxWidth: userMaxReadWidth, alignment: .trailing)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.accentColor)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Theme.userBubble)
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .stroke(bubbleHighlightStroke, lineWidth: bubbleHighlightLineWidth)
             }
         }
-        .padding(.horizontal, 20)
         .padding(.vertical, 4)
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(bubbleHighlightBackdrop)
         )
     }
 
-    // MARK: - Assistant Bubble
+    // MARK: - Assistant Block (no bubble, no avatar)
 
-    private var assistantBubble: some View {
-        HStack(alignment: .top, spacing: 10) {
-            // Avatar
-            ZStack {
-                Circle()
-                    .fill(LinearGradient(
-                        colors: [.blue.opacity(0.6), .purple.opacity(0.6)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
-                    .frame(width: 28, height: 28)
-                Text("S")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .padding(.top, 2)
-
-            VStack(alignment: .leading, spacing: 8) {
-                if message.isError {
-                    Text(message.content)
-                        .font(.system(size: 14))
-                        .foregroundStyle(.red.opacity(0.9))
-                        .lineSpacing(2)
-                        .textSelection(.enabled)
-                } else {
-                    // Keep rendering mode stable during streaming to minimize layout jumps.
-                    LazyMarkdownText(
-                        content: message.content,
-                        style: .block,
-                        font: .system(size: 14),
-                        foreground: .primary.opacity(0.92),
-                        debounceMilliseconds: isStreaming ? 140 : 20,
-                        largeTextThreshold: isStreaming ? 5000 : 12000,
-                        highlightQuery: isSearchMatch ? searchQuery : "",
-                        isFocusedMatch: isFocusedSearchMatch
-                    )
-                }
-
-                // Chart images
-                if let paths = message.chartImagePaths {
-                    ForEach(paths, id: \.self) { path in
-                        ChartImageView(path: path)
-                    }
-                }
-
-                if !message.isError {
-                    HStack(spacing: 10) {
-                        Button {
-                            copyResponse()
-                        } label: {
-                            Label(showCopied ? "Copied" : "Copy", systemImage: showCopied ? "checkmark.circle.fill" : "doc.on.doc")
-                                .font(.caption)
-                                .fontWeight(.medium)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(showCopied ? Color.green : Color.secondary)
-                        .disabled(!hasResponseContent)
-                        .help("Copy response")
-
-                        if hasSearchQuery && isSearchMatch {
-                            Text(isFocusedSearchMatch ? "Current match" : "Match")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
-                                .background(
-                                    Capsule(style: .continuous)
-                                        .fill(Color.yellow.opacity(isFocusedSearchMatch ? 0.3 : 0.17))
-                                )
-                        }
-
-                        Spacer(minLength: 0)
-
-                        if isStreaming {
-                            Text("Streaming…")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .opacity(isHoveringAssistantBubble || showCopied ? 1 : 0.88)
-                    .animation(.easeInOut(duration: 0.15), value: showCopied)
-                }
-            }
-            .frame(maxWidth: assistantMaxReadWidth, alignment: .leading)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(message.isError ? Color.red.opacity(0.06) : Color.primary.opacity(0.04))
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(bubbleHighlightStroke, lineWidth: bubbleHighlightLineWidth)
+    private var assistantBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if message.isError {
+                Text(message.content)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.red.opacity(0.9))
+                    .lineSpacing(2)
+                    .textSelection(.enabled)
+            } else {
+                LazyMarkdownText(
+                    content: message.content,
+                    style: .block,
+                    font: .system(size: 14),
+                    foreground: .primary,
+                    debounceMilliseconds: isStreaming ? 140 : 20,
+                    largeTextThreshold: isStreaming ? 5000 : 12000,
+                    highlightQuery: isSearchMatch ? searchQuery : "",
+                    isFocusedMatch: isFocusedSearchMatch
+                )
             }
 
-            Spacer(minLength: 40)
+            if let paths = message.chartImagePaths {
+                ForEach(paths, id: \.self) { path in
+                    ChartImageView(path: path)
+                }
+            }
+
+            if !message.isError {
+                actionRow
+            }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 4)
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(bubbleHighlightStroke, lineWidth: bubbleHighlightLineWidth)
+        }
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(bubbleHighlightBackdrop)
         )
         .onHover { hovering in
-            isHoveringAssistantBubble = hovering
+            isHoveringAssistant = hovering
         }
+    }
+
+    private var actionRow: some View {
+        HStack(spacing: 12) {
+            Button {
+                copyResponse()
+            } label: {
+                Label(showCopied ? "Copied" : "Copy", systemImage: showCopied ? "checkmark" : "doc.on.doc")
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 12))
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(showCopied ? Color.green : Color.secondary)
+            .disabled(!hasResponseContent)
+            .help(showCopied ? "Copied" : "Copy response")
+
+            if hasSearchQuery && isSearchMatch {
+                Text(isFocusedSearchMatch ? "Current match" : "Match")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.yellow.opacity(isFocusedSearchMatch ? 0.3 : 0.17))
+                    )
+            }
+
+            Spacer(minLength: 0)
+        }
+        .opacity(isHoveringAssistant || showCopied ? 1 : 0)
+        .animation(.easeInOut(duration: 0.12), value: isHoveringAssistant)
+        .animation(.easeInOut(duration: 0.12), value: showCopied)
     }
 
     private func copyResponse() {
@@ -272,27 +235,21 @@ struct MessageBubble: View {
     // MARK: - Tool Indicator
 
     private var toolIndicator: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Spacer()
-                .frame(width: 38)  // align with assistant text
-            HStack(spacing: 5) {
-                Image(systemName: message.content.hasPrefix("✓")
-                      ? "checkmark.circle.fill" : "gear")
-                    .font(.system(size: 10))
-                    .foregroundStyle(message.content.hasPrefix("✓") ? .green : .orange)
-                Text(message.content)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(
-                Capsule()
-                    .fill(Color.primary.opacity(0.06))
-            )
+        HStack(spacing: 6) {
+            Image(systemName: message.content.hasPrefix("✓")
+                  ? "checkmark.circle.fill" : "gear")
+                .font(.system(size: 10))
+                .foregroundStyle(message.content.hasPrefix("✓") ? .green : .orange)
+            Text(message.content)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
             Spacer()
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(
+            Capsule().fill(Theme.toolFill)
+        )
         .padding(.vertical, 1)
     }
 }
@@ -308,10 +265,14 @@ private struct ChartImageView: View {
                 Image(nsImage: nsImage)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: 500)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .frame(maxWidth: 540)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    }
             } else {
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 10)
                     .fill(Color.primary.opacity(0.05))
                     .frame(width: 200, height: 120)
                     .overlay(ProgressView().scaleEffect(0.7))

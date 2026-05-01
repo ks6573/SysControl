@@ -8,9 +8,11 @@ struct SysControlApp: App {
         WindowGroup {
             ContentView()
                 .environment(appState)
-                .frame(minWidth: 900, minHeight: 640)
+                .frame(minWidth: 880, minHeight: 620)
+                .tint(Theme.accent)
         }
-        .windowStyle(.titleBar)
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: 1100, height: 750)
         .commands {
             CommandGroup(after: .appInfo) {

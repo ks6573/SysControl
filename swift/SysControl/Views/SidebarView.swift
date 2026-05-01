@@ -51,14 +51,12 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
-            connectionStatus
-            updateBanner
-            Divider()
             sidebarList
+            Divider().opacity(0.4)
+            footer
         }
-        .frame(minWidth: 280)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(VisualEffectBackground(material: .sidebar))
+        .navigationSplitViewColumnWidth(min: 240, ideal: 260, max: 360)
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [markdownType],
@@ -109,23 +107,36 @@ struct SidebarView: View {
     private var header: some View {
         HStack {
             Text("SysControl")
-                .font(.headline)
-                .fontWeight(.semibold)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary)
             Spacer()
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
+                withAnimation(Theme.motion) {
                     appState.createNewSession()
                 }
             } label: {
                 Image(systemName: "square.and.pencil")
-                    .font(.system(size: 16, weight: .medium))
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("New Chat")
+            .help("New Chat (⌘N)")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 14)
+        .padding(.top, 16)
+        .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private var footer: some View {
+        VStack(spacing: 4) {
+            updateBanner
+            connectionStatus
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     @ViewBuilder
@@ -136,38 +147,35 @@ struct SidebarView: View {
                     .fill(.green)
                     .frame(width: 6, height: 6)
                 Text("\(appState.toolCount) tools · \(appState.modelName)")
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 4)
         } else if let error = appState.connectionError {
             HStack(spacing: 6) {
                 Circle()
                     .fill(.red)
                     .frame(width: 6, height: 6)
                 Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red.opacity(0.8))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red.opacity(0.85))
                     .lineLimit(1)
                 Spacer()
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 4)
         } else {
             HStack(spacing: 6) {
                 ProgressView()
                     .scaleEffect(0.5)
                     .frame(width: 10, height: 10)
                 Text("Connecting…")
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 4)
         }
     }
 
@@ -179,18 +187,22 @@ struct SidebarView: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle.fill")
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(Theme.accent)
                         .font(.system(size: 12))
                     Text("v\(version) available")
-                        .font(.caption)
-                        .foregroundStyle(.blue)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.accent)
                     Spacer()
                     Text(appState.updateService.isSourceInstall ? "Update" : "Download")
-                        .font(.caption)
-                        .foregroundStyle(.blue.opacity(0.8))
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.accent.opacity(0.8))
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 8)
                 .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Theme.accent.opacity(0.1))
+                )
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -199,18 +211,6 @@ struct SidebarView: View {
 
     private var sidebarList: some View {
         List {
-            Section {
-                NewChatListRow {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        appState.createNewSession()
-                    }
-                }
-                .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 8))
-                .listRowBackground(Color.clear)
-            } header: {
-                sectionHeader("Chats")
-            }
-
             if !pinnedSessions.isEmpty {
                 Section {
                     ForEach(pinnedSessions) { session in
@@ -288,9 +288,10 @@ struct SidebarView: View {
 
     private func sectionHeader(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 11, weight: .semibold))
+            .font(.system(size: 10, weight: .semibold))
+            .tracking(0.6)
             .foregroundStyle(.secondary)
-            .textCase(nil)
+            .textCase(.uppercase)
     }
 
     private func importDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
@@ -367,51 +368,15 @@ private enum SessionBucket: Int, CaseIterable, Hashable {
     }
 }
 
-private struct NewChatListRow: View {
-    let onCreate: () -> Void
-
-    @State private var isHovering = false
-
-    private var backgroundFill: Color {
-        isHovering ? Color.primary.opacity(0.07) : .clear
-    }
-
-    var body: some View {
-        Button(action: onCreate) {
-            HStack(spacing: 8) {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text("New chat")
-                    .font(.system(size: 14, weight: .semibold))
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(backgroundFill)
-            )
-            .animation(.easeInOut(duration: 0.14), value: isHovering)
-        }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            isHovering = hovering
-        }
-        .accessibilityLabel("New chat")
-    }
-}
-
 private struct SessionGroupLabelRow: View {
     let title: String
 
     var body: some View {
         HStack {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
                 .textCase(.uppercase)
             Spacer()
         }
@@ -434,47 +399,27 @@ private struct SessionListRow: View {
         return normalized.isEmpty ? "New Chat" : normalized
     }
 
-    private var metadata: String {
-        if session.messages.isEmpty {
-            return session.createdAt.sidebarLabel
-        }
-        return "\(session.createdAt.sidebarLabel) · \(session.messages.count) messages"
-    }
-
     private var backgroundFill: Color {
-        if isSelected {
-            return Color.accentColor.opacity(0.18)
-        }
-        if isHovering {
-            return Color.primary.opacity(0.07)
-        }
+        if isSelected { return Color.primary.opacity(0.10) }
+        if isHovering { return Color.primary.opacity(0.06) }
         return .clear
     }
 
     var body: some View {
         HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: isHovering || isSelected ? 3 : 0) {
-                Text(displayTitle)
-                    .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                if isHovering || isSelected {
-                    Text(metadata)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(displayTitle)
+                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(.primary.opacity(isSelected ? 1 : 0.85))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             Button {
                 onTogglePin()
             } label: {
                 Image(systemName: session.isPinned ? "pin.slash" : "pin")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 26, height: 26)
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -487,8 +432,8 @@ private struct SessionListRow: View {
                 onDelete()
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 26, height: 26)
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -500,11 +445,11 @@ private struct SessionListRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(backgroundFill)
         )
-        .animation(.easeInOut(duration: 0.14), value: isHovering)
-        .animation(.easeInOut(duration: 0.14), value: isSelected)
+        .animation(.easeInOut(duration: 0.12), value: isHovering)
+        .animation(.easeInOut(duration: 0.12), value: isSelected)
         .contentShape(Rectangle())
         .onTapGesture {
             onOpen()
@@ -543,40 +488,26 @@ private struct SavedChatListRow: View {
     }
 
     private var backgroundFill: Color {
-        if isSelected {
-            return Color.accentColor.opacity(0.18)
-        }
-        if isHovering {
-            return Color.primary.opacity(0.07)
-        }
+        if isSelected { return Color.primary.opacity(0.10) }
+        if isHovering { return Color.primary.opacity(0.06) }
         return .clear
     }
 
     var body: some View {
         HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: isHovering || isSelected ? 3 : 0) {
-                Text(displayTitle)
-                    .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                if isHovering || isSelected {
-                    Text(chat.dateLabel)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .accessibilityHidden(true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(displayTitle)
+                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(.primary.opacity(isSelected ? 1 : 0.85))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             Button(role: .destructive) {
                 onDelete()
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 28, height: 28)
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -588,11 +519,11 @@ private struct SavedChatListRow: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(backgroundFill)
         )
-        .animation(.easeInOut(duration: 0.14), value: isHovering)
-        .animation(.easeInOut(duration: 0.14), value: isSelected)
+        .animation(.easeInOut(duration: 0.12), value: isHovering)
+        .animation(.easeInOut(duration: 0.12), value: isSelected)
         .contentShape(Rectangle())
         .onTapGesture {
             onOpen()

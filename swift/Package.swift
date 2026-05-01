@@ -16,6 +16,7 @@ let package = Package(
             sources: [
                 "App/SysControlApp.swift",
                 "App/AppState.swift",
+                "App/DesignSystem.swift",
                 "Models/ChatMessage.swift",
                 "Models/ChatSession.swift",
                 "Models/ProviderConfiguration.swift",
