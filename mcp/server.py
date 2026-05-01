@@ -5769,10 +5769,8 @@ TOOLS = {
             "properties": {
                 "interval": {
                     "type": "integer",
-                    "description": "Sampling interval in seconds (1–3). Default 1.",
-                    "default": 1,
-                    "minimum": 1,
-                    "maximum": 3
+                    "description": "Sampling interval in seconds (1–3, default 1). Longer intervals give more accurate throughput averages.",
+                    "default": 1, "minimum": 1, "maximum": 3,
                 }
             },
             "required": []
@@ -5785,8 +5783,17 @@ TOOLS = {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "n": {"type": "integer", "description": "Number of processes to return (default 10)", "default": 10},
-                "sort_by": {"type": "string", "enum": ["cpu", "memory"], "description": "Sort by 'cpu' or 'memory'", "default": "cpu"}
+                "n": {
+                    "type": "integer",
+                    "description": "Number of processes to return (1–100, default 10).",
+                    "default": 10, "minimum": 1, "maximum": 100,
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["cpu", "memory"],
+                    "description": "Sort processes by CPU usage or memory footprint.",
+                    "default": "cpu",
+                },
             },
             "required": []
         },
@@ -5846,7 +5853,7 @@ TOOLS = {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "pid": {"type": "integer", "description": "The process ID to inspect"}
+                "pid": {"type": "integer", "description": "The process ID to inspect (positive integer; get from get_top_processes or search_process).", "minimum": 1}
             },
             "required": ["pid"]
         },
@@ -5870,7 +5877,7 @@ TOOLS = {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "pid": {"type": "integer", "description": "The PID of the process to terminate"},
+                "pid": {"type": "integer", "description": "The PID of the process to terminate (positive integer).", "minimum": 1},
                 "force": {"type": "boolean", "description": "If true, send SIGKILL (immediate). Default false (SIGTERM, graceful).", "default": False}
             },
             "required": ["pid"]
@@ -6090,8 +6097,8 @@ TOOLS = {
                 },
                 "n": {
                     "type": "integer",
-                    "description": "Number of largest files to return (default 10, max 50).",
-                    "default": 10,
+                    "description": "Number of largest files to return (1–50, default 10).",
+                    "default": 10, "minimum": 1, "maximum": 50,
                 },
             },
             "required": [],
@@ -6143,8 +6150,8 @@ TOOLS = {
             "properties": {
                 "lines": {
                     "type": "integer",
-                    "description": "Number of log lines to return (default 50, max 500).",
-                    "default": 50,
+                    "description": "Number of log lines to return (1–500, default 50).",
+                    "default": 50, "minimum": 1, "maximum": 500,
                 },
                 "filter_str": {
                     "type": "string",
@@ -6189,8 +6196,9 @@ TOOLS = {
             "properties": {
                 "query": {"type": "string", "description": "Search query string."},
                 "num_results": {
-                    "type": "integer", "default": 5,
-                    "description": "Number of results to return (1–10).",
+                    "type": "integer",
+                    "description": "Number of results to return (1–10, default 5).",
+                    "default": 5, "minimum": 1, "maximum": 10,
                 },
             },
             "required": ["query"],
@@ -6292,8 +6300,8 @@ TOOLS = {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max number of messages to return (default 20, max 200).",
-                    "default": 20,
+                    "description": "Max number of messages to return (1–200, default 20).",
+                    "default": 20, "minimum": 1, "maximum": 200,
                 },
             },
             "required": ["contact"],
@@ -6319,7 +6327,7 @@ TOOLS = {
                 "count": {
                     "type": "integer",
                     "description": "Maximum messages to return (1–50, default 10).",
-                    "default": 10,
+                    "default": 10, "minimum": 1, "maximum": 50,
                 },
             },
             "required": [],
@@ -6368,7 +6376,7 @@ TOOLS = {
                 "count": {
                     "type": "integer",
                     "description": "Maximum results (1–50, default 20).",
-                    "default": 20,
+                    "default": 20, "minimum": 1, "maximum": 50,
                 },
             },
             "required": ["query"],
@@ -6561,8 +6569,8 @@ TOOLS = {
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Maximum characters to return (default 16000, max 32000).",
-                    "default": 16000,
+                    "description": "Maximum characters to return (1000–32000, default 16000). Truncates with an indicator if exceeded.",
+                    "default": 16000, "minimum": 1000, "maximum": 32000,
                 },
             },
             "required": ["path"],
@@ -6620,8 +6628,8 @@ TOOLS = {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of lines to return (default 200, max 2000).",
-                    "default": 200,
+                    "description": "Maximum number of lines to return (1–2000, default 200).",
+                    "default": 200, "minimum": 1, "maximum": 2000,
                 },
             },
             "required": ["path"],
@@ -6719,13 +6727,13 @@ TOOLS = {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum matching lines to return (default 50, max 500).",
-                    "default": 50,
+                    "description": "Maximum matching lines to return (1–500, default 50).",
+                    "default": 50, "minimum": 1, "maximum": 500,
                 },
                 "context_lines": {
                     "type": "integer",
-                    "description": "Lines of context before and after each match (default 0, max 10).",
-                    "default": 0,
+                    "description": "Lines of context before and after each match (0–10, default 0).",
+                    "default": 0, "minimum": 0, "maximum": 10,
                 },
             },
             "required": ["pattern"],
@@ -6804,7 +6812,7 @@ TOOLS = {
                 "max_rows": {
                     "type": "integer",
                     "description": "Maximum rows to return (1–200, default 200).",
-                    "default": 200,
+                    "default": 200, "minimum": 1, "maximum": 200,
                 },
             },
             "required": ["path"],
@@ -7101,7 +7109,7 @@ TOOLS = {
                 "limit": {
                     "type": "integer",
                     "description": "Maximum results to return (1–200, default 50).",
-                    "default": 50,
+                    "default": 50, "minimum": 1, "maximum": 200,
                 },
             },
             "required": ["query"],
