@@ -121,6 +121,20 @@ def _bytes_to_mb(b: float, ndigits: int = 2) -> float:
 # copies of the same dict literal in the TOOLS registry.
 _NO_ARGS_SCHEMA: dict = {"type": "object", "properties": {}, "required": []}
 
+
+# ── Tool return-shape convention ───────────────────────────────────────────────
+# The MCP layer wraps any dict in a JSON content block, so tools have full
+# freedom over the shape — but the LLM consuming results parses better with
+# a consistent contract:
+#
+#   read tools   → return the data dict directly         (e.g. {"total_gb": …})
+#   mutating ok  → {"status": "ok",  …other fields…}     (e.g. set_clipboard)
+#   any failure  → {"error": "human-readable reason"}    (no extra keys needed)
+#
+# Avoid mixing `success`+`error` keys — it forces the LLM to check both and
+# adds nothing over a bare `{"error": …}`. Prefer `status: "ok"` for mutating
+# successes since it leaves room for richer states ("partial", "skipped") later.
+
 # ── pynvml handle cache (handles are stable for the process lifetime) ─────────
 _NVML_HANDLES: list = []
 _NVML_HANDLES_READY = False  # sentinel — safe to read without lock
@@ -1171,24 +1185,21 @@ def search_process(name: str) -> dict:
 
 def kill_process(pid: int, force: bool = False) -> dict:
     if not isinstance(pid, int):
-        return {"success": False, "error": f"PID must be an integer, got {type(pid).__name__}"}
+        return {"error": f"PID must be an integer, got {type(pid).__name__}"}
     if pid <= 0:
-        return {"success": False, "error": f"Invalid PID {pid}: must be a positive integer"}
+        return {"error": f"Invalid PID {pid}: must be a positive integer"}
     if pid in _PROTECTED_PIDS:
-        return {"success": False, "error": f"Refusing to kill PID {pid}: protected system process"}
+        return {"error": f"Refusing to kill PID {pid}: protected system process"}
     try:
         p = psutil.Process(pid)
         proc_name = p.name()
     except psutil.NoSuchProcess:
-        return {"success": False, "error": f"No process with PID {pid}"}
+        return {"error": f"No process with PID {pid}"}
     except psutil.AccessDenied:
-        return {"success": False, "error": f"Access denied reading PID {pid}"}
+        return {"error": f"Access denied reading PID {pid}"}
 
     if proc_name.lower() in _PROTECTED_NAMES:
-        return {
-            "success": False,
-            "error": f"Refusing to kill '{proc_name}' (PID {pid}): critical system process",
-        }
+        return {"error": f"Refusing to kill '{proc_name}' (PID {pid}): critical system process"}
 
     try:
         if force:
@@ -1198,19 +1209,16 @@ def kill_process(pid: int, force: bool = False) -> dict:
             p.terminate()
             method = "SIGTERM"
         return {
-            "success": True,
+            "status": "ok",
             "pid": pid,
             "name": proc_name,
             "signal": method,
             "message": f"Sent {method} to '{proc_name}' (PID {pid})",
         }
     except psutil.NoSuchProcess:
-        return {"success": False, "error": f"Process {pid} exited before signal could be sent"}
+        return {"error": f"Process {pid} exited before signal could be sent"}
     except psutil.AccessDenied:
-        return {
-            "success": False,
-            "error": f"Access denied killing '{proc_name}' (PID {pid}). May require elevated privileges.",
-        }
+        return {"error": f"Access denied killing '{proc_name}' (PID {pid}). May require elevated privileges."}
 
 
 @lru_cache(maxsize=1)
@@ -1374,7 +1382,6 @@ def set_reminder(message: str, time_str: str) -> dict:
     fire_at = _parse_reminder_time(time_str)
     if fire_at is None:
         return {
-            "success": False,
             "error": (
                 f"Could not parse time '{time_str}'. "
                 "Try: 'in 2 hours', 'in 30 minutes', 'at 9:00 am', 'at 3pm', 'tomorrow at 8am'."
@@ -1393,7 +1400,7 @@ def set_reminder(message: str, time_str: str) -> dict:
         reminders.append(entry)
         _save_reminders(reminders)
     return {
-        "success": True,
+        "status": "ok",
         "id": reminder_id,
         "message": message,
         "fires_at": fire_at.strftime("%Y-%m-%d %I:%M %p"),
@@ -1428,9 +1435,9 @@ def cancel_reminder(reminder_id: str) -> dict:
         original_len = len(reminders)
         reminders = [r for r in reminders if not (r["id"] == reminder_id and not r["fired"])]
         if len(reminders) == original_len:
-            return {"success": False, "error": f"No active reminder with id '{reminder_id}'"}
+            return {"error": f"No active reminder with id '{reminder_id}'"}
         _save_reminders(reminders)
-    return {"success": True, "cancelled_id": reminder_id}
+    return {"status": "ok", "cancelled_id": reminder_id}
 
 
 # ── Weather tool ──────────────────────────────────────────────────────────────
@@ -2541,12 +2548,12 @@ def grant_browser_access() -> dict:
         _BROWSER_PERMISSION_FILE.write_text("granted")
         browser = _running_browser()
         return {
-            "success": True,
+            "status": "ok",
             "message": "Browser access granted.",
             "detected_browser": browser or "none running — open a browser and try again",
         }
     except Exception as exc:
-        return {"success": False, "error": str(exc)}
+        return {"error": str(exc)}
 
 
 _RE_SCRIPT_STYLE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
@@ -2683,15 +2690,15 @@ def browser_open_url(url: str) -> dict:
     if IS_MACOS:
         try:
             subprocess.run(["open", url], check=True, timeout=10)
-            return {"success": True, "url": url, "action": "opened in default browser"}
+            return {"status": "ok", "url": url, "action": "opened in default browser"}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"error": str(e)}
     # Linux / Windows fallback
     try:
         webbrowser.open(url)
-        return {"success": True, "url": url, "action": "opened in default browser"}
+        return {"status": "ok", "url": url, "action": "opened in default browser"}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"error": str(e)}
 
 
 # Compiled once at module load — used by browser_navigate to validate URLs
@@ -2716,9 +2723,9 @@ def browser_navigate(url: str) -> dict:
     # Reject URLs with characters that could break out of the AppleScript string
     # literal. _SAFE_URL_RE is a module-level constant compiled once at import.
     if not _SAFE_URL_RE.match(url):
-        return {"success": False, "error": "URL contains non-printable or non-ASCII characters."}
+        return {"error": "URL contains non-printable or non-ASCII characters."}
     if any(c in url for c in ('"', "'", '`', '\\', '\r', '\n')):
-        return {"success": False, "error": "URL contains characters that are not safe for AppleScript."}
+        return {"error": "URL contains characters that are not safe for AppleScript."}
 
     browser = _running_browser()
     if not browser:
@@ -2734,11 +2741,11 @@ def browser_navigate(url: str) -> dict:
         if rc != 0 and stderr:
             # Fallback: just open it
             return browser_open_url(url)
-        return {"success": True, "url": url, "browser": browser, "action": "navigated"}
+        return {"status": "ok", "url": url, "browser": browser, "action": "navigated"}
     except subprocess.TimeoutExpired:
-        return {"success": False, "error": "AppleScript timed out — browser may be busy"}
+        return {"error": "AppleScript timed out — browser may be busy"}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"error": str(e)}
 
 
 def browser_get_page() -> dict:
