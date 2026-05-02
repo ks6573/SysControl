@@ -9,7 +9,7 @@ Three ways to run it — pick whichever fits your workflow:
 | | How | Best for |
 |---|---|---|
 | **App** | [Download the `.app`](#app-recommended) | One-click native macOS experience — no setup required |
-| **CLI** | `uv run agent.py` | Terminal-first workflow, scripting, SSH sessions |
+| **CLI** | `syscontrol` ([one-line install](#cli)) | Terminal-first workflow, scripting, SSH sessions |
 | **Claude Desktop** | MCP server | Using SysControl tools inside Claude Desktop |
 
 All interfaces share the same agent, tools, and providers — they're interchangeable.
@@ -76,48 +76,54 @@ To change providers later, open **Settings** (⌘,).
 
 ---
 
-## Requirements (CLI only)
+## CLI
 
-- Python **3.11** or later
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
-- [Ollama](https://ollama.com) (local mode) **or** an Ollama Cloud API key (cloud mode)
+A terminal agent that runs the same backend as the app. Two install paths:
 
----
+**Option A — One-line install (recommended):**
 
-## Installation (CLI only)
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SysControl/master/install-cli.sh)"
+```
+
+Installs `uv` if missing, then runs `uv tool install` against the GitHub repo, exposing `syscontrol` and `syscontrol-server` on your `PATH` in an isolated venv. No clone required.
+
+To update later: `syscontrol-cli-update`
+
+To uninstall: re-run with `-- --uninstall`.
+
+**Option B — From a clone (for development):**
 
 ```bash
 git clone https://github.com/ks6573/SysControl.git
 cd SysControl
-
-# Install uv if needed
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
+curl -LsSf https://astral.sh/uv/install.sh | sh   # if uv not installed
 uv sync
-```
-
----
-
-## Terminal Agent
-
-```bash
 uv run agent.py
 ```
+
+### Requirements
+
+- macOS or Linux
+- Python **3.11+** (uv will fetch one if your system Python is older)
+- [Ollama](https://ollama.com) for local mode, **or** an Ollama Cloud API key for cloud mode
 
 ### CLI Flags
 
 ```bash
-uv run agent.py                                          # interactive
-uv run agent.py --provider local --model qwen3:30b      # local, skip prompt
-uv run agent.py --provider cloud --api-key sk-...       # cloud, skip prompt
+syscontrol                                          # interactive
+syscontrol --provider local --model qwen3:30b      # local, skip prompt
+syscontrol --provider cloud --api-key sk-...       # cloud, skip prompt
 ```
+
+> Cloned (Option B) users can substitute `uv run agent.py` for `syscontrol` in any of the commands below.
 
 ### Local Mode (Ollama)
 
 ```bash
 ollama pull qwen3:30b   # recommended
 ollama serve
-uv run agent.py --provider local
+syscontrol --provider local
 ```
 
 **Tool-calling capable models:**
@@ -134,7 +140,7 @@ uv run agent.py --provider local
 ### Cloud Mode (Ollama Cloud)
 
 ```bash
-uv run agent.py --provider cloud
+syscontrol --provider cloud
 # Enter your key when prompted — not echoed or stored in shell history
 ```
 
@@ -431,6 +437,7 @@ Detected automatically from hardware and platform:
 ```
 SysControl/
 ├── agent.py                 # CLI entry-point shim
+├── install-cli.sh           # One-line CLI installer (curl one-liner)
 ├── gui.py                   # PySide6 GUI entry-point shim
 ├── remote.py                # Remote bridge entry-point shim
 ├── agent/
@@ -483,19 +490,22 @@ The Swift frontend communicates with the Python backend through `agent/bridge.py
 
 ## Entry Points
 
+After installing via the [one-liner](#cli) (or `pip install -e .` from a clone):
+
+| Script | Description |
+|---|---|
+| `syscontrol` | Interactive CLI agent |
+| `syscontrol-server` | MCP server (stdio) |
+| `syscontrol-cli-update` | Reinstall the CLI from the latest master |
+| `syscontrol-gui` | PySide6 desktop GUI |
+
+From a clone without installing, use `uv run`:
+
 | Command | Description |
 |---|---|
 | `uv run agent.py` | Interactive CLI agent |
 | `uv run remote.py` | Remote bridge (Telegram, WhatsApp, Messenger) |
 | `uv run gui.py` | PySide6 desktop GUI (requires `uv pip install -e '.[gui]'`) |
-
-After `pip install -e .`, these registered scripts also work:
-
-| Script | Description |
-|---|---|
-| `syscontrol` | CLI agent |
-| `syscontrol-server` | MCP server (stdio) |
-| `syscontrol-gui` | PySide6 GUI |
 
 ---
 
