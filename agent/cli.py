@@ -45,6 +45,7 @@ from agent.core import (
     MCPClient,
     MCPClientPool,
     TurnCallbacks,
+    build_full_system_prompt,
     colorize,
     fcntl_mod,
     fetch_ollama_models,
@@ -55,7 +56,8 @@ from agent.core import (
     mcp_to_openai_tools,
     run_streaming_turn,
 )
-from agent.paths import MEMORY_FILE
+from agent.paths import MEMORY_FILE, ensure_user_data_dir
+from agent.runner import close_subagent_pool
 
 # ── Memory ────────────────────────────────────────────────────────────────────
 
@@ -102,6 +104,7 @@ def offer_memory_save(messages: list[dict]) -> None:
 
 def _append_memory_note(note: str) -> None:
     """Append a single timestamped note line to SysControl_Memory.md."""
+    ensure_user_data_dir()
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     entry = f"\n- [{timestamp}] {note}\n"
 
@@ -482,8 +485,12 @@ def _init_mcp_and_prompt() -> tuple[MCPClient, str]:
             startup_error = exc
 
     def _load_prompt() -> None:
-        nonlocal system_prompt
-        system_prompt = load_system_prompt()
+        nonlocal system_prompt, startup_error
+        try:
+            system_prompt = load_system_prompt()
+        except Exception as exc:
+            if startup_error is None:
+                startup_error = exc
 
     t_mcp = threading.Thread(target=_start_mcp, daemon=True)
     t_prompt = threading.Thread(target=_load_prompt, daemon=True)
@@ -584,24 +591,8 @@ def main() -> None:
         mcp_tools = mcp_client.list_tools()
         tools = mcp_to_openai_tools(mcp_tools)
 
-        # Inject available tool names so the model can answer introspection questions
         tool_names = [t["function"]["name"] for t in tools]
-        tool_list_block = (
-            "\n\n---\n\n# Available Tools\n\n"
-            "You have access to the following tools (call them by name):\n"
-            + "\n".join(f"- {n}" for n in tool_names)
-        )
-
-        full_system = system_prompt + tool_list_block
-        if load_memory() is not None:
-            full_system += (
-                "\n\n---\n\n# Memory\n\n"
-                "A persistent memory file exists with notes from past sessions. "
-                "Call `read_memory` when the user references something from a previous session, "
-                "asks what you remember, or when prior context seems relevant. "
-                "Call `append_memory_note` to save a key fact mid-session without waiting for exit."
-            )
-
+        full_system = build_full_system_prompt(system_prompt, tool_names)
         system_message = {"role": "system", "content": full_system}
         ollama_client = OpenAI(
             api_key=api_key, base_url=base_url,
@@ -612,6 +603,7 @@ def main() -> None:
         _repl_loop(ollama_client, pool, tools, system_message, model, provider_label)
 
     finally:
+        close_subagent_pool()
         pool.close_all()
 
 

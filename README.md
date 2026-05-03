@@ -438,31 +438,27 @@ Detected automatically from hardware and platform:
 SysControl/
 ├── agent.py                 # CLI entry-point shim
 ├── install-cli.sh           # One-line CLI installer (curl one-liner)
-├── gui.py                   # PySide6 GUI entry-point shim
-├── remote.py                # Remote bridge entry-point shim
 ├── agent/
 │   ├── cli.py               # Interactive terminal REPL
 │   ├── core.py              # Shared agent logic: MCP client, streaming loop, helpers
 │   ├── bridge.py            # JSON-over-stdio bridge for the Swift app
 │   ├── agents.py            # Sub-agent specs: AgentSpec, AgentRegistry, built-in agents
 │   ├── runner.py            # Sub-agent runner: isolated context, filtered tools
-│   ├── paths.py             # Frozen-app-aware path resolution
-│   └── remote.py            # Telegram / WhatsApp / Messenger webhook bridge
+│   └── paths.py             # Path resolution (repo root, user data dir, memory file)
 ├── mcp/
 │   ├── server.py            # MCP tool server (91 tools + self-extension)
 │   └── prompt.json          # System prompt for the agent
 ├── deep_research/           # Deep research agent (iterative web research with citation verification)
 ├── swift/
 │   ├── Package.swift         # SwiftPM package definition
-│   ├── build.sh              # Build + bundle script
-│   ├── install.sh            # One-line installer
+│   ├── build.sh              # Builds the .app bundle and DMG
+│   ├── install.sh            # One-line source installer
 │   └── SysControl/           # SwiftUI source (App, Models, Views, Services, Storage)
 ├── scripts/
-│   ├── build_macos.sh        # PyInstaller macOS build
-│   └── build_dmg.sh          # DMG creation script
+│   └── make_icon.py          # Generates the .icns app icon from source PNGs
 ├── pyproject.toml            # Python project config, dependencies, linting
-├── VERSION                   # Current release version
-└── SysControl.command        # Double-click launcher for the GUI
+├── VERSION                   # Current release version (single source of truth)
+└── tests/                    # Pytest suite for agent core + MCP helpers
 ```
 
 ### Architecture
@@ -497,15 +493,13 @@ After installing via the [one-liner](#cli) (or `pip install -e .` from a clone):
 | `syscontrol` | Interactive CLI agent |
 | `syscontrol-server` | MCP server (stdio) |
 | `syscontrol-cli-update` | Reinstall the CLI from the latest master |
-| `syscontrol-gui` | PySide6 desktop GUI |
 
 From a clone without installing, use `uv run`:
 
 | Command | Description |
 |---|---|
 | `uv run agent.py` | Interactive CLI agent |
-| `uv run remote.py` | Remote bridge (Telegram, WhatsApp, Messenger) |
-| `uv run gui.py` | PySide6 desktop GUI (requires `uv pip install -e '.[gui]'`) |
+| `uv run -m mcp.server` | MCP server (stdio) — for Claude Desktop integration |
 
 ---
 

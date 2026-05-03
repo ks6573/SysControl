@@ -98,7 +98,7 @@ struct OnboardingView: View {
                         .fontWeight(.medium)
                     SecureField("Paste your API key here", text: $apiKey)
                         .textFieldStyle(.roundedBorder)
-                    Text("Your key is stored only in ~/.syscontrol/gui_config.json on this Mac.")
+                    Text("Your key is stored securely in the macOS Keychain on this Mac.")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }

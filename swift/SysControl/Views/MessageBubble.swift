@@ -407,7 +407,12 @@ private struct ChartImageView: View {
                 NSImage(contentsOfFile: path)
             }.value
             if let loaded {
-                ChartImageCache.shared.setObject(loaded, forKey: path as NSString)
+                // Pass a cost so totalCostLimit (set on the cache) actually
+                // gates eviction — without a cost, NSCache treats every
+                // entry as cost 0 and the byte budget is ignored.
+                let bytesPerPixel = 4
+                let cost = Int(loaded.size.width * loaded.size.height) * bytesPerPixel
+                ChartImageCache.shared.setObject(loaded, forKey: path as NSString, cost: cost)
             }
             nsImage = loaded
         }
@@ -418,6 +423,9 @@ private enum ChartImageCache {
     static let shared: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
         cache.countLimit = 120
+        // Cap memory at ~256 MB regardless of count — chart PNGs can be
+        // multi-MB each, so the count limit alone is not enough to bound RAM.
+        cache.totalCostLimit = 256 * 1024 * 1024
         return cache
     }()
 }

@@ -3,7 +3,7 @@
 SysControl Agent — Core utilities.
 
 Provides the MCP client, client pool, and shared helpers used by both the
-CLI (agent/cli.py) and the remote bridge (agent/remote.py).
+CLI (agent/cli.py) and the Swift bridge (agent/bridge.py).
 """
 
 import base64
@@ -26,6 +26,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import IO, cast
 
 try:
     import fcntl as fcntl_mod  # noqa: F401 — re-exported for cli.py / server.py
@@ -35,7 +36,8 @@ except ImportError:
     HAS_FCNTL = False
 
 import openai
-from openai import OpenAI  # noqa: F401 — re-exported for downstream imports
+from openai import OpenAI, Stream  # noqa: F401 — re-exported for downstream imports
+from openai.types.chat import ChatCompletionChunk
 
 from agent.paths import MEMORY_FILE, PROMPT_PATH, SERVER_PATH  # frozen-app-aware paths
 
@@ -131,30 +133,21 @@ class MCPClient:
     def __init__(self, extra_env: dict[str, str] | None = None) -> None:
         """Spawn the MCP server subprocess and perform the JSON-RPC handshake.
 
-        In a frozen PyInstaller bundle the executable re-invokes itself with
-        ``--mcp-server`` so the entry-point can dispatch to mcp/server.py.
-        Otherwise the server is launched directly via ``sys.executable``.
-
         Args:
-            extra_env: Optional mapping of additional environment variables to
-                inject into the subprocess.  Merged with the current process
-                environment (``extra_env`` values take precedence).  Pass
-                ``{"SYSCONTROL_AGENT_DEPTH": "1"}`` for sub-agent processes to
-                prevent nested agent spawning.
+            extra_env: Optional complete environment dict for the subprocess.
+                When provided, it **replaces** the parent environment entirely —
+                callers are responsible for including any vars the server
+                requires (PATH, HOME, etc.).  This keeps secret-isolation
+                guarantees from ``runner._build_subprocess_env()`` intact.
+                When ``None``, the subprocess inherits the full parent env.
 
         Raises:
             RuntimeError: If the subprocess fails to start or the handshake
                 times out / returns an unexpected response.
         """
-        # In a frozen PyInstaller bundle sys.executable is the app binary,
-        # not a Python interpreter.  Re-invoke ourselves with a flag so the
-        # main entry-point can dispatch to the MCP server.
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "--mcp-server"]
-        else:
-            cmd = [sys.executable, str(SERVER_PATH)]
+        cmd = [sys.executable, str(SERVER_PATH)]
 
-        proc_env = {**os.environ, **extra_env} if extra_env else None
+        proc_env = dict(extra_env) if extra_env is not None else None
 
         self.proc = subprocess.Popen(
             cmd,
@@ -165,8 +158,12 @@ class MCPClient:
             bufsize=1,
             env=proc_env,
         )
+        # Narrow the Popen stdin/stdout types once and store as non-Optional
+        # attributes, so each call site doesn't have to re-assert.
         assert self.proc.stdin is not None, "Popen stdin must be a pipe"
         assert self.proc.stdout is not None, "Popen stdout must be a pipe"
+        self._stdin: IO[str] = self.proc.stdin
+        self._stdout: IO[str] = self.proc.stdout
         self._id   = 0
         self._lock = threading.Lock()   # serialise writes/reads on this pipe
         self._chart_files: list[str] = []
@@ -239,8 +236,8 @@ class MCPClient:
             if params:
                 msg["params"] = params
             try:
-                self.proc.stdin.write(json.dumps(msg) + "\n")
-                self.proc.stdin.flush()
+                self._stdin.write(json.dumps(msg) + "\n")
+                self._stdin.flush()
             except (BrokenPipeError, OSError) as exc:
                 err = self._last_stderr()
                 raise RuntimeError(
@@ -253,7 +250,7 @@ class MCPClient:
             if _read_timeout is not None:
                 try:
                     ready, _, _ = select.select(
-                        [self.proc.stdout], [], [], _read_timeout,
+                        [self._stdout], [], [], _read_timeout,
                     )
                 except (ValueError, OSError):
                     ready = []
@@ -263,7 +260,7 @@ class MCPClient:
                         f"{_read_timeout:.1f}s — is mcp/server.py healthy?"
                     )
 
-            raw = self.proc.stdout.readline()
+            raw = self._stdout.readline()
             if not raw:
                 err = self._last_stderr()
                 raise RuntimeError(
@@ -271,7 +268,8 @@ class MCPClient:
                     f"{(' Server error: ' + err) if err else ''}"
                 )
             try:
-                return json.loads(raw)
+                response: dict = json.loads(raw)
+                return response
             except json.JSONDecodeError as exc:
                 raise RuntimeError(
                     f"MCP server sent malformed JSON: {raw[:200]!r}"
@@ -281,8 +279,8 @@ class MCPClient:
         with self._lock:
             msg = {"jsonrpc": "2.0", "method": method}
             try:
-                self.proc.stdin.write(json.dumps(msg) + "\n")
-                self.proc.stdin.flush()
+                self._stdin.write(json.dumps(msg) + "\n")
+                self._stdin.flush()
             except (BrokenPipeError, OSError) as exc:
                 err = self._last_stderr()
                 raise RuntimeError(
@@ -321,7 +319,8 @@ class MCPClient:
 
     def list_tools(self) -> list[dict]:
         resp = self._send("tools/list")
-        return resp.get("result", {}).get("tools", [])
+        tools: list[dict] = resp.get("result", {}).get("tools", [])
+        return tools
 
     def call_tool(self, name: str, arguments: dict | None = None) -> str:
         """Execute a tool by name and return the text result.
@@ -393,16 +392,12 @@ class MCPClient:
 
         pid = self.proc.pid
 
-        # Close stdin first so the server sees EOF on its read loop.
+        # Close stdin first so the server sees EOF on its read loop, then
+        # close stdout to unblock any pending server write.
         with contextlib.suppress(Exception):
-            if self.proc.stdin is not None:
-                self.proc.stdin.close()
-
-        # Drain stdout to unblock any pending server write.  Bounded by a short
-        # read budget — we don't care about the data, just about not deadlocking.
+            self._stdin.close()
         with contextlib.suppress(Exception):
-            if self.proc.stdout is not None:
-                self.proc.stdout.close()
+            self._stdout.close()
 
         try:
             self.proc.terminate()
@@ -472,7 +467,7 @@ class MCPClientPool:
         # parallel, while two threads racing on the same slot serialise so
         # only one MCPClient is created.
         self._slot_locks: dict[int, threading.Lock] = {}
-        self._parallel_safe: set[str] | None = None  # lazily populated
+        self._parallel_safe: frozenset[str] | None = None  # lazily populated
 
     def _get_or_create(self, index: int) -> MCPClient:
         assert 0 <= index < self._pool_size, (
@@ -521,7 +516,7 @@ class MCPClientPool:
     # legitimately loaded (but possibly empty) set of safe tool names.
     _FALLBACK: frozenset[str] = frozenset()
 
-    def _get_parallel_safe(self) -> frozenset[str] | set[str]:
+    def _get_parallel_safe(self) -> frozenset[str]:
         """Return the set of tool names that are safe to run concurrently.
 
         Lazily fetches the tool list from the primary MCP client on first call
@@ -530,9 +525,9 @@ class MCPClientPool:
         if self._parallel_safe is None:
             try:
                 tools = self._clients[0].list_tools()  # primary always at index 0
-                self._parallel_safe = {
+                self._parallel_safe = frozenset(
                     t["name"] for t in tools if t.get("parallel", True)
-                }
+                )
             except Exception:
                 # Server unreachable — use sentinel so _is_parallel_safe
                 # falls back to allowing everything (original behaviour).
@@ -608,7 +603,8 @@ class MCPClientPool:
 def load_system_prompt() -> str:
     """Load and cache the system prompt — file is read once per process."""
     data = json.loads(PROMPT_PATH.read_text(encoding="utf-8"))
-    return data["system_prompt"]["prompt"]
+    prompt: str = data["system_prompt"]["prompt"]
+    return prompt
 
 
 def mcp_to_openai_tools(mcp_tools: list[dict]) -> list[dict]:
@@ -628,6 +624,35 @@ def mcp_to_openai_tools(mcp_tools: list[dict]) -> list[dict]:
         }
         for t in mcp_tools
     ]
+
+
+_MEMORY_HINT = (
+    "\n\n---\n\n# Memory\n\n"
+    "A persistent memory file exists with notes from past sessions. "
+    "Call `read_memory` when the user references something from a previous session, "
+    "asks what you remember, or when prior context seems relevant. "
+    "Call `append_memory_note` to save a key fact mid-session without waiting for exit."
+)
+
+
+def build_full_system_prompt(base_prompt: str, tool_names: list[str]) -> str:
+    """Assemble the complete system prompt sent to the LLM.
+
+    Combines the static base prompt, a runtime-derived list of available tool
+    names, an optional memory-file hint when ``SysControl_Memory.md`` exists,
+    and the response-style guidance.  Used by both the CLI and Swift bridge so
+    they stay behaviourally identical.
+    """
+    tool_list_block = (
+        "\n\n---\n\n# Available Tools\n\n"
+        "You have access to the following tools (call them by name):\n"
+        + "\n".join(f"- {n}" for n in tool_names)
+    )
+    full = base_prompt + tool_list_block
+    if load_memory() is not None:
+        full += _MEMORY_HINT
+    full += RESPONSE_STYLE_GUIDANCE
+    return full
 
 
 # ── Shared helpers (used by CLI, GUI worker, and settings dialog) ────────────
@@ -776,10 +801,10 @@ class TurnCallbacks:
     Every callback has a safe no-op default so callers only override what they need.
     """
 
-    on_token: Callable[[str], None] = field(default=lambda: (lambda _t: None))
-    on_tool_started: Callable[[list[str]], None] = field(default=lambda: (lambda _n: None))
-    on_tool_finished: Callable[[str, str], None] = field(default=lambda: (lambda _n, _r: None))
-    on_error: Callable[[str, str], None] = field(default=lambda: (lambda _c, _m: None))
+    on_token: Callable[[str], None] = field(default_factory=lambda: lambda _t: None)
+    on_tool_started: Callable[[list[str]], None] = field(default_factory=lambda: lambda _n: None)
+    on_tool_finished: Callable[[str, str], None] = field(default_factory=lambda: lambda _n, _r: None)
+    on_error: Callable[[str, str], None] = field(default_factory=lambda: lambda _c, _m: None)
     cancel_event: threading.Event | None = field(default=None)
 
 
@@ -790,19 +815,25 @@ def _create_llm_stream(
     messages: list[dict],
     system_message: dict,
     callbacks: TurnCallbacks,
-) -> object | None:
+) -> Stream[ChatCompletionChunk] | None:
     """Open a streaming chat-completion request, mapping API errors to callbacks.
 
     Returns the raw stream iterator on success, or ``None`` if an API error
     occurred (the error callback is invoked before returning ``None``).
     """
     try:
-        return llm.chat.completions.create(
-            model=model,
-            max_tokens=MAX_TOKENS,
-            tools=tools,
-            messages=[system_message] + messages,
-            stream=True,
+        # The OpenAI SDK overloads chat.completions.create — when ``stream=True``
+        # the return type is ``Stream[ChatCompletionChunk]`` but mypy doesn't
+        # always pick up the overload through keyword arguments.  Cast it.
+        return cast(
+            "Stream[ChatCompletionChunk]",
+            llm.chat.completions.create(
+                model=model,
+                max_tokens=MAX_TOKENS,
+                tools=tools,  # type: ignore[arg-type]
+                messages=[system_message, *messages],  # type: ignore[list-item]
+                stream=True,
+            ),
         )
     except openai.APITimeoutError as exc:
         callbacks.on_error("Timeout", f"LLM request timed out ({exc})")
@@ -818,7 +849,7 @@ def _create_llm_stream(
 
 
 def _accumulate_stream_chunks(
-    stream: object, callbacks: TurnCallbacks,
+    stream: Stream[ChatCompletionChunk], callbacks: TurnCallbacks,
 ) -> tuple[str, list[dict], str | None]:
     """Consume a stream and return (content, tool_calls, finish_reason).
 
@@ -1024,6 +1055,11 @@ def run_streaming_turn(
         content, tool_calls, finish_reason = _stream_llm_response(
             llm, model, tools, messages, system_message, callbacks,
         )
+
+        # _stream_llm_response signals API failure with (None, None, "error").
+        # Bail out immediately rather than passing None into _handle_finish_reason.
+        if content is None or tool_calls is None:
+            return "error", time.monotonic() - start_time
 
         result = _handle_finish_reason(
             finish_reason, content, tool_calls,

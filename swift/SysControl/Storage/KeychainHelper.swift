@@ -22,10 +22,14 @@ enum KeychainHelper {
             kSecAttrAccount as String: account,
         ]
 
-        let updateStatus = SecItemUpdate(
-            baseQuery as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
-        )
+        // Force-set the accessibility flag on update too — older items (or items
+        // created by a different app version) may have been added with weaker
+        // accessibility, and SecItemUpdate leaves untouched attributes alone.
+        let updateAttrs: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+        let updateStatus = SecItemUpdate(baseQuery as CFDictionary, updateAttrs as CFDictionary)
         if updateStatus == errSecSuccess {
             return true
         }
