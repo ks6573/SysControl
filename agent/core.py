@@ -26,7 +26,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import IO, cast
+from typing import IO, Any, cast
 
 try:
     import fcntl as fcntl_mod  # noqa: F401 — re-exported for cli.py / server.py
@@ -85,30 +85,215 @@ MAX_TOKENS         = 16384
 POOL_SIZE          = 4          # max parallel MCP worker processes
 MAX_PARALLEL_TOOLS = POOL_SIZE  # batch size capped to pool capacity
 MAX_TOOL_ROUNDS    = 15         # circuit-breaker for runaway tool-call loops
-_MAX_CHART_BYTES   = 10 * 1024 * 1024  # 10 MB cap on decoded chart images
+_MAX_CHART_BYTES   = 10 * 1024 * 1024  # Backward-compatible alias.
+_MAX_ARTIFACT_BYTES = 25 * 1024 * 1024  # 25 MB cap on decoded visual artifacts
 _CHART_FILE_PREFIX = "syscontrol_chart_"
+_ARTIFACT_FILE_PREFIX = "syscontrol_artifact_"
+_IMAGE_TOOL_NAME = "generate_image"
+_IMAGE_MODEL_DEFAULT = "gpt-image-1"
+_IMAGE_SIZE_VALUES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+ToolApprover = Callable[[str, dict], bool]
 
 RESPONSE_STYLE_GUIDANCE: str = (
     "\n\n---\n\n# Response Style\n\n"
     "When replying to the user:\n"
+    "- Sound conversational, warm, and capable, like a helpful AI assistant rather than a diagnostic report.\n"
+    "- Treat vague requests as collaboration: ask one concise follow-up when the missing detail materially changes the outcome.\n"
+    "- When the next step is low-risk and obvious, make a reasonable assumption, say what you assumed, and proceed.\n"
+    "- Anticipate what would make the answer more useful: include comparisons, next actions, or visual summaries when they clarify the result.\n"
+    "- Use chart-returning tools proactively when a visualization would help the user understand performance, trends, proportions, or tradeoffs.\n"
     "- Avoid a single dense paragraph for non-trivial answers.\n"
     "- Prefer a short direct lead, then concise bullets or numbered steps when helpful.\n"
     "- Prefer headings + bullet lists over markdown tables unless the user explicitly asks for a table.\n"
     "- Insert blank lines between sections so responses are easy to scan.\n"
     "- Use markdown structure naturally (headings, bullets, code blocks) when it improves clarity.\n"
+    "- End with a natural follow-up or offer only when it advances the user's likely next step; do not tack one on mechanically.\n"
     "- Keep simple requests short (1-2 sentences).\n"
     "- For actionable instructions, provide concrete commands/examples.\n"
 )
 
 # ── Provider config ───────────────────────────────────────────────────────────
 
-CLOUD_MODEL    = "gpt-oss:120b"
-CLOUD_BASE_URL = "https://ollama.com/v1"
+OLLAMA_CLOUD_MODEL    = "gpt-oss:120b"
+OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
+
+# Backward-compatible aliases for older call sites/imports.  These still point
+# to Ollama Cloud; "OpenAI" only describes the compatible HTTP protocol/client.
+CLOUD_MODEL    = OLLAMA_CLOUD_MODEL
+CLOUD_BASE_URL = OLLAMA_CLOUD_BASE_URL
 
 LOCAL_MODEL    = "qwen3:30b"  # any model pulled via: ollama pull <model>
 LOCAL_BASE_URL = "http://localhost:11434/v1"
 LOCAL_API_KEY  = "ollama"   # Ollama doesn't require a real key
 LOCAL_TAGS_URL_FALLBACK = "http://localhost:11434/api/tags"
+
+
+def _field(obj: Any, name: str) -> Any:
+    """Read a field from an SDK object or dict without caring which it is."""
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _write_b64_image_artifact(
+    img_data: str,
+    tracked_files: list[str],
+    mime_type: str = "image/png",
+) -> tuple[str | None, str | None]:
+    """Decode a base64 image, save it to temp, and track it for cleanup."""
+    if not img_data:
+        return None, "missing image data"
+    try:
+        decoded = base64.b64decode(img_data, validate=True)
+    except (binascii.Error, ValueError):
+        return None, "decode error"
+    if len(decoded) > _MAX_ARTIFACT_BYTES:
+        return None, "exceeds size limit"
+
+    ext = ".png"
+    if mime_type == "image/jpeg":
+        ext = ".jpg"
+    elif mime_type == "image/webp":
+        ext = ".webp"
+
+    digest = hashlib.md5(img_data[:64].encode()).hexdigest()[:10]  # noqa: S324
+    path = os.path.join(
+        tempfile.gettempdir(),
+        f"{_ARTIFACT_FILE_PREFIX}{digest}{ext}",
+    )
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(decoded)
+    tracked_files.append(path)
+    return path, None
+
+
+def _format_tool_result_with_image(
+    data: dict,
+    img_b64: str,
+    tracked_files: list[str],
+    mime_type: str = "image/png",
+) -> str:
+    """Return JSON text plus the legacy inline-image marker consumed by the GUI."""
+    parts = [json.dumps(data, indent=2)]
+    if img_b64:
+        path, error = _write_b64_image_artifact(img_b64, tracked_files, mime_type)
+        if path:
+            parts.append(f"\n[chart_image:{path}]")
+        else:
+            parts.append(f"[visual artifact: {error}]")
+    return "\n".join(parts)
+
+
+def _image_api_config(
+    provider_api_key: str | None,
+    provider_base_url: str | None,
+) -> tuple[str | None, str | None, str]:
+    """Resolve the API credentials used by the image-generation tool."""
+    image_key = os.environ.get("SYSCONTROL_IMAGE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    image_base = os.environ.get("SYSCONTROL_IMAGE_BASE_URL")
+    if image_key:
+        return image_key, image_base, "image_env"
+
+    api_key = (provider_api_key or "").strip()
+    base_url = (provider_base_url or "").strip().rstrip("/")
+    if api_key and api_key != "ollama" and "api.openai.com" in base_url:
+        return api_key, base_url, "configured_openai_provider"
+
+    return None, None, "missing"
+
+
+def _image_generation_request(args: dict) -> dict:
+    """Normalize LLM-supplied image generation arguments."""
+    prompt = str(args.get("prompt", "")).strip()
+    model = str(args.get("model") or _IMAGE_MODEL_DEFAULT).strip()
+    size = str(args.get("size") or "1024x1024").strip()
+    quality = str(args.get("quality") or "auto").strip()
+    background = str(args.get("background") or "auto").strip()
+
+    if size not in _IMAGE_SIZE_VALUES:
+        size = "1024x1024"
+
+    request: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+    }
+    if quality:
+        request["quality"] = quality
+    if background and background != "auto":
+        request["background"] = background
+    return request
+
+
+def _call_generate_image_tool(
+    args: dict,
+    provider_api_key: str | None,
+    provider_base_url: str | None,
+    tracked_files: list[str],
+) -> str:
+    """Generate an image with OpenAI Images and return a GUI-renderable result."""
+    request = _image_generation_request(args)
+    prompt = request.get("prompt", "")
+    if not prompt:
+        return json.dumps({"error": "prompt is required."}, indent=2)
+
+    api_key, base_url, source = _image_api_config(provider_api_key, provider_base_url)
+    if not api_key:
+        return json.dumps({
+            "error": "No OpenAI image API key is configured.",
+            "hint": (
+                "Set OPENAI_API_KEY or SYSCONTROL_IMAGE_API_KEY, or configure "
+                "SysControl with an OpenAI base URL so generated images can be created."
+            ),
+        }, indent=2)
+
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": llm_client_timeout(),
+        "max_retries": llm_client_max_retries(),
+    }
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = OpenAI(**client_kwargs)
+
+    try:
+        response = client.images.generate(**request)
+    except TypeError:
+        request.pop("background", None)
+        try:
+            response = client.images.generate(**request)
+        except openai.OpenAIError as exc:
+            return json.dumps({"error": f"Image generation failed: {exc}"}, indent=2)
+    except openai.OpenAIError as exc:
+        return json.dumps({"error": f"Image generation failed: {exc}"}, indent=2)
+
+    items = _field(response, "data") or []
+    first = items[0] if items else None
+    img_b64 = _field(first, "b64_json") if first is not None else None
+    revised_prompt = _field(first, "revised_prompt") if first is not None else None
+    if not img_b64:
+        url = _field(first, "url") if first is not None else None
+        if url:
+            try:
+                with urllib.request.urlopen(url, timeout=60) as r:
+                    img_b64 = base64.b64encode(r.read()).decode()
+            except Exception as exc:
+                return json.dumps({"error": f"Could not fetch generated image URL: {exc}"}, indent=2)
+    if not img_b64:
+        return json.dumps({"error": "Image generation returned no image data."}, indent=2)
+
+    meta = {
+        "status": "ok",
+        "model": request["model"],
+        "size": request["size"],
+        "quality": request.get("quality"),
+        "background": request.get("background", "auto"),
+        "credential_source": source,
+    }
+    if revised_prompt:
+        meta["revised_prompt"] = revised_prompt
+    return _format_tool_result_with_image(meta, img_b64, tracked_files)
 
 # ANSI colours — only emitted when stdout is a real terminal.
 _USE_COLOR = sys.stdout.isatty()
@@ -145,7 +330,13 @@ class MCPClient:
             RuntimeError: If the subprocess fails to start or the handshake
                 times out / returns an unexpected response.
         """
-        cmd = [sys.executable, str(SERVER_PATH)]
+        # In a frozen PyInstaller bundle, sys.executable points to the app
+        # binary, not a Python interpreter. Re-invoke with --mcp-server so
+        # the app entry-point can dispatch correctly.
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--mcp-server"]
+        else:
+            cmd = [sys.executable, str(SERVER_PATH)]
 
         proc_env = dict(extra_env) if extra_env is not None else None
 
@@ -325,17 +516,17 @@ class MCPClient:
     def call_tool(self, name: str, arguments: dict | None = None) -> str:
         """Execute a tool by name and return the text result.
 
-        When the tool produces an image (e.g. chart), the image is saved to
-        a temp file and a ``[chart_image:/path]`` marker is appended.  Temp
-        files are tracked in ``_chart_files`` and cleaned up by ``close()``.
+        When the tool produces an image (chart, screenshot, generated artifact),
+        the image is saved to a temp file and a ``[chart_image:/path]`` marker
+        is appended. Temp files are tracked and cleaned up by ``close()``.
 
         Args:
             name: MCP tool name to invoke.
             arguments: Tool arguments dict, or ``None`` for no arguments.
 
         Returns:
-            Combined text content from the tool, with ``[chart_image:...]``
-            markers appended for any image content items.
+            Combined text content from the tool, with inline image markers
+            appended for any image content items.
         """
         resp = self._send("tools/call", {"name": name, "arguments": arguments or {}})
         if "error" in resp:
@@ -352,26 +543,14 @@ class MCPClient:
                 text_parts.append(item.get("text", ""))
             elif item.get("type") == "image":
                 img_data = item.get("data", "")
-                if not img_data:
-                    continue
-                try:
-                    decoded = base64.b64decode(img_data, validate=True)
-                except (binascii.Error, ValueError):
-                    text_parts.append("[chart image: decode error]")
-                    continue
-                if len(decoded) > _MAX_CHART_BYTES:
-                    text_parts.append("[chart image: exceeds size limit]")
-                    continue
-                digest = hashlib.md5(img_data[:64].encode()).hexdigest()[:10]  # noqa: S324
-                path = os.path.join(
-                    tempfile.gettempdir(),
-                    f"{_CHART_FILE_PREFIX}{digest}.png",
+                mime_type = item.get("mimeType", "image/png")
+                path, error = _write_b64_image_artifact(
+                    img_data, self._chart_files, mime_type,
                 )
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, "wb") as f:
-                    f.write(decoded)
-                self._chart_files.append(path)
-                text_parts.append(f"\n[chart_image:{path}]")
+                if path:
+                    text_parts.append(f"\n[chart_image:{path}]")
+                elif error:
+                    text_parts.append(f"[visual artifact: {error}]")
 
         return "\n".join(text_parts) if text_parts else "[no content returned]"
 
@@ -384,7 +563,7 @@ class MCPClient:
         Stdout/stderr are closed before termination so the server is not left
         blocked on a full pipe buffer.
         """
-        # Clean up chart temp files
+        # Clean up visual-artifact temp files
         for path in self._chart_files:
             with contextlib.suppress(OSError):
                 os.remove(path)
@@ -430,15 +609,34 @@ def _parse_tool_call_args(tc: dict) -> tuple[str, dict]:
             ``function.arguments`` keys.
 
     Returns:
-        A ``(name, args)`` tuple.  *args* defaults to ``{}`` on parse failure.
+        A ``(name, args)`` tuple.
+
+    Raises:
+        ValueError: If the tool name or argument payload is malformed.
     """
     fn = tc.get("function") or {}
-    name = fn.get("name", "")
-    assert name, "Tool call has empty name — malformed LLM response"
+    name = str(fn.get("name", "")).strip()
+    if not name:
+        raise ValueError("LLM returned a tool call without a function name.")
+
+    raw_args = fn.get("arguments", "{}")
+    if raw_args in (None, ""):
+        return name, {}
+    if isinstance(raw_args, dict):
+        return name, raw_args
+    if not isinstance(raw_args, str):
+        raise ValueError(
+            f"Tool call '{name}' arguments must be a JSON object string."
+        )
+
     try:
-        args = json.loads(fn.get("arguments", "{}"))
-    except json.JSONDecodeError:
-        args = {}
+        args = json.loads(raw_args)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Tool call '{name}' arguments were not valid JSON: {exc.msg}."
+        ) from exc
+    if not isinstance(args, dict):
+        raise ValueError(f"Tool call '{name}' arguments must decode to a JSON object.")
     return name, args
 
 
@@ -451,7 +649,14 @@ class MCPClientPool:
     extras are spawned only when a parallel batch actually needs them.
     """
 
-    def __init__(self, primary: MCPClient, pool_size: int = POOL_SIZE) -> None:
+    def __init__(
+        self,
+        primary: MCPClient,
+        pool_size: int = POOL_SIZE,
+        provider_api_key: str | None = None,
+        provider_base_url: str | None = None,
+        tool_approver: ToolApprover | None = None,
+    ) -> None:
         """Initialise the pool with a pre-created primary client.
 
         Args:
@@ -468,6 +673,33 @@ class MCPClientPool:
         # only one MCPClient is created.
         self._slot_locks: dict[int, threading.Lock] = {}
         self._parallel_safe: frozenset[str] | None = None  # lazily populated
+        self._provider_api_key = provider_api_key
+        self._provider_base_url = provider_base_url
+        self._tool_approver = tool_approver
+
+    def set_provider_config(self, api_key: str | None, base_url: str | None) -> None:
+        """Update provider details for native tools that need configured credentials."""
+        self._provider_api_key = api_key
+        self._provider_base_url = base_url
+
+    def set_tool_approver(self, approver: ToolApprover | None) -> None:
+        """Update the optional per-tool approval hook used by interactive clients."""
+        self._tool_approver = approver
+
+    def _call_tool(self, name: str, args: dict, client: MCPClient) -> str:
+        if self._tool_approver is not None and not self._tool_approver(name, args):
+            return (
+                "[tool denied: the CLI approval policy blocked this call. "
+                "Explain what you would do instead, or ask the user to change modes.]"
+            )
+        if name == _IMAGE_TOOL_NAME:
+            return _call_generate_image_tool(
+                args,
+                self._provider_api_key,
+                self._provider_base_url,
+                client._chart_files,
+            )
+        return client.call_tool(name, args)
 
     def _get_or_create(self, index: int) -> MCPClient:
         assert 0 <= index < self._pool_size, (
@@ -555,7 +787,7 @@ class MCPClientPool:
             # Fast path: no thread overhead for a single call.
             tc = tool_calls[0]
             name, args = _parse_tool_call_args(tc)
-            result = self._clients[0].call_tool(name, args)  # primary client
+            result = self._call_tool(name, args, self._clients[0])  # primary client
             return [(tc["id"], name, result)]
 
         # Partition by parallel safety in a single pass, preserving original indices.
@@ -571,7 +803,7 @@ class MCPClientPool:
             order: int, tc: dict, client: MCPClient
         ) -> tuple[int, str, str, str]:
             name, args = _parse_tool_call_args(tc)
-            return (order, tc["id"], name, client.call_tool(name, args))
+            return (order, tc["id"], name, self._call_tool(name, args, client))
 
         # Run parallel-safe calls in batches of at most MAX_PARALLEL_TOOLS.
         for batch_start in range(0, len(safe_indexed), MAX_PARALLEL_TOOLS):
@@ -835,22 +1067,30 @@ def _create_llm_stream(
                 stream=True,
             ),
         )
-    except openai.APITimeoutError as exc:
-        callbacks.on_error("Timeout", f"LLM request timed out ({exc})")
-    except openai.APIConnectionError as exc:
-        callbacks.on_error("Connection", f"Cannot reach LLM endpoint: {exc}")
-    except openai.AuthenticationError as exc:
-        callbacks.on_error("Auth", f"Invalid API key: {exc}")
-    except openai.APIStatusError as exc:
-        callbacks.on_error("API", f"LLM error {exc.status_code}: {exc.message}")
     except openai.OpenAIError as exc:
-        callbacks.on_error("LLM", f"LLM error: {exc}")
+        _report_llm_error(exc, callbacks, "request")
     return None
+
+
+def _report_llm_error(exc: Exception, callbacks: TurnCallbacks, phase: str) -> None:
+    """Map SDK/network errors to stable UI-facing error categories."""
+    if isinstance(exc, openai.APITimeoutError):
+        callbacks.on_error("Timeout", f"LLM {phase} timed out ({exc})")
+    elif isinstance(exc, openai.APIConnectionError):
+        callbacks.on_error("Connection", f"Cannot reach LLM endpoint during {phase}: {exc}")
+    elif isinstance(exc, openai.AuthenticationError):
+        callbacks.on_error("Auth", f"Invalid API key: {exc}")
+    elif isinstance(exc, openai.APIStatusError):
+        callbacks.on_error("API", f"LLM error {exc.status_code}: {exc.message}")
+    elif isinstance(exc, openai.OpenAIError):
+        callbacks.on_error("LLM", f"LLM {phase} error: {exc}")
+    else:
+        callbacks.on_error("LLM", f"LLM {phase} failed: {exc}")
 
 
 def _accumulate_stream_chunks(
     stream: Stream[ChatCompletionChunk], callbacks: TurnCallbacks,
-) -> tuple[str, list[dict], str | None]:
+) -> tuple[str, list[dict], str | None] | tuple[None, None, str]:
     """Consume a stream and return (content, tool_calls, finish_reason).
 
     Calls ``callbacks.on_token`` for every text chunk received.
@@ -859,37 +1099,44 @@ def _accumulate_stream_chunks(
     tool_calls: list[dict]    = []
     finish_reason: str | None = None
 
-    for chunk in stream:
-        if callbacks.cancel_event and callbacks.cancel_event.is_set():
-            with contextlib.suppress(Exception):
-                stream.close()
-            return "".join(content_parts), tool_calls, "cancelled"
+    try:
+        for chunk in stream:
+            if callbacks.cancel_event and callbacks.cancel_event.is_set():
+                with contextlib.suppress(Exception):
+                    stream.close()
+                return "".join(content_parts), tool_calls, "cancelled"
 
-        choice = chunk.choices[0] if chunk.choices else None
-        if choice is None:
-            continue
-        delta = choice.delta
+            choice = chunk.choices[0] if chunk.choices else None
+            if choice is None:
+                continue
+            delta = choice.delta
 
-        if delta.content:
-            content_parts.append(delta.content)
-            callbacks.on_token(delta.content)
+            if delta.content:
+                content_parts.append(delta.content)
+                callbacks.on_token(delta.content)
 
-        if delta.tool_calls:
-            for tc in delta.tool_calls:
-                while len(tool_calls) <= tc.index:
-                    tool_calls.append(
-                        {"id": "", "function": {"name": "", "arguments": ""}}
-                    )
-                entry = tool_calls[tc.index]
-                if tc.id:
-                    entry["id"] = tc.id
-                if tc.function and tc.function.name:
-                    entry["function"]["name"] += tc.function.name
-                if tc.function and tc.function.arguments:
-                    entry["function"]["arguments"] += tc.function.arguments
+            if delta.tool_calls:
+                for fallback_index, tc in enumerate(delta.tool_calls):
+                    index = tc.index if tc.index is not None else fallback_index
+                    while len(tool_calls) <= index:
+                        tool_calls.append(
+                            {"id": "", "function": {"name": "", "arguments": ""}}
+                        )
+                    entry = tool_calls[index]
+                    if tc.id:
+                        entry["id"] = tc.id
+                    if tc.function and tc.function.name:
+                        entry["function"]["name"] += tc.function.name
+                    if tc.function and tc.function.arguments:
+                        entry["function"]["arguments"] += tc.function.arguments
 
-        if choice.finish_reason:
-            finish_reason = choice.finish_reason
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            stream.close()
+        _report_llm_error(exc, callbacks, "stream")
+        return None, None, "error"
 
     return "".join(content_parts), tool_calls, finish_reason
 
@@ -911,6 +1158,32 @@ def _stream_llm_response(
     if stream is None:
         return None, None, "error"
     return _accumulate_stream_chunks(stream, callbacks)
+
+
+def _prepare_tool_calls(tool_calls: list[dict], callbacks: TurnCallbacks) -> list[dict] | None:
+    """Validate and normalize streamed tool calls before appending/executing them."""
+    prepared: list[dict] = []
+    for index, tc in enumerate(tool_calls):
+        try:
+            name, args = _parse_tool_call_args(tc)
+        except ValueError as exc:
+            callbacks.on_error("Tool", str(exc))
+            return None
+
+        arguments = json.dumps(args, separators=(",", ":"))
+        call_id = str(tc.get("id") or "").strip()
+        if not call_id:
+            digest = hashlib.md5(f"{index}:{name}:{arguments}".encode()).hexdigest()[:8]  # noqa: S324
+            call_id = f"call_{index}_{digest}"
+        prepared.append({
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": arguments,
+            },
+        })
+    return prepared
 
 
 def _execute_tool_calls(
@@ -935,27 +1208,21 @@ def _execute_tool_calls(
         ``None`` on success (caller should continue the loop).
         ``"error"`` if tool execution failed (error callback already invoked).
     """
+    prepared = _prepare_tool_calls(tool_calls, callbacks)
+    if prepared is None:
+        return "error"
+
     messages.append({
         "role": "assistant",
         "content": content or None,
-        "tool_calls": [
-            {
-                "id": tc["id"],
-                "type": "function",
-                "function": {
-                    "name": tc["function"]["name"],
-                    "arguments": tc["function"]["arguments"],
-                },
-            }
-            for tc in tool_calls
-        ],
+        "tool_calls": prepared,
     })
 
-    names = [tc["function"]["name"] for tc in tool_calls]
+    names = [tc["function"]["name"] for tc in prepared]
     callbacks.on_tool_started(names)
 
     try:
-        results = pool.call_tools_parallel(tool_calls)
+        results = pool.call_tools_parallel(prepared)
     except RuntimeError as exc:
         callbacks.on_error("MCP", f"MCP server crashed or closed: {exc}")
         return "error"
@@ -994,17 +1261,26 @@ def _handle_finish_reason(
     if finish_reason == "error":
         return "error", elapsed
 
-    if finish_reason in ("stop", None) and not tool_calls:
-        messages.append({"role": "assistant", "content": content})
-        return finish_reason or "stop", elapsed
+    if finish_reason == "cancelled":
+        if content:
+            messages.append({"role": "assistant", "content": content})
+        return "cancelled", elapsed
 
-    if finish_reason == "tool_calls":
+    if tool_calls:
         err = _execute_tool_calls(
             tool_calls, content, pool, messages, callbacks, start_time,
         )
         if err == "error":
             return "error", time.monotonic() - start_time
         return None  # continue loop
+
+    if finish_reason == "tool_calls":
+        callbacks.on_error("LLM", "LLM indicated tool calls but did not send any tool calls.")
+        return "error", elapsed
+
+    if finish_reason in ("stop", None):
+        messages.append({"role": "assistant", "content": content})
+        return finish_reason or "stop", elapsed
 
     # max_tokens, content_filter, etc.
     messages.append({"role": "assistant", "content": content})

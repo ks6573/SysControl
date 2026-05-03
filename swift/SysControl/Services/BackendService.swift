@@ -269,13 +269,15 @@ final class BackendService: @unchecked Sendable {
         }
     }
 
-    /// Reject chart-image paths that don't live in the temp dir under the
-    /// expected ``syscontrol_chart_`` prefix — the bridge already enforces
-    /// this server-side, but a hostile MCP tool could emit arbitrary paths.
+    /// Reject inline-image paths that don't live in the temp dir under one of
+    /// the expected SysControl prefixes — the bridge already enforces this
+    /// server-side, but a hostile MCP tool could emit arbitrary paths.
     static func isAllowedChartPath(_ path: String) -> Bool {
         let resolved = (path as NSString).resolvingSymlinksInPath
         let lastComponent = (resolved as NSString).lastPathComponent
-        guard lastComponent.hasPrefix("syscontrol_chart_"),
+        let allowedPrefix = lastComponent.hasPrefix("syscontrol_chart_")
+            || lastComponent.hasPrefix("syscontrol_artifact_")
+        guard allowedPrefix,
               lastComponent.hasSuffix(".png") else {
             return false
         }

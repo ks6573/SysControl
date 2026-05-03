@@ -10,7 +10,7 @@ struct OnboardingView: View {
     enum Step { case welcome, configure }
     enum ProviderMode: String, CaseIterable {
         case local = "Local (Ollama)"
-        case cloud = "Cloud"
+        case cloud = "Ollama Cloud"
     }
 
     var body: some View {
@@ -137,7 +137,7 @@ struct OnboardingView: View {
                 apiKey: apiKey.trimmingCharacters(in: .whitespaces),
                 baseURL: ProviderConfiguration.cloudBaseURL,
                 model: ProviderConfiguration.cloudDefaultModel,
-                label: "☁ Cloud"
+                label: "☁ Ollama Cloud"
             )
         }
         appState.completeOnboarding(config)

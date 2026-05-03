@@ -2,7 +2,7 @@
 
 ## What is SysControl?
 
-An AI agent for macOS that answers questions about your system using 91 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
+An AI agent for macOS that answers questions about your system using 92 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
 
 **Repo:** `ks6573/SysControl` on GitHub.
 
@@ -12,7 +12,7 @@ An AI agent for macOS that answers questions about your system using 91 MCP tool
 
 ```
 agent.py               ← CLI entry shim → agent.cli:main()
-mcp/server.py          ← MCP server (~7400 lines, all 91 tools, JSON-RPC over stdio)
+mcp/server.py          ← MCP server (~7400 lines, all 92 tools, JSON-RPC over stdio)
 mcp/prompt.json        ← System prompt injected into all LLM requests
 agent/core.py          ← Shared: MCPClient, MCPClientPool, run_streaming_turn(), TurnCallbacks
 agent/bridge.py        ← JSON-over-stdio bridge for the Swift frontend
@@ -39,6 +39,7 @@ VERSION                ← Single source of truth for app version
 - **Swift app → Python:** `BackendService` spawns `agent/bridge.py` via `Process()`, JSON-over-stdio IPC
 - **Bridge → MCP:** `agent/core.py` MCPClient connects to `mcp/server.py` via JSON-RPC over stdio
 - **Streaming loop:** `run_streaming_turn()` in `core.py` handles the LLM ↔ tool-call loop with `TurnCallbacks` for UI events
+- **CLI coding mode:** `agent/cli.py --coding --approval {plan,standard,nuke}` narrows tools to code/file/git/shell capabilities and installs a tool-approval hook on `MCPClientPool`
 - **Chart images:** MCP tools return `(data, base64_png)` tuples → `call_tool()` saves PNG to temp file → bridge emits `chart_image` event → Swift renders inline via `ChartImageView`
 - **Deep research:** `deep_research` MCP tool → `deep_research/orchestrator.py` creates its own OpenAI client from env vars, runs iterative plan→search→extract→verify→synthesize loop using existing `web_search()` / `web_fetch()` functions
 - **Sub-agents:** `run_agent` MCP tool → `agent/runner.py:run_subagent()` spawns an isolated MCPClient subprocess (with `SYSCONTROL_AGENT_DEPTH=1` to block nesting), filters tools to the spec's allowlist, and calls `run_streaming_turn()` with a fresh message history. `agent/agents.py` holds `AgentSpec` definitions and the `AgentRegistry`.

@@ -3305,6 +3305,88 @@ def take_screenshot(path: str = "") -> tuple:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 
 
+# ── Visual artifact tools ─────────────────────────────────────────────────────
+
+_IMAGE_GENERATION_DEFAULT_MODEL = "gpt-image-1"
+_IMAGE_GENERATION_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+
+
+def generate_image(
+    prompt: str,
+    size: str = "1024x1024",
+    quality: str = "auto",
+    background: str = "auto",
+    model: str = _IMAGE_GENERATION_DEFAULT_MODEL,
+) -> tuple:
+    """
+    Generate a visual image artifact with the OpenAI Images API.
+
+    Returns a ``(metadata_dict, base64_png_string)`` tuple so every interface
+    can render it inline through the existing MCP image-content path.
+    """
+    prompt = str(prompt or "").strip()
+    if not prompt:
+        return {"error": "prompt is required."}, ""
+
+    api_key = os.environ.get("SYSCONTROL_IMAGE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return {
+            "error": "No OpenAI image API key is configured.",
+            "hint": (
+                "Set OPENAI_API_KEY or SYSCONTROL_IMAGE_API_KEY. In the GUI, an "
+                "OpenAI provider configuration can also be used for image generation."
+            ),
+        }, ""
+
+    size = size if size in _IMAGE_GENERATION_SIZES else "1024x1024"
+    request: dict[str, Any] = {
+        "model": model or _IMAGE_GENERATION_DEFAULT_MODEL,
+        "prompt": prompt,
+        "size": size,
+    }
+    if quality:
+        request["quality"] = quality
+    if background and background != "auto":
+        request["background"] = background
+
+    client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": 120.0, "max_retries": 1}
+    if image_base_url := os.environ.get("SYSCONTROL_IMAGE_BASE_URL"):
+        client_kwargs["base_url"] = image_base_url
+
+    try:
+        client = OpenAI(**client_kwargs)
+        try:
+            response = client.images.generate(**request)
+        except TypeError:
+            request.pop("background", None)
+            response = client.images.generate(**request)
+
+        items = getattr(response, "data", None) or []
+        first = items[0] if items else None
+        img_b64 = getattr(first, "b64_json", None) if first is not None else None
+        if not img_b64:
+            url = getattr(first, "url", None) if first is not None else None
+            if url:
+                with urllib.request.urlopen(url, timeout=60) as r:
+                    img_b64 = base64.b64encode(r.read()).decode()
+        if not img_b64:
+            return {"error": "Image generation returned no image data."}, ""
+
+        meta = {
+            "status": "ok",
+            "model": request["model"],
+            "size": request["size"],
+            "quality": request.get("quality"),
+            "background": request.get("background", "auto"),
+        }
+        revised_prompt = getattr(first, "revised_prompt", None) if first is not None else None
+        if revised_prompt:
+            meta["revised_prompt"] = revised_prompt
+        return meta, img_b64
+    except Exception as e:
+        return {"error": f"Image generation failed: {e}"}, ""
+
+
 # ── App control tools ─────────────────────────────────────────────────────────
 
 def open_app(name: str) -> dict:
@@ -6465,6 +6547,56 @@ TOOLS: dict[str, ToolEntry] = {
             "required": [],
         },
         "fn": lambda args: take_screenshot(args.get("path", "")),
+    },
+    "generate_image": {
+        "description": (
+            "Generate a new visual image artifact from a text prompt and return it as "
+            "an inline PNG for the GUI/chat. Use when the user asks for an image or "
+            "when a small visual artifact would clearly make the answer more useful. "
+            "Prefer built-in chart-returning metric tools for system data. Requires "
+            "an OpenAI image API key."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Detailed image prompt describing subject, composition, style, and any text to include.",
+                },
+                "size": {
+                    "type": "string",
+                    "enum": ["1024x1024", "1024x1536", "1536x1024", "auto"],
+                    "description": "Output dimensions. Use 1024x1024 unless portrait or landscape is requested.",
+                    "default": "1024x1024",
+                },
+                "quality": {
+                    "type": "string",
+                    "enum": ["auto", "low", "medium", "high"],
+                    "description": "Generation quality/cost tradeoff.",
+                    "default": "auto",
+                },
+                "background": {
+                    "type": "string",
+                    "enum": ["auto", "transparent", "opaque"],
+                    "description": "Background handling for models that support it.",
+                    "default": "auto",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Image model to use. Defaults to gpt-image-1.",
+                    "default": "gpt-image-1",
+                },
+            },
+            "required": ["prompt"],
+        },
+        "fn": lambda args: generate_image(
+            args["prompt"],
+            args.get("size", "1024x1024"),
+            args.get("quality", "auto"),
+            args.get("background", "auto"),
+            args.get("model", _IMAGE_GENERATION_DEFAULT_MODEL),
+        ),
     },
     # ── App Control ───────────────────────────────────────────────────────────
     "open_app": {

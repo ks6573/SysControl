@@ -13,7 +13,7 @@ Protocol (stdin → bridge):
     {"type":"shutdown"}
 
 Protocol (bridge → stdout):
-    {"type":"ready","tool_count":91,"model":"..."}
+    {"type":"ready","tool_count":92,"model":"..."}
     {"type":"token","text":"Hello"}
     {"type":"tool_started","names":["get_cpu_usage"]}
     {"type":"tool_finished","name":"get_cpu_usage","result":"..."}
@@ -126,20 +126,21 @@ def _read_command() -> dict | None:
 
 
 _CHART_IMAGE_RE = re.compile(r"\[chart_image:(.+?)\]")
+_INLINE_IMAGE_PREFIXES = ("syscontrol_chart_", "syscontrol_artifact_")
 _ALLOWED_HISTORY_ROLES = {"system", "user", "assistant", "tool"}
 
 
 def _emit_tool_finished(name: str, result: str) -> None:
-    """Emit tool_finished event and any chart_image events found in the result."""
+    """Emit tool_finished event and any inline image events found in the result."""
     _emit({"type": "tool_finished", "name": name})
-    tmp_dir = tempfile.gettempdir()
+    tmp_dir = os.path.realpath(tempfile.gettempdir())
     for match in _CHART_IMAGE_RE.finditer(result):
         path = match.group(1)
         # Validate: must be inside the system temp dir with expected prefix
         resolved = os.path.realpath(path)
         if os.path.commonpath([resolved, tmp_dir]) != tmp_dir:
             continue
-        if not os.path.basename(resolved).startswith("syscontrol_chart_"):
+        if not os.path.basename(resolved).startswith(_INLINE_IMAGE_PREFIXES):
             continue
         _emit({"type": "chart_image", "path": resolved})
 
@@ -168,7 +169,10 @@ def _coerce_history(raw_history: object) -> list[dict]:
 
 # ── Bridge helpers ────────────────────────────────────────────────────────────
 
-def _initialise_agent() -> tuple[MCPClientPool, list[dict], dict]:
+def _initialise_agent(
+    provider_api_key: str | None = None,
+    provider_base_url: str | None = None,
+) -> tuple[MCPClientPool, list[dict], dict]:
     """Start the MCP client pool and build the full system message.
 
     Returns:
@@ -178,7 +182,11 @@ def _initialise_agent() -> tuple[MCPClientPool, list[dict], dict]:
         Exception: Any startup failure — callers should catch and emit an error event.
     """
     mcp_client = MCPClient()
-    pool       = MCPClientPool(mcp_client)
+    pool       = MCPClientPool(
+        mcp_client,
+        provider_api_key=provider_api_key,
+        provider_base_url=provider_base_url,
+    )
 
     # Pre-warm worker pool in background to eliminate first-batch latency.
     threading.Thread(target=pool.warm_up, daemon=True).start()
@@ -363,6 +371,7 @@ def _event_loop(
                 timeout=llm_client_timeout(),
                 max_retries=llm_client_max_retries(),
             )
+            pool.set_provider_config(str(api_key), str(base_url))
             session_histories.clear()
             _emit({"type": "configured", "model": model})
         elif cmd_type == "user_message":
@@ -391,7 +400,10 @@ def main() -> None:
     log = sys.stderr
 
     try:
-        pool, tools, system_message = _initialise_agent()
+        pool, tools, system_message = _initialise_agent(
+            os.environ.get("SYSCONTROL_API_KEY", "ollama"),
+            os.environ.get("SYSCONTROL_BASE_URL", LOCAL_BASE_URL),
+        )
     except Exception as exc:
         _emit({"type": "error", "category": "Startup", "message": str(exc)})
         sys.exit(1)
