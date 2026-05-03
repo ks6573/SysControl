@@ -680,6 +680,15 @@ class MCPClientPool:
         """Update the optional per-tool approval hook used by interactive clients."""
         self._tool_approver = approver
 
+    def call_one(self, name: str, args: dict) -> str:
+        """Synchronously invoke a single tool on the primary client.
+
+        Bypasses the LLM loop; used by CLI shortcuts (e.g. `!shell` escape) that
+        need direct tool access. Returns the tool's text result, including any
+        ``[tool error: …]`` sentinel from the underlying client.
+        """
+        return self._call_tool(name, args, self._clients[0])
+
     def _call_tool(self, name: str, args: dict, client: MCPClient) -> str:
         if self._tool_approver is not None and not self._tool_approver(name, args):
             return (
