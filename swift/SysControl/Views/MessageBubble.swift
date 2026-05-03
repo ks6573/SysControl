@@ -243,20 +243,34 @@ struct MessageBubble: View {
     // MARK: - Tool Indicator
 
     private var toolIndicator: some View {
-        HStack(spacing: 6) {
-            Image(systemName: message.content.hasPrefix("✓")
-                  ? "checkmark.circle.fill" : "gear")
-                .font(.system(size: 10))
-                .foregroundStyle(message.content.hasPrefix("✓") ? .green : .orange)
+        let isComplete = message.content.hasPrefix("✓")
+        let tint: Color = isComplete ? .green : .orange
+
+        return HStack(spacing: 8) {
+            ZStack {
+                Circle()
+                    .fill(tint.opacity(0.16))
+                Image(systemName: isComplete ? "checkmark.circle.fill" : "gearshape.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(tint)
+            }
+            .frame(width: 20, height: 20)
+
             Text(message.content)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
             Spacer()
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
         .background(
-            Capsule().fill(Theme.toolFill)
+            Capsule(style: .continuous)
+                .fill(Theme.toolFill)
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Theme.toolStroke, lineWidth: 1)
         )
         .padding(.vertical, 1)
     }
@@ -280,6 +294,10 @@ private struct ToolCallCard: View {
         isPending ? .orange : .green
     }
 
+    private var statusText: String {
+        isPending ? "Running tool" : "Tool result ready"
+    }
+
     private var resultPreview: String {
         guard let result = call.result else { return "" }
         let collapsed = result
@@ -296,21 +314,40 @@ private struct ToolCallCard: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: statusIcon)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(statusTint)
-                        .frame(width: 14)
-                        .symbolEffect(.pulse, options: .repeating, isActive: isPending)
-                    Text(call.name)
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.primary.opacity(0.85))
-                    if !isPending && !isExpanded {
-                        Text(resultPreview)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(statusTint.opacity(0.16))
+                        Image(systemName: statusIcon)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(statusTint)
+                            .symbolEffect(.pulse, options: .repeating, isActive: isPending)
                     }
+                    .frame(width: 24, height: 24)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(call.name)
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.primary.opacity(0.88))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+
+                            Text(statusText)
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(statusTint)
+                                .lineLimit(1)
+                        }
+
+                        if !isPending && !isExpanded {
+                            Text(resultPreview)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
                     Spacer(minLength: 6)
                     if !isPending {
                         Image(systemName: "chevron.down")
@@ -333,6 +370,10 @@ private struct ToolCallCard: View {
             if isExpanded, let result = call.result, !result.isEmpty {
                 Divider().opacity(0.3)
                 HStack(alignment: .top, spacing: 0) {
+                    Rectangle()
+                        .fill(Theme.diagnosticAccent.opacity(0.35))
+                        .frame(width: 2)
+
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(result)
                             .font(.system(size: 11.5, design: .monospaced))
@@ -342,6 +383,7 @@ private struct ToolCallCard: View {
                             .padding(.vertical, 10)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .background(Theme.codeFill)
                     Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(result, forType: .string)

@@ -56,7 +56,7 @@ struct SidebarView: View {
             footer
         }
         .background(VisualEffectBackground(material: .sidebar))
-        .navigationSplitViewColumnWidth(min: 240, ideal: 260, max: 360)
+        .navigationSplitViewColumnWidth(min: 260, ideal: 292, max: 380)
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [markdownType],
@@ -105,10 +105,26 @@ struct SidebarView: View {
     }
 
     private var header: some View {
-        HStack {
-            Text("SysControl")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.primary)
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Theme.diagnosticAccent.opacity(0.16))
+                Image(systemName: "cpu")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.diagnosticAccent)
+            }
+            .frame(width: 26, height: 26)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("SysControl")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text("System Observatory")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
             Spacer()
             Button {
                 withAnimation(Theme.motion) {
@@ -131,7 +147,7 @@ struct SidebarView: View {
 
     @ViewBuilder
     private var footer: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 8) {
             updateBanner
             connectionStatus
         }
@@ -141,42 +157,68 @@ struct SidebarView: View {
 
     @ViewBuilder
     private var connectionStatus: some View {
-        if appState.isConnected {
-            HStack(spacing: 6) {
+        let state = sidebarConnectionState
+
+        HStack(spacing: 9) {
+            ZStack {
                 Circle()
-                    .fill(.green)
-                    .frame(width: 6, height: 6)
-                Text("\(appState.toolCount) tools · \(appState.modelName)")
-                    .font(.system(size: 11))
+                    .fill(state.tint.opacity(0.16))
+                Image(systemName: state.icon)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(state.tint)
+            }
+            .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(state.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.9))
+                    .lineLimit(1)
+                Text(state.detail)
+                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Spacer()
             }
-            .padding(.horizontal, 4)
-        } else if let error = appState.connectionError {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(.red)
-                    .frame(width: 6, height: 6)
-                Text(error)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red.opacity(0.85))
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 4)
-        } else {
-            HStack(spacing: 6) {
-                ProgressView()
-                    .scaleEffect(0.5)
-                    .frame(width: 10, height: 10)
-                Text("Connecting…")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 4)
+
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Theme.statusFill)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Theme.statusStroke, lineWidth: 1)
+        }
+    }
+
+    private var sidebarConnectionState: SidebarConnectionState {
+        if appState.isConnected {
+            return SidebarConnectionState(
+                icon: "checkmark.circle.fill",
+                tint: .green,
+                title: "Backend online",
+                detail: "\(appState.toolCount) tools · \(appState.modelName)"
+            )
+        }
+
+        if let error = appState.connectionError {
+            return SidebarConnectionState(
+                icon: "exclamationmark.triangle.fill",
+                tint: .red,
+                title: "Backend offline",
+                detail: error
+            )
+        }
+
+        return SidebarConnectionState(
+            icon: "antenna.radiowaves.left.and.right",
+            tint: .orange,
+            title: "Connecting",
+            detail: "Starting local bridge"
+        )
     }
 
     @ViewBuilder
@@ -321,6 +363,13 @@ private struct SessionGroup: Identifiable {
     }
 }
 
+private struct SidebarConnectionState {
+    let icon: String
+    let tint: Color
+    let title: String
+    let detail: String
+}
+
 private enum SessionBucket: Int, CaseIterable, Hashable {
     case today
     case yesterday
@@ -400,19 +449,56 @@ private struct SessionListRow: View {
     }
 
     private var backgroundFill: Color {
-        if isSelected { return Color.primary.opacity(0.10) }
-        if isHovering { return Color.primary.opacity(0.06) }
+        if isSelected { return Theme.rowSelected }
+        if isHovering { return Theme.rowHover }
         return .clear
     }
 
+    private var rowIcon: String {
+        if session.isStreaming { return "waveform.path.ecg" }
+        if session.isPinned { return "pin.fill" }
+        if session.messages.isEmpty { return "plus.message" }
+        return "bubble.left.and.bubble.right"
+    }
+
+    private var detailText: String {
+        if session.isStreaming {
+            if let activeTool = session.activeToolNames.first {
+                return "Running \(activeTool)"
+            }
+            return "Generating response"
+        }
+        if session.messages.isEmpty {
+            return "Ready for diagnostics"
+        }
+        return "\(session.messages.count) messages · \(session.createdAt.sidebarLabel)"
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
-            Text(displayTitle)
-                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                .foregroundStyle(.primary.opacity(isSelected ? 1 : 0.85))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 9) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isSelected ? Theme.diagnosticAccent.opacity(0.18) : Color.primary.opacity(0.055))
+                Image(systemName: rowIcon)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isSelected ? Theme.diagnosticAccent : .secondary)
+            }
+            .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayTitle)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(.primary.opacity(isSelected ? 1 : 0.85))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Text(detailText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Button {
                 onTogglePin()
@@ -448,6 +534,14 @@ private struct SessionListRow: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(backgroundFill)
         )
+        .overlay(alignment: .leading) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Theme.diagnosticAccent)
+                    .frame(width: 3)
+                    .padding(.vertical, 7)
+            }
+        }
         .animation(.easeInOut(duration: 0.12), value: isHovering)
         .animation(.easeInOut(duration: 0.12), value: isSelected)
         .contentShape(Rectangle())
@@ -488,19 +582,35 @@ private struct SavedChatListRow: View {
     }
 
     private var backgroundFill: Color {
-        if isSelected { return Color.primary.opacity(0.10) }
-        if isHovering { return Color.primary.opacity(0.06) }
+        if isSelected { return Theme.rowSelected }
+        if isHovering { return Theme.rowHover }
         return .clear
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text(displayTitle)
-                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                .foregroundStyle(.primary.opacity(isSelected ? 1 : 0.85))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 9) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isSelected ? Theme.accent.opacity(0.18) : Color.primary.opacity(0.055))
+                Image(systemName: "doc.text")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isSelected ? Theme.accent : .secondary)
+            }
+            .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayTitle)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(.primary.opacity(isSelected ? 1 : 0.85))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Text(chat.dateLabel)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Button(role: .destructive) {
                 onDelete()
@@ -522,6 +632,14 @@ private struct SavedChatListRow: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(backgroundFill)
         )
+        .overlay(alignment: .leading) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(Theme.accent)
+                    .frame(width: 3)
+                    .padding(.vertical, 7)
+            }
+        }
         .animation(.easeInOut(duration: 0.12), value: isHovering)
         .animation(.easeInOut(duration: 0.12), value: isSelected)
         .contentShape(Rectangle())

@@ -90,7 +90,10 @@ struct InputBar: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(Color.primary.opacity(isFocused ? 0.14 : 0.08), lineWidth: 1)
+                        .stroke(
+                            isFocused ? Theme.diagnosticAccent.opacity(0.28) : Color.primary.opacity(0.08),
+                            lineWidth: 1
+                        )
                 )
                 .animation(.easeInOut(duration: 0.15), value: isFocused)
             }

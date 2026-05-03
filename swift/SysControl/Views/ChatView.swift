@@ -360,12 +360,15 @@ struct ChatView: View {
     private var welcomeView: some View {
         VStack(spacing: 18) {
             Spacer()
-            VStack(spacing: 8) {
+
+            VStack(spacing: 12) {
+                observatoryBadge
+
                 Text(greeting)
                     .font(.system(size: 30, weight: .medium, design: .serif))
                     .foregroundStyle(.primary.opacity(0.85))
                     .multilineTextAlignment(.center)
-                Text("How can I help with your system?")
+                Text("What should we inspect first?")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -381,12 +384,49 @@ struct ChatView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var observatoryBadge: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(welcomeState.tint)
+                .frame(width: 6, height: 6)
+            Text(welcomeState.label)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.72))
+            Text(welcomeState.detail)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Theme.statusFill)
+        )
+        .overlay {
+            Capsule(style: .continuous)
+                .stroke(Theme.statusStroke, lineWidth: 1)
+        }
+    }
+
+    private var welcomeState: WelcomeState {
+        switch appState.backendStatus {
+        case .ready:
+            return WelcomeState(tint: .green, label: "Observatory ready", detail: "\(appState.toolCount) tools online")
+        case .connecting:
+            return WelcomeState(tint: .orange, label: "Starting bridge", detail: "local tools warming up")
+        case .reconnecting(let attempt):
+            return WelcomeState(tint: .orange, label: "Reconnecting", detail: "attempt \(attempt)/5")
+        case .failed:
+            return WelcomeState(tint: .red, label: "Backend offline", detail: "retry available below")
+        }
+    }
+
     private var starterPrompts: some View {
         let prompts: [(icon: String, label: String, prompt: String)] = [
-            ("cpu", "CPU usage right now", "Show me current CPU usage broken down by process."),
-            ("memorychip", "Memory pressure", "Check memory pressure and what's using the most RAM."),
-            ("internaldrive", "Disk space overview", "How much disk space is free, and which directories are largest?"),
-            ("bolt", "Top energy hogs", "Which processes are using the most energy and CPU right now?"),
+            ("cpu", "Sample CPU load", "Show me current CPU usage broken down by process."),
+            ("memorychip", "Inspect memory pressure", "Check memory pressure and what's using the most RAM."),
+            ("internaldrive", "Map disk usage", "How much disk space is free, and which directories are largest?"),
+            ("bolt", "Find energy drains", "Which processes are using the most energy and CPU right now?"),
         ]
         return LazyVGrid(
             columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
@@ -495,6 +535,12 @@ struct ChatView: View {
     }
 }
 
+private struct WelcomeState {
+    let tint: Color
+    let label: String
+    let detail: String
+}
+
 private struct ChatMessageListContent: View {
     let session: ChatSession
     let searchQuery: String
@@ -560,13 +606,25 @@ private struct ConnectionStatusBanner: View {
     let onRetry: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(dotColor)
-                .frame(width: 7, height: 7)
-            Text(statusText)
-                .font(.system(size: 12))
-                .foregroundStyle(.primary.opacity(0.8))
+        HStack(spacing: 9) {
+            ZStack {
+                Circle()
+                    .fill(bannerColor.opacity(0.18))
+                    .frame(width: 20, height: 20)
+                Image(systemName: statusIcon)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(dotColor)
+                    .symbolEffect(.pulse, options: .repeating, isActive: isPulsing)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(statusText)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.86))
+                Text(statusDetail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             if case .failed = status {
                 Button("Retry") { onRetry() }
@@ -576,8 +634,13 @@ private struct ConnectionStatusBanner: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 7)
-        .background(bannerColor.opacity(0.12))
+        .padding(.vertical, 8)
+        .background(bannerColor.opacity(0.11))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(bannerColor.opacity(0.18))
+                .frame(height: 1)
+        }
     }
 
     private var dotColor: Color {
@@ -586,6 +649,24 @@ private struct ConnectionStatusBanner: View {
         case .ready:         return .green
         case .reconnecting:  return .orange
         case .failed:        return .red
+        }
+    }
+
+    private var statusIcon: String {
+        switch status {
+        case .connecting:    return "antenna.radiowaves.left.and.right"
+        case .ready:         return "checkmark.circle.fill"
+        case .reconnecting:  return "arrow.triangle.2.circlepath"
+        case .failed:        return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var isPulsing: Bool {
+        switch status {
+        case .connecting, .reconnecting:
+            return true
+        case .ready, .failed:
+            return false
         }
     }
 
@@ -601,13 +682,26 @@ private struct ConnectionStatusBanner: View {
     private var statusText: String {
         switch status {
         case .connecting:
-            return "Connecting to backend..."
+            return "Connecting to backend"
         case .ready:
-            return "Connected"
+            return "Backend online"
         case .reconnecting(let attempt):
-            return "Reconnecting... (attempt \(attempt)/5)"
+            return "Reconnecting to backend (attempt \(attempt)/5)"
         case .failed(let message):
             return message
+        }
+    }
+
+    private var statusDetail: String {
+        switch status {
+        case .connecting:
+            return "System tools will unlock when the bridge is ready."
+        case .ready:
+            return "Live diagnostics are available."
+        case .reconnecting:
+            return "Current requests are paused while the bridge restarts."
+        case .failed:
+            return "Check the backend process, then retry."
         }
     }
 }
@@ -626,10 +720,14 @@ private struct StarterPromptCard: View {
             HStack(spacing: 10) {
                 Image(systemName: icon)
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Theme.accent.opacity(0.9))
-                    .frame(width: 22)
+                    .foregroundStyle(Theme.diagnosticAccent.opacity(0.95))
+                    .frame(width: 26, height: 26)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Theme.diagnosticAccent.opacity(isHovering ? 0.16 : 0.10))
+                    )
                 Text(label)
-                    .font(.system(size: 13))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.primary.opacity(0.85))
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
@@ -643,11 +741,14 @@ private struct StarterPromptCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(isHovering ? 0.08 : 0.05))
+                    .fill(Color.primary.opacity(isHovering ? 0.085 : 0.045))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.primary.opacity(isHovering ? 0.14 : 0.08), lineWidth: 1)
+                    .stroke(
+                        isHovering ? Theme.diagnosticAccent.opacity(0.24) : Color.primary.opacity(0.08),
+                        lineWidth: 1
+                    )
             )
         }
         .buttonStyle(.plain)
