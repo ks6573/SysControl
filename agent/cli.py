@@ -16,15 +16,18 @@ Pass --api-key to skip the prompt entirely (e.g. for scripted/CI use).
 """
 
 import argparse
+import contextlib
 import datetime
 import getpass
 import itertools
 import json
+import os
 import sys
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import NamedTuple
 
 from openai import OpenAI
@@ -32,11 +35,13 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.formatted_text import ANSI, FormattedText
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 
+from agent import cli_compact, cli_session
+from agent.cli_completers import build_completer, expand_at_mentions
+from agent.cli_keys import build_key_bindings, install_sigint_handler
 from agent.core import (
     BLUE,
     BOLD,
@@ -66,6 +71,12 @@ from agent.core import (
     load_system_prompt,
     mcp_to_openai_tools,
     run_streaming_turn,
+)
+from agent.credentials import (
+    CREDENTIALS_FILE,
+    clear_cloud_api_key,
+    load_cloud_api_key,
+    save_cloud_api_key,
 )
 from agent.paths import MEMORY_FILE, USER_DATA_DIR, ensure_user_data_dir
 from agent.runner import close_subagent_pool
@@ -417,11 +428,17 @@ def _flush_token(
 
 def _build_cli_callbacks(
     spinner: _Spinner,
+    cancel_event: threading.Event,
+    tool_results: dict[str, str] | None = None,
 ) -> tuple[TurnCallbacks, list[str], list[tuple[str, str]]]:
     """Build CLI-specific presentation callbacks for a single turn.
 
     Args:
         spinner: Terminal spinner instance managed by the caller.
+        cancel_event: Signal flipped by the SIGINT handler to abort streaming.
+        tool_results: Optional mutable dict the ``on_tool_finished`` callback
+            populates with the latest result text per tool name.  Consumed by
+            the ``/show`` slash command.
 
     Returns:
         A ``(callbacks, pending_buf, errors)`` triple.  *pending_buf* is a
@@ -433,6 +450,7 @@ def _build_cli_callbacks(
     first_content = [True]  # mutable flag — avoids nonlocal across closures
     pending = [""]          # line buffer for colorized output
     errors: list[tuple[str, str]] = []
+    tool_starts: dict[str, float] = {}
 
     def _on_token(text: str) -> None:
         _flush_token(text, spinner, first_content, pending)
@@ -441,12 +459,18 @@ def _build_cli_callbacks(
         if first_content[0]:
             spinner.stop()
             first_content[0] = False
-        n = len(names)
-        label = names[0] + (f" +{n - 1} more" if n > 1 else "")
+        now = time.monotonic()
+        for n in names:
+            tool_starts[n] = now
+        label = names[0] + (f" +{len(names) - 1} more" if len(names) > 1 else "")
         spinner.start(f"Running {label}…")
 
-    def _on_tool_finished(_name: str, _result: str) -> None:
+    def _on_tool_finished(name: str, result: str) -> None:
         spinner.stop()
+        elapsed = time.monotonic() - tool_starts.pop(name, time.monotonic())
+        if tool_results is not None:
+            tool_results[name] = result
+        _render_tool_summary(name, result, elapsed)
 
     def _on_error(category: str, message: str) -> None:
         spinner.stop()
@@ -458,9 +482,18 @@ def _build_cli_callbacks(
         on_tool_started=_on_tool_started,
         on_tool_finished=_on_tool_finished,
         on_error=_on_error,
+        cancel_event=cancel_event,
     )
 
     return callbacks, pending, errors
+
+
+def _render_tool_summary(name: str, result: str, elapsed: float) -> None:
+    """Print a one-line themed header per finished tool call."""
+    char_count = len(result or "")
+    line_count = (result or "").count("\n") + (1 if result else 0)
+    suffix = "no output" if not result else f"{line_count} line{'s' if line_count != 1 else ''}, {char_count} chars"
+    print(f"{DIM}  → {name} · {elapsed:.1f}s · {suffix}{RESET}", flush=True)
 
 
 def run_turn(
@@ -471,6 +504,8 @@ def run_turn(
     messages: list[dict],
     model: str,
     approval_controller: ApprovalController | None = None,
+    cancel_event: threading.Event | None = None,
+    tool_results: dict[str, str] | None = None,
 ) -> None:
     """Execute one user turn: stream the LLM response and run tool calls.
 
@@ -481,6 +516,10 @@ def run_turn(
         system_message: Pre-built ``{"role": "system", ...}`` dict.
         messages: Mutable conversation history — modified in-place.
         model: Model identifier string.
+        cancel_event: Optional ``threading.Event`` set by the SIGINT handler to
+            abort the in-flight LLM stream.
+        tool_results: Optional dict the renderer populates with the most recent
+            output per tool name (consumed by ``/show``).
 
     Raises:
         _LLMError: On API/auth/connection/timeout errors.
@@ -490,7 +529,11 @@ def run_turn(
     spinner = _Spinner()
     if approval_controller is not None:
         approval_controller.bind_spinner(spinner)
-    callbacks, pending, errors = _build_cli_callbacks(spinner)
+    callbacks, pending, errors = _build_cli_callbacks(
+        spinner,
+        cancel_event if cancel_event is not None else threading.Event(),
+        tool_results,
+    )
 
     spinner.start("Thinking…")
 
@@ -514,7 +557,9 @@ def run_turn(
             raise _ToolError(msg)
 
     # Normal stop — print elapsed time.
-    if finish_reason in ("stop", "length", "content_filter", "unknown"):
+    if finish_reason == "cancelled":
+        print(f"\n{YELLOW}  ✗ cancelled after {elapsed:.1f}s{RESET}")
+    elif finish_reason in ("stop", "length", "content_filter", "unknown"):
         if finish_reason == "stop":
             print()  # final newline
             print(f"{DIM}  thought for {elapsed:.1f}s{RESET}")
@@ -606,6 +651,22 @@ def parse_args() -> argparse.Namespace:
         help="Coding-mode approval policy: plan is read-only, standard asks before risky tools, nuke auto-accepts.",
     )
     parser.add_argument(
+        "--no-save-key", action="store_true",
+        help="Do not persist the Ollama Cloud API key to ~/.syscontrol/cli_credentials.json.",
+    )
+    parser.add_argument(
+        "--continue", dest="continue_session", action="store_true",
+        help="Resume the most recent CLI session.",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Pick a previous CLI session from a list to resume.",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Bypass the model-mismatch warning when resuming a session.",
+    )
+    parser.add_argument(
         "--update", action="store_true",
         help="Check for and install the latest SysControl release, then exit.",
     )
@@ -626,12 +687,7 @@ class ProviderSelection(NamedTuple):
 
 
 def _prompt_cloud_api_key() -> str:
-    """Interactively prompt for the Ollama cloud API key.
-
-    Returns:
-        The non-empty API key string.  Exits the process on EOF/interrupt
-        or if the user provides an empty key.
-    """
+    """Interactively prompt for the Ollama cloud API key."""
     try:
         api_key = getpass.getpass(f"{BOLD}Ollama API key:{RESET} ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -640,6 +696,32 @@ def _prompt_cloud_api_key() -> str:
     if not api_key:
         print(f"{YELLOW}⚠  API key cannot be empty.{RESET}")
         sys.exit(1)
+    return api_key
+
+
+def _resolve_cloud_api_key(args: argparse.Namespace) -> str:
+    """Pick the cloud API key from --api-key, the saved cache, or a prompt.
+
+    The first time the user enters a key it gets persisted to
+    ``~/.syscontrol/cli_credentials.json`` (0600) so subsequent launches
+    don't re-prompt.  ``--no-save-key`` disables persistence; ``/logout``
+    inside the REPL clears the cache.
+    """
+    if args.api_key:
+        api_key = str(args.api_key)
+        if not args.no_save_key:
+            save_cloud_api_key(api_key)
+        return api_key
+
+    cached = load_cloud_api_key()
+    if cached:
+        print(f"{DIM}  Using saved Ollama Cloud API key ({CREDENTIALS_FILE.name}).{RESET}")
+        return cached
+
+    api_key = _prompt_cloud_api_key()
+    if not args.no_save_key:
+        save_cloud_api_key(api_key)
+        print(f"{DIM}  Saved to {CREDENTIALS_FILE} (use /logout or --no-save-key to forget).{RESET}")
     return api_key
 
 
@@ -663,7 +745,7 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
         A ``ProviderSelection`` with api_key, base_url, model, and label.
     """
     if args.provider == "cloud":
-        return _cloud_selection(args, args.api_key or _prompt_cloud_api_key())
+        return _cloud_selection(args, _resolve_cloud_api_key(args))
     if args.provider == "local":
         return _local_selection(args)
 
@@ -680,7 +762,7 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
             sys.exit(0)
 
         if choice == "cloud":
-            return _cloud_selection(args, _prompt_cloud_api_key())
+            return _cloud_selection(args, _resolve_cloud_api_key(args))
         if choice == "local":
             return _local_selection(args)
         print(f"{YELLOW}Please type 'cloud' or 'local':{RESET} ", end="", flush=True)
@@ -748,6 +830,10 @@ class ReplContext:
     base_system_prompt: str | None = None
     messages: list[dict] = field(default_factory=list)
     registry: SlashRegistry = field(default_factory=SlashRegistry)
+    last_tool_results: dict[str, str] = field(default_factory=dict)
+    compact_undo: list[dict] | None = None
+    session_path: Path | None = None
+    session_started_at: str | None = None
 
 
 # ── Slash commands ───────────────────────────────────────────────────────────
@@ -808,6 +894,94 @@ def _cmd_memory(_ctx: ReplContext, args: str) -> SlashResult:
 
 def _cmd_exit(_ctx: ReplContext, _args: str) -> SlashResult:
     return EXIT
+
+
+def _cmd_sessions(_ctx: ReplContext, _args: str) -> SlashResult:
+    """List recently saved CLI sessions."""
+    summaries = cli_session.list_sessions()
+    if not summaries:
+        print(f"{DIM}No saved sessions yet.{RESET}\n")
+        return CONTINUE
+    print(f"\n{BOLD}Recent sessions{RESET} {DIM}({cli_session.SESSIONS_DIR}){RESET}")
+    for s in summaries:
+        print(
+            f"  {DIM}{s.last_active}{RESET}  {s.model:<14} "
+            f"{s.message_count:>3} msgs  {s.first_user_text or DIM + '(no user msg)' + RESET}"
+        )
+    print(f"\n{DIM}Resume the latest with `syscontrol --continue` or pick one with `syscontrol --resume`.{RESET}\n")
+    return CONTINUE
+
+
+_INIT_PROMPT = (
+    "I want you to initialize a CLAUDE.md file in the current working directory "
+    "to act as the project's onboarding guide for future LLM agents.\n\n"
+    "Steps:\n"
+    "1. Use list_directory to see the top-level layout, then read the README, "
+    "pyproject.toml/package.json/Cargo.toml/go.mod (whichever exist), and any "
+    "`.github/workflows/*.yml`. Use grep_files for hints (build commands, test "
+    "commands, lint config) when helpful.\n"
+    "2. Produce a CLAUDE.md with these sections, in order: \"What is this project?\", "
+    "\"Architecture\", \"Build & Test\", \"Coding Standards\", \"Common Tasks\", "
+    "and \"File Size Reference\" listing the largest files with line counts.\n"
+    "3. Save it via write_file to ./CLAUDE.md.\n"
+    "4. After writing, summarize what you put in it in three bullets.\n"
+)
+
+
+def _cmd_init(_ctx: ReplContext, _args: str) -> SlashResult:
+    """Inject a templated user message that asks the LLM to write CLAUDE.md."""
+    return SlashResult(message=_INIT_PROMPT)
+
+
+def _cmd_compact(ctx: ReplContext, args: str) -> SlashResult:
+    """Summarize the conversation; `undo` restores the prior history."""
+    if args.strip().lower() == "undo":
+        if cli_compact.undo(ctx):
+            print(f"{GREEN}✓ Restored pre-compact history "
+                  f"({len(ctx.messages)} messages).{RESET}\n")
+        else:
+            print(f"{DIM}Nothing to undo.{RESET}\n")
+        return CONTINUE
+
+    spinner = _Spinner()
+    spinner.start("Summarizing conversation…")
+    try:
+        ok, info = cli_compact.compact(ctx)
+    finally:
+        spinner.stop()
+    if not ok:
+        print(f"{YELLOW}Compact failed:{RESET} {info}\n")
+        return CONTINUE
+    print(f"{GREEN}✓ Compacted{RESET} {DIM}(now {len(ctx.messages)} messages — "
+          f"`/compact undo` restores).{RESET}\n")
+    return CONTINUE
+
+
+def _cmd_show(ctx: ReplContext, args: str) -> SlashResult:
+    """Dump the full output of the most recent tool call (or a named one)."""
+    if not ctx.last_tool_results:
+        print(f"{DIM}No tool output captured yet.{RESET}\n")
+        return CONTINUE
+    name = args.strip()
+    if not name:
+        name = next(reversed(ctx.last_tool_results))
+    result = ctx.last_tool_results.get(name)
+    if result is None:
+        available = ", ".join(ctx.last_tool_results.keys())
+        print(f"{YELLOW}No output captured for '{name}'.{RESET} {DIM}Available: {available}{RESET}\n")
+        return CONTINUE
+    print(f"\n{BOLD}── {name} ──{RESET}")
+    print(result if result else f"{DIM}(empty){RESET}")
+    print()
+    return CONTINUE
+
+
+def _cmd_logout(_ctx: ReplContext, _args: str) -> SlashResult:
+    if clear_cloud_api_key():
+        print(f"{GREEN}✓ Cleared saved Ollama Cloud API key.{RESET}\n")
+    else:
+        print(f"{DIM}No saved API key to clear.{RESET}\n")
+    return CONTINUE
 
 
 def _cmd_update(_ctx: ReplContext, args: str) -> SlashResult:
@@ -890,6 +1064,17 @@ def _build_registry(coding: bool) -> SlashRegistry:
     reg.register(SlashCommand("update", "Check for and install the latest SysControl release",
                               _cmd_update, usage="/update [force]",
                               arg_choices=("force",)))
+    reg.register(SlashCommand("logout", "Forget the saved Ollama Cloud API key",
+                              _cmd_logout, usage="/logout"))
+    reg.register(SlashCommand("show", "Dump the full output of the most recent tool call",
+                              _cmd_show, usage="/show [tool_name]"))
+    reg.register(SlashCommand("sessions", "List recently saved CLI sessions",
+                              _cmd_sessions, usage="/sessions"))
+    reg.register(SlashCommand("init", "Generate a CLAUDE.md for the current project",
+                              _cmd_init, usage="/init"))
+    reg.register(SlashCommand("compact", "Summarize the conversation (use 'undo' to restore)",
+                              _cmd_compact, usage="/compact [undo]",
+                              arg_choices=("undo",)))
     reg.register(SlashCommand("exit", "Quit the session", _cmd_exit,
                               usage="/exit", aliases=("quit", "bye")))
     if coding:
@@ -929,43 +1114,63 @@ class _SlashCompleter(Completer):
                         break
             return
         match = self._ctx.registry.get(head.lower())
-        if match is None or not match.arg_choices:
+        if match is None:
             return
         partial = tail.lower()
-        for choice in match.arg_choices:
+        choices: tuple[str, ...] = match.arg_choices
+        if match.name == "show":
+            choices = tuple(self._ctx.last_tool_results.keys())
+        for choice in choices:
             if choice.startswith(partial):
                 yield Completion(choice, start_position=-len(tail))
+
+
+def _bottom_toolbar(ctx: ReplContext) -> Callable[[], FormattedText]:
+    """Return a closure that renders the live status strip beneath the prompt."""
+    def _render() -> FormattedText:
+        cwd = os.path.basename(os.getcwd()) or "/"
+        approval = (
+            f" · {ctx.approval_controller.mode}"
+            if ctx.cli_mode == "coding" and ctx.approval_controller is not None
+            else ""
+        )
+        msg_count = sum(1 for m in ctx.messages if m.get("role") in ("user", "assistant"))
+        return FormattedText([
+            ("class:tb", f" {ctx.model} · {ctx.provider_label} · {ctx.cli_mode}{approval} "),
+            ("class:tb.sep", "│ "),
+            ("class:tb", f"{cwd} · {msg_count} msgs "),
+            ("class:tb.sep", "│ "),
+            ("class:tb.hint", "/help · Enter submits · Ctrl-D submits multiline · Ctrl-C cancels"),
+        ])
+    return _render
 
 
 def _build_prompt_session(ctx: ReplContext) -> PromptSession:
     """Configure prompt_toolkit with history, key bindings, and slash completion."""
     ensure_user_data_dir()
     history = FileHistory(str(USER_DATA_DIR / "cli_history"))
-    bindings = KeyBindings()
 
-    @bindings.add("c-l")
-    def _clear_screen(event: object) -> None:
-        print("\033[2J\033[H", end="", flush=True)
-        event.app.invalidate()  # type: ignore[attr-defined]
-
-    @bindings.add("escape", "enter")
-    def _insert_newline(event: object) -> None:
-        event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
-
-    style = Style.from_dict({"completion-menu.completion": "bg:#222222 #cccccc",
-                             "completion-menu.completion.current": "bg:#0066cc #ffffff",
-                             "completion-menu.meta.completion": "bg:#222222 #888888",
-                             "completion-menu.meta.completion.current": "bg:#0066cc #cccccc"})
+    style = Style.from_dict({
+        "completion-menu.completion": "bg:#222222 #cccccc",
+        "completion-menu.completion.current": "bg:#0066cc #ffffff",
+        "completion-menu.meta.completion": "bg:#222222 #888888",
+        "completion-menu.meta.completion.current": "bg:#0066cc #cccccc",
+        "tb": "bg:#1c1c1c #cccccc",
+        "tb.sep": "bg:#1c1c1c #555555",
+        "tb.hint": "bg:#1c1c1c #888888",
+        "bottom-toolbar": "bg:#1c1c1c",
+    })
 
     return PromptSession(
         history=history,
-        completer=_SlashCompleter(ctx),
+        completer=build_completer(_SlashCompleter(ctx)),
         complete_while_typing=True,
         auto_suggest=AutoSuggestFromHistory(),
-        key_bindings=bindings,
+        key_bindings=build_key_bindings(),
         style=style,
         enable_history_search=True,
-        multiline=False,
+        multiline=True,
+        bottom_toolbar=_bottom_toolbar(ctx),
     )
 
 
@@ -989,6 +1194,71 @@ def _dispatch_slash(ctx: ReplContext, raw: str) -> SlashResult:
     return cmd.handler(ctx, args)
 
 
+def _hydrate_session(ctx: ReplContext, args: argparse.Namespace) -> None:
+    """If --continue / --resume was passed, load the chosen session into ctx."""
+    if not (args.continue_session or args.resume):
+        return
+    try:
+        payload = (
+            cli_session.load_latest()
+            if args.continue_session
+            else cli_session.pick_interactive()
+        )
+    except (OSError, ValueError) as exc:
+        print(f"{YELLOW}Could not load session: {exc}{RESET}")
+        return
+    if payload is None:
+        if args.continue_session:
+            print(f"{DIM}No saved sessions to continue.{RESET}")
+        return
+
+    saved_model = payload.get("model", "")
+    if saved_model and saved_model != ctx.model and not args.force:
+        print(
+            f"{YELLOW}Session was saved on '{saved_model}', current model is '{ctx.model}'.{RESET}"
+        )
+        print(f"{DIM}  Re-run with --force to load anyway, or pass --model {saved_model}.{RESET}")
+        return
+
+    ctx.messages = list(payload.get("messages", []))
+    ctx.session_path = Path(cli_session.SESSIONS_DIR / Path(payload.get("path", "")).name) if payload.get("path") else None
+    ctx.session_started_at = payload.get("started_at")
+    msg_count = sum(1 for m in ctx.messages if m.get("role") in ("user", "assistant"))
+    print(f"{GREEN}✓ Resumed session{RESET} {DIM}({msg_count} prior messages, model {saved_model or 'unknown'}){RESET}")
+
+
+def _save_session_safely(ctx: ReplContext) -> None:
+    """Persist the active session JSON; never raise into the REPL on failure."""
+    try:
+        ctx.session_path = cli_session.save(
+            messages=ctx.messages,
+            model=ctx.model,
+            provider_label=ctx.provider_label,
+            cli_mode=ctx.cli_mode,
+            approval_mode=ctx.approval_controller.mode if ctx.approval_controller else None,
+            session_path=ctx.session_path,
+            started_at=ctx.session_started_at,
+        )
+    except OSError as exc:
+        print(f"{DIM}  (session not saved: {exc}){RESET}")
+
+
+def _run_shell_escape(ctx: ReplContext, command: str) -> None:
+    """Run a `!shell` command directly via the MCP server, bypass the LLM."""
+    if not command:
+        print(f"{YELLOW}Usage: !<shell command>{RESET}\n")
+        return
+    print(f"{DIM}  $ {command}{RESET}")
+    result = ctx.pool.call_one("run_shell_command", {"command": command})
+    if result.startswith("[tool error"):
+        print(f"{YELLOW}{result}{RESET}")
+        if "permission" in result.lower() or "allow_shell" in result.lower():
+            print(f"{DIM}  Enable allow_shell in ~/.syscontrol/config.json to run shell commands.{RESET}")
+    else:
+        print(result)
+    print()
+
+
 def _print_status_line(ctx: ReplContext) -> None:
     mode_label = ""
     if ctx.cli_mode == "coding" and ctx.approval_controller is not None:
@@ -1004,52 +1274,71 @@ def _repl_loop(ctx: ReplContext) -> None:
     """Interactive read-eval-print loop for the CLI agent."""
     _print_status_line(ctx)
     session = _build_prompt_session(ctx)
+    cancel_event = threading.Event()
 
-    while True:
-        user_input = _read_input(session)
-        if user_input is None:
-            print(f"{DIM}Goodbye!{RESET}")
-            offer_memory_save(ctx.messages)
-            break
-        if not user_input:
-            continue
+    def _on_double_ctrl_c() -> None:
+        with contextlib.suppress(Exception):
+            ctx.pool.close_all()
+        with contextlib.suppress(Exception):
+            close_subagent_pool()
 
-        if user_input.startswith("/"):
-            result = _dispatch_slash(ctx, user_input)
-            if result.exit:
+    with install_sigint_handler(cancel_event, on_exit=_on_double_ctrl_c):
+        while True:
+            cancel_event.clear()
+            user_input = _read_input(session)
+            if user_input is None:
                 print(f"{DIM}Goodbye!{RESET}")
                 offer_memory_save(ctx.messages)
                 break
-            if result.message is None:
+            if not user_input:
                 continue
-            user_input = result.message
 
-        if user_input.lower() in EXIT_PHRASES:
-            print(f"{DIM}Goodbye!{RESET}")
-            offer_memory_save(ctx.messages)
-            break
+            if user_input.startswith("!"):
+                _run_shell_escape(ctx, user_input[1:].strip())
+                continue
 
-        ctx.messages.append({"role": "user", "content": user_input})
+            if user_input.startswith("/"):
+                result = _dispatch_slash(ctx, user_input)
+                if result.exit:
+                    print(f"{DIM}Goodbye!{RESET}")
+                    offer_memory_save(ctx.messages)
+                    break
+                if result.message is None:
+                    continue
+                user_input = result.message
 
-        try:
-            run_turn(
-                ctx.ollama_client, ctx.pool, ctx.tools, ctx.system_message,
-                ctx.messages, ctx.model, ctx.approval_controller,
-            )
-        except _LLMError as e:
-            print(f"\n{YELLOW}LLM error: {e}{RESET}")
-            print(f"{DIM}  Check your API key or network connection, then try again.{RESET}")
-        except _MCPError as e:
-            print(f"\n{YELLOW}MCP server error: {e}{RESET}")
-            print(f"{DIM}  The system monitor backend crashed — restarting is recommended.{RESET}")
-            break
-        except _ToolError as e:
-            print(f"\n{YELLOW}Tool error: {e}{RESET}")
-            print(f"{DIM}  The tool failed but the session is intact — try again.{RESET}")
-        except Exception as e:
-            print(f"\n{YELLOW}Unexpected error: {e}{RESET}")
+            if user_input.lower() in EXIT_PHRASES:
+                print(f"{DIM}Goodbye!{RESET}")
+                offer_memory_save(ctx.messages)
+                break
 
-        print()   # blank line between turns
+            expanded, warnings = expand_at_mentions(user_input)
+            for warn in warnings:
+                print(f"{YELLOW}  {warn}{RESET}")
+            ctx.messages.append({"role": "user", "content": expanded})
+
+            try:
+                run_turn(
+                    ctx.ollama_client, ctx.pool, ctx.tools, ctx.system_message,
+                    ctx.messages, ctx.model, ctx.approval_controller,
+                    cancel_event=cancel_event,
+                    tool_results=ctx.last_tool_results,
+                )
+                _save_session_safely(ctx)
+            except _LLMError as e:
+                print(f"\n{YELLOW}LLM error: {e}{RESET}")
+                print(f"{DIM}  Check your API key or network connection, then try again.{RESET}")
+            except _MCPError as e:
+                print(f"\n{YELLOW}MCP server error: {e}{RESET}")
+                print(f"{DIM}  The system monitor backend crashed — restarting is recommended.{RESET}")
+                break
+            except _ToolError as e:
+                print(f"\n{YELLOW}Tool error: {e}{RESET}")
+                print(f"{DIM}  The tool failed but the session is intact — try again.{RESET}")
+            except Exception as e:
+                print(f"\n{YELLOW}Unexpected error: {e}{RESET}")
+
+            print()   # blank line between turns
 
 
 def main() -> None:
@@ -1114,6 +1403,7 @@ def main() -> None:
             base_system_prompt=full_system,
             registry=_build_registry(coding=args.mode == "coding"),
         )
+        _hydrate_session(ctx, args)
         _repl_loop(ctx)
 
     finally:

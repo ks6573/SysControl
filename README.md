@@ -113,13 +113,18 @@ uv run agent.py
 ```bash
 syscontrol                                          # interactive
 syscontrol --provider local --model qwen3:30b      # local, skip prompt
-syscontrol --provider cloud --api-key sk-...       # cloud, skip prompt
+syscontrol --provider cloud --api-key sk-...       # cloud, skip prompt (key is remembered)
+syscontrol --provider cloud --no-save-key          # cloud, prompt every time
+syscontrol --continue                              # resume the most recent session
+syscontrol --resume                                # pick a previous session from a list
 syscontrol --coding --approval standard            # coding agent, ask before edits/shell
 syscontrol --coding --approval plan                # read-only planning mode
 syscontrol --coding --approval nuke                # auto-accept coding edits/shell
 ```
 
 > Cloned (Option B) users can substitute `uv run agent.py` for `syscontrol` in any of the commands below.
+
+The first time you enter your Ollama Cloud API key (via `--api-key` or the prompt), it's saved to `~/.syscontrol/cli_credentials.json` (`0600`) so you won't be asked again. Use `--no-save-key` to opt out, or `/logout` from the REPL to forget it.
 
 ### Coding Mode
 
@@ -136,7 +141,7 @@ Inside coding mode, use `/approval plan`, `/approval standard`, or `/approval nu
 
 ### Slash Commands & Keyboard Shortcuts
 
-The interactive CLI supports a built-in slash menu (type `/` to pop the completion list) and standard editor key bindings.
+The interactive CLI feels like Codex / Claude Code: type `/` to pop a completion menu, `@` to inline a file from the cwd, `!` to run a one-off shell command, and the bottom toolbar shows the active model, provider, approval mode, and message count at all times.
 
 | Command | Description |
 |---|---|
@@ -146,20 +151,31 @@ The interactive CLI supports a built-in slash menu (type `/` to pop the completi
 | `/tools [filter]` | List available tools, optionally filtered by substring |
 | `/model` | Show the active model and provider |
 | `/memory <note>` | Append a timestamped note to `SysControl_Memory.md` |
+| `/show [tool_name]` | Dump the full output of the most recent tool call |
+| `/sessions` | List recently saved CLI sessions |
+| `/init` | Generate a `CLAUDE.md` for the current project |
+| `/compact [undo]` | Summarize the conversation; `undo` restores the prior history |
 | `/approval plan\|standard\|nuke` | Switch coding-mode approval policy (coding mode only) |
 | `/update [force]` | Check for and install the latest SysControl release |
+| `/logout` | Forget the saved Ollama Cloud API key |
 | `/exit` | Quit the session |
 
 | Key | Action |
 |---|---|
+| `Enter` | Submit a single-line buffer; insert a newline once the buffer is multi-line |
+| `Ctrl+D` | Submit any non-empty buffer; exit on an empty buffer |
+| `Ctrl+C` | Cancel the in-flight LLM/tool stream (press again within 1s to exit cleanly) |
 | `↑` / `↓` | History navigation |
 | `Ctrl+R` | Reverse history search |
-| `Tab` | Complete the current slash command or argument |
+| `Tab` | Complete the current slash command, `@file`, or argument |
 | `Ctrl+L` | Clear the screen |
-| `Esc, Enter` | Insert newline (multi-line input) |
-| `Ctrl+D` | Exit the session |
+| `Esc, Enter` | Always insert a newline (alternative to letting Enter add one in multi-line mode) |
 
-History is persisted to `~/.syscontrol/cli_history` and survives restarts.
+Type `@<partial>` to pop a file picker scoped to the current directory (uses `git ls-files` when available; falls back to a recursive walk). Selected paths stay literal in the buffer and are inlined at submit time as fenced code blocks (capped at 64 KB per file).
+
+Type `!<command>` to run a shell command directly — output prints inline and the LLM is bypassed. Requires `allow_shell=true` in `~/.syscontrol/config.json`.
+
+History is persisted to `~/.syscontrol/cli_history`. Conversations auto-save to `~/.syscontrol/cli_sessions/`; resume the most recent with `syscontrol --continue` or pick from a list with `syscontrol --resume`.
 
 ### Local Mode (Ollama)
 

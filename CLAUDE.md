@@ -16,7 +16,14 @@ mcp/server.py          ← MCP server (~7400 lines, all 92 tools, JSON-RPC over 
 mcp/prompt.json        ← System prompt injected into all LLM requests
 agent/core.py          ← Shared: MCPClient, MCPClientPool, run_streaming_turn(), TurnCallbacks
 agent/bridge.py        ← JSON-over-stdio bridge for the Swift frontend
-agent/cli.py           ← Interactive terminal agent
+agent/cli.py           ← Interactive terminal agent (prompt_toolkit REPL, slash registry, /show, /init, /compact, --continue/--resume)
+agent/cli_keys.py      ← KeyBindings (Enter/Ctrl-D submit semantics) + SIGINT install_sigint_handler context manager
+agent/cli_completers.py← _SlashCompleter merge target + AtFileCompleter; submit-time @file expansion
+agent/cli_session.py   ← Atomic JSON session store at ~/.syscontrol/cli_sessions/
+agent/cli_compact.py   ← Synchronous /compact summarization with undo snapshot
+agent/credentials.py   ← Persisted Ollama Cloud API key cache (0600, ~/.syscontrol/cli_credentials.json)
+agent/updater.py       ← `syscontrol --update` / `/update` self-update via uv tool install
+agent/slash.py         ← SlashCommand dataclass + SlashRegistry consumed by cli.py
 agent/agents.py        ← Sub-agent specs: AgentSpec, AgentRegistry, 5 built-in agents
 agent/runner.py        ← Sub-agent runner: run_subagent() with isolated context + filtered tools
 deep_research/         ← Deep research agent: iterative web research with claim verification
@@ -199,7 +206,10 @@ Read specific sections, not entire files:
 | Path | Purpose |
 |---|---|
 | `~/.syscontrol/config.json` | Permission flags |
-| `~/.syscontrol/chat_history/` | Auto-saved markdown conversations |
+| `~/.syscontrol/chat_history/` | Auto-saved markdown conversations (Swift app) |
+| `~/.syscontrol/cli_sessions/` | Auto-saved JSON conversations (CLI; consumed by `--continue`/`--resume`) |
+| `~/.syscontrol/cli_history` | prompt_toolkit readline-style input history |
+| `~/.syscontrol/cli_credentials.json` | Cached Ollama Cloud API key (0600, opt-out via `--no-save-key` or `/logout`) |
 | `~/.syscontrol/SysControl_Memory.md` | Persistent session notes |
 | `~/.syscontrol/reminders.json` | Reminder entries |
 | `~/.syscontrol/build/` | Source-install clone directory |
