@@ -35,7 +35,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import ANSI, FormattedText
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
 
@@ -43,7 +43,6 @@ from agent import cli_compact, cli_session
 from agent.cli_completers import build_completer, expand_at_mentions
 from agent.cli_keys import build_key_bindings, install_sigint_handler
 from agent.core import (
-    BLUE,
     BOLD,
     CYAN,
     DIM,
@@ -73,7 +72,6 @@ from agent.core import (
     run_streaming_turn,
 )
 from agent.credentials import (
-    CREDENTIALS_FILE,
     clear_cloud_api_key,
     load_cloud_api_key,
     save_cloud_api_key,
@@ -150,15 +148,15 @@ def _append_memory_note(note: str) -> None:
 # ── Banner ────────────────────────────────────────────────────────────────────
 
 def print_banner(mode: str = "system") -> None:
-    """Print the startup banner and memory-file status to stdout."""
-    subtitle = "Your AI coding assistant" if mode == "coding" else "Your AI system monitoring assistant"
-    subtitle = subtitle[:47]
-    print(f"\n{BOLD}{CYAN}┌─────────────────────────────────────────────────────┐")
-    print("│               SysControl Agent                      │")
-    print(f"│     {subtitle:<47} │")
-    print(f"└─────────────────────────────────────────────────────┘{RESET}")
+    """Print a quiet one-line greeting (no ASCII art).
+
+    The full status (model · provider · cwd) lands on its own dim line just
+    before the REPL prompt opens.
+    """
+    role = "coding agent" if mode == "coding" else "system monitor"
+    print(f"\n{DIM}SysControl  ·  {role}{RESET}")
     if load_memory() is not None:
-        print(f"{DIM}  Memory file found — agent can recall past sessions via read_memory.{RESET}")
+        print(f"{DIM}  memory available · type /memory to add a note{RESET}")
 
 
 # ── Error classification ───────────────────────────────────────────────────────
@@ -715,13 +713,12 @@ def _resolve_cloud_api_key(args: argparse.Namespace) -> str:
 
     cached = load_cloud_api_key()
     if cached:
-        print(f"{DIM}  Using saved Ollama Cloud API key ({CREDENTIALS_FILE.name}).{RESET}")
         return cached
 
     api_key = _prompt_cloud_api_key()
     if not args.no_save_key:
         save_cloud_api_key(api_key)
-        print(f"{DIM}  Saved to {CREDENTIALS_FILE} (use /logout or --no-save-key to forget).{RESET}")
+        print(f"{DIM}  saved · /logout to forget · --no-save-key opts out{RESET}")
     return api_key
 
 
@@ -1125,23 +1122,52 @@ class _SlashCompleter(Completer):
                 yield Completion(choice, start_position=-len(tail))
 
 
-def _bottom_toolbar(ctx: ReplContext) -> Callable[[], FormattedText]:
-    """Return a closure that renders the live status strip beneath the prompt."""
+def _help_footer(ctx: ReplContext) -> Callable[[], FormattedText]:
+    """Render a Claude-Code-style slash-command list under the prompt.
+
+    Visible when the buffer is empty or begins with ``/``; collapses to a
+    single thin status line as soon as the user starts typing real text so
+    it never gets in the way of long input.
+    """
+    from prompt_toolkit.application import get_app
+
     def _render() -> FormattedText:
+        text = ""
+        with contextlib.suppress(Exception):
+            text = get_app().current_buffer.text
+
         cwd = os.path.basename(os.getcwd()) or "/"
         approval = (
-            f" · {ctx.approval_controller.mode}"
+            f"·{ctx.approval_controller.mode} "
             if ctx.cli_mode == "coding" and ctx.approval_controller is not None
             else ""
         )
-        msg_count = sum(1 for m in ctx.messages if m.get("role") in ("user", "assistant"))
-        return FormattedText([
-            ("class:tb", f" {ctx.model} · {ctx.provider_label} · {ctx.cli_mode}{approval} "),
-            ("class:tb.sep", "│ "),
-            ("class:tb", f"{cwd} · {msg_count} msgs "),
-            ("class:tb.sep", "│ "),
-            ("class:tb.hint", "/help · Enter submits · Ctrl-D submits multiline · Ctrl-C cancels"),
-        ])
+        status = (
+            f" {ctx.model} · {ctx.provider_label} · {ctx.cli_mode}{approval}"
+            f"· {cwd} "
+        )
+
+        showing_help = (not text) or text.startswith("/")
+        if not showing_help:
+            return FormattedText([
+                ("class:tb.hint", status),
+                ("class:tb.hint", "  /help · Enter submits · Ctrl-D submits multiline · Ctrl-C cancels"),
+            ])
+
+        rows: list[tuple[str, str]] = [("class:tb.hint", status + "\n")]
+        prefix = text[1:].lower() if text.startswith("/") else ""
+        commands = [c for c in ctx.registry.visible(ctx) if c.name.startswith(prefix)]
+        if not commands:
+            commands = ctx.registry.visible(ctx)
+        width = max(len(c.usage or f"/{c.name}") for c in commands)
+        for cmd in commands[:14]:
+            usage = cmd.usage or f"/{cmd.name}"
+            rows.append(("class:tb.cmd", f"  {usage:<{width}}  "))
+            rows.append(("class:tb.desc", f"{cmd.description}\n"))
+        rows.append(("class:tb.hint",
+                     "  Enter submits · Ctrl-D for multi-line · Ctrl-C cancels · @file inlines · !cmd shells"))
+        return FormattedText(rows)
+
     return _render
 
 
@@ -1155,10 +1181,11 @@ def _build_prompt_session(ctx: ReplContext) -> PromptSession:
         "completion-menu.completion.current": "bg:#0066cc #ffffff",
         "completion-menu.meta.completion": "bg:#222222 #888888",
         "completion-menu.meta.completion.current": "bg:#0066cc #cccccc",
-        "tb": "bg:#1c1c1c #cccccc",
-        "tb.sep": "bg:#1c1c1c #555555",
-        "tb.hint": "bg:#1c1c1c #888888",
-        "bottom-toolbar": "bg:#1c1c1c",
+        "tb.hint": "fg:#666666",
+        "tb.cmd": "fg:#5fafff bold",
+        "tb.desc": "fg:#aaaaaa",
+        "prompt.glyph": "fg:#5fafff bold",
+        "bottom-toolbar": "noreverse",
     })
 
     return PromptSession(
@@ -1170,14 +1197,14 @@ def _build_prompt_session(ctx: ReplContext) -> PromptSession:
         style=style,
         enable_history_search=True,
         multiline=True,
-        bottom_toolbar=_bottom_toolbar(ctx),
+        bottom_toolbar=_help_footer(ctx),
     )
 
 
 def _read_input(session: PromptSession) -> str | None:
     """Return the next user input, or None on EOF/Ctrl+D."""
     try:
-        text: str = session.prompt(ANSI(f"{BOLD}{BLUE}You:{RESET} "))
+        text: str = session.prompt(FormattedText([("class:prompt.glyph", "▎ ")]))
     except EOFError:
         return None
     except KeyboardInterrupt:
@@ -1260,14 +1287,15 @@ def _run_shell_escape(ctx: ReplContext, command: str) -> None:
 
 
 def _print_status_line(ctx: ReplContext) -> None:
-    mode_label = ""
+    """Print the single dim preamble line that opens every session."""
+    cwd = os.getcwd().replace(os.path.expanduser("~"), "~")
+    mode_suffix = ""
     if ctx.cli_mode == "coding" and ctx.approval_controller is not None:
-        mode_label = f"  ·  coding:{ctx.approval_controller.mode}"
+        mode_suffix = f" · {ctx.approval_controller.mode}"
     print(
-        f"\r{GREEN}✓{RESET} Connected — {len(ctx.tools)} tools available. "
-        f"{DIM}[{ctx.provider_label}  ·  {ctx.model}{mode_label}]{RESET}"
+        f"\r{DIM}working in {cwd}  ·  {ctx.model}  ·  "
+        f"{ctx.provider_label}  ·  {len(ctx.tools)} tools{mode_suffix}{RESET}\n"
     )
-    print(f"{DIM}  Type your request, '/' for commands, Ctrl+D to exit.{RESET}\n")
 
 
 def _repl_loop(ctx: ReplContext) -> None:
@@ -1358,8 +1386,6 @@ def main() -> None:
         sys.exit(1)
 
     api_key, base_url, model, provider_label = select_provider(args)
-
-    print(f"\n{DIM}Connecting to system monitor backend…{RESET}", end="", flush=True)
 
     mcp_client, system_prompt = _init_mcp_and_prompt()
     approval_controller: ApprovalController | None = None
