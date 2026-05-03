@@ -15,6 +15,7 @@ coder       Code editor/developer (read, search, edit code, git, shell).
 """
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
 
@@ -198,15 +199,12 @@ class AgentRegistry:
 
 
 # Lazy singleton — initialized on first access, not at import time.
-_REGISTRY: AgentRegistry | None = None
-
-
+# functools.cache uses an internal RLock, so concurrent first-calls are safe
+# without an explicit double-checked-locking pattern.
+@functools.cache
 def _get_registry() -> AgentRegistry:
     """Return the module-level AgentRegistry, creating it on first call."""
-    global _REGISTRY  # noqa: PLW0603
-    if _REGISTRY is None:
-        _REGISTRY = AgentRegistry()
-    return _REGISTRY
+    return AgentRegistry()
 
 
 def get_agent(name: str) -> AgentSpec:

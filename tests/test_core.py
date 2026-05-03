@@ -2,6 +2,7 @@
 
 
 from agent.core import (
+    TurnCallbacks,
     colorize,
     load_memory,
     mcp_to_openai_tools,
@@ -153,3 +154,98 @@ class TestLoadMemory:
         f.write_text("User prefers dark mode")
         monkeypatch.setattr(core_mod, "MEMORY_FILE", f)
         assert load_memory() == "User prefers dark mode"
+
+
+# ── TurnCallbacks defaults ─────────────────────────────────────────────────
+
+
+class TestTurnCallbacksDefaults:
+    """Regression tests: default no-op callbacks must be callable with the
+    signatures their type annotations declare. A previous version stored a
+    zero-arg outer lambda as the default, which silently broke any caller
+    that instantiated ``TurnCallbacks()`` without overriding all four hooks.
+    """
+
+    def test_on_token_default_accepts_str(self) -> None:
+        cb = TurnCallbacks()
+        cb.on_token("hello")  # must not raise
+
+    def test_on_tool_started_default_accepts_list(self) -> None:
+        cb = TurnCallbacks()
+        cb.on_tool_started(["get_cpu_usage", "get_ram_usage"])
+
+    def test_on_tool_finished_default_accepts_two_strs(self) -> None:
+        cb = TurnCallbacks()
+        cb.on_tool_finished("get_cpu_usage", '{"total_percent": 12}')
+
+    def test_on_error_default_accepts_two_strs(self) -> None:
+        cb = TurnCallbacks()
+        cb.on_error("API", "rate limited")
+
+    def test_each_instance_gets_independent_default(self) -> None:
+        a = TurnCallbacks()
+        b = TurnCallbacks()
+        # default_factory yields a fresh callable per instance — no shared mutable state.
+        assert a.on_token is not b.on_token
+
+
+# ── Sub-agent registry thread safety ───────────────────────────────────────
+
+
+class TestAgentRegistry:
+    """Sanity checks for the lazy AgentRegistry singleton."""
+
+    def test_get_returns_same_instance_under_concurrent_access(self) -> None:
+        import threading
+
+        import agent.agents as agents_mod
+
+        # Reset the cache so the test exercises the first-call path.
+        agents_mod._get_registry.cache_clear()  # noqa: SLF001 — test reaches into private state
+
+        results: list[object] = []
+        barrier = threading.Barrier(8)
+
+        def grab() -> None:
+            barrier.wait()
+            results.append(agents_mod._get_registry())  # noqa: SLF001
+
+        threads = [threading.Thread(target=grab) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        first = results[0]
+        assert all(r is first for r in results)
+
+    def test_built_in_agents_resolve(self) -> None:
+        from agent.agents import get_agent
+
+        for name in ("explorer", "analyst", "researcher", "writer", "coder"):
+            spec = get_agent(name)
+            assert spec.name == name
+
+
+# ── paths.py: import side-effects ──────────────────────────────────────────
+
+
+class TestPaths:
+    """Ensure ``import agent.paths`` does not create directories on disk."""
+
+    def test_import_does_not_create_user_data_dir(self, tmp_path, monkeypatch) -> None:
+        # Point HOME at an empty tmpdir, then re-import paths cleanly.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        import importlib
+
+        import agent.paths as paths_mod
+
+        # Reload so module-level statements run again under the new HOME.
+        importlib.reload(paths_mod)
+
+        # Module must NOT have created ~/.syscontrol on import.
+        assert not (tmp_path / ".syscontrol").exists()
+
+        # ensure_user_data_dir() is the documented opt-in.
+        paths_mod.ensure_user_data_dir()
+        assert (tmp_path / ".syscontrol").exists()

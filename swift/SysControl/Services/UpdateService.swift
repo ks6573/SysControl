@@ -166,6 +166,17 @@ final class UpdateService {
             return
         }
         let url = URL(fileURLWithPath: appPath)
+
+        // Refuse to relaunch a binary masquerading as SysControl.app.  The
+        // bundle identifier must match this running instance — otherwise a
+        // path-shadowing attacker could replace /Applications/SysControl.app
+        // and have us hand control to it.
+        guard let candidate = Bundle(url: url),
+              candidate.bundleIdentifier == Bundle.main.bundleIdentifier else {
+            status = .failed("Refusing to relaunch — /Applications/SysControl.app has an unexpected bundle identifier")
+            return
+        }
+
         let config = NSWorkspace.OpenConfiguration()
         config.createsNewApplicationInstance = true
         NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in

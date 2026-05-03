@@ -37,6 +37,7 @@ import webbrowser
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from typing import Any, TypedDict
 
 import matplotlib
 from openai import OpenAI
@@ -44,6 +45,7 @@ from openai import OpenAI
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from matplotlib.patches import Rectangle
 
 try:
     import psutil
@@ -170,31 +172,28 @@ def _get_nvml_handles() -> list:
     return _NVML_HANDLES
 
 
-# ── Reminder storage ──────────────────────────────────────────────────────────
+# ── Persistent storage paths ──────────────────────────────────────────────────
+# Single source of truth for ~/.syscontrol/* lives in agent.paths so import-time
+# side-effects are localised and the tests/test_paths contract holds globally.
+
+from agent.paths import MEMORY_FILE as _MEMORY_FILE  # noqa: E402
+from agent.paths import USER_DATA_DIR as _USER_DATA_DIR  # noqa: E402
+from agent.paths import ensure_user_data_dir as _ensure_user_data_dir  # noqa: E402
 
 _REMINDER_LOCK = threading.Lock()
-_REMINDER_DIR  = pathlib.Path.home() / ".syscontrol"
-_REMINDER_FILE = _REMINDER_DIR / "reminders.json"
+_REMINDER_FILE = _USER_DATA_DIR / "reminders.json"
 # Create the config directory once at server startup, not on every read/write.
-_REMINDER_DIR.mkdir(parents=True, exist_ok=True)
+_ensure_user_data_dir()
 
-# ── Tool self-extension constants ─────────────────────────────────────────────
-_FROZEN = getattr(sys, "frozen", False)
+_SERVER_FILE = pathlib.Path(__file__)
+_PROMPT_FILE = pathlib.Path(__file__).parent / "prompt.json"
 
-if _FROZEN:
-    # Inside a PyInstaller bundle — data files live under sys._MEIPASS
-    _BUNDLE_DIR   = pathlib.Path(sys._MEIPASS)  # type: ignore[attr-defined]
-    _SERVER_FILE  = _BUNDLE_DIR / "mcp" / "server.py"
-    _PROMPT_FILE  = _BUNDLE_DIR / "mcp" / "prompt.json"
-else:
-    _SERVER_FILE  = pathlib.Path(__file__)
-    _PROMPT_FILE  = pathlib.Path(__file__).parent / "prompt.json"
+# Detect when this server is running from inside the SysControl.app bundle —
+# the bundle's contents are read-only on next install, so create_tool /
+# self-extension features must refuse to write there.
+_BUNDLED = ".app/Contents/" in str(_SERVER_FILE)
 
-# Persistent memory file — always in the writable user-data directory.
-_USER_DATA_DIR = pathlib.Path.home() / ".syscontrol"
-_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-_MEMORY_FILE = _USER_DATA_DIR / "SysControl_Memory.md"
-_MEMORY_LOCK  = threading.Lock()
+_MEMORY_LOCK = threading.Lock()
 # Marker prepended to each user-defined function block in this file.
 _USER_TOOL_FN_MARKER  = "# ── User-Defined Tool:"
 # Anchor comment inside the TOOLS dict where new entries are inserted.
@@ -204,13 +203,27 @@ _REMINDER_STARTED = False
 
 
 def _load_reminders() -> list:
-    """Load reminders from disk. Creates file if missing. Must be called under _REMINDER_LOCK."""
+    """Load reminders from disk.  Must be called under ``_REMINDER_LOCK``.
+
+    On JSON corruption the broken file is preserved as ``reminders.json.corrupt``
+    so the next save cannot silently wipe a recoverable state, and a warning
+    is written to stderr.
+    """
     if not _REMINDER_FILE.exists():
         return []
     try:
-        return json.loads(_REMINDER_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
+        loaded = json.loads(_REMINDER_FILE.read_text())
+    except OSError as exc:
+        sys.stderr.write(f"[syscontrol] reminders.json read failed: {exc}\n")
         return []
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(
+            f"[syscontrol] reminders.json is corrupt; preserving as .corrupt: {exc}\n"
+        )
+        with contextlib.suppress(OSError):
+            _REMINDER_FILE.rename(_REMINDER_FILE.with_suffix(".json.corrupt"))
+        return []
+    return loaded if isinstance(loaded, list) else []
 
 
 def _save_reminders(reminders: list) -> None:
@@ -282,20 +295,20 @@ class ReminderChecker:
             f'display notification {json.dumps(message)} '
             f'with title "SysControl Reminder" sound name "default"'
         )
-        log_path = pathlib.Path.home() / ".syscontrol" / "reminder_log.txt"
+        log_path = _USER_DATA_DIR / "reminder_log.txt"
         try:
             proc = subprocess.run(
                 ["osascript", "-e", script],
                 capture_output=True, text=True, timeout=5,
             )
             if proc.returncode != 0:
-                log_path.parent.mkdir(parents=True, exist_ok=True)
+                _ensure_user_data_dir()
                 with log_path.open("a") as f:
                     ts = datetime.datetime.now().isoformat(timespec="seconds")
                     f.write(f"[{ts}] osascript failed (rc={proc.returncode}): {proc.stderr.strip()}\n")
         except Exception as exc:
             try:
-                log_path.parent.mkdir(parents=True, exist_ok=True)
+                _ensure_user_data_dir()
                 with log_path.open("a") as f:
                     ts = datetime.datetime.now().isoformat(timespec="seconds")
                     f.write(f"[{ts}] _fire exception: {exc}\n")
@@ -718,11 +731,13 @@ def _cpu_with_chart() -> dict | tuple[dict, str]:
         ax.set_yticklabels(labels, color=_CHART_TEXT_COLOR)
         _style_chart_dark(fig, ax)
         fig.tight_layout()
-        return data, _fig_to_b64(fig)
+        encoded = _fig_to_b64(fig)
+        return data, encoded
     except Exception as exc:
         sys.stderr.write(f"[syscontrol] _cpu_with_chart rendering failed: {exc}\n")
-        plt.close(fig)
         return data
+    finally:
+        plt.close(fig)
 
 
 def _ram_with_chart() -> dict | tuple[dict, str]:
@@ -743,17 +758,21 @@ def _ram_with_chart() -> dict | tuple[dict, str]:
                   labelcolor=_CHART_TEXT_COLOR)
         ax.set_yticklabels(labels, color=_CHART_TEXT_COLOR)
         for bar in ax.patches:
+            if not isinstance(bar, Rectangle):
+                continue
             w = bar.get_width()
             if w > 0.3:
                 ax.text(bar.get_x() + w / 2, bar.get_y() + bar.get_height() / 2,
                         f"{w:.1f} GB", ha="center", va="center", fontsize=7, color="white")
         _style_chart_dark(fig, ax)
         fig.tight_layout()
-        return data, _fig_to_b64(fig)
+        encoded = _fig_to_b64(fig)
+        return data, encoded
     except Exception as exc:
         sys.stderr.write(f"[syscontrol] _ram_with_chart rendering failed: {exc}\n")
-        plt.close(fig)
         return data
+    finally:
+        plt.close(fig)
 
 
 def _gpu_with_chart() -> dict | tuple[dict, str]:
@@ -779,11 +798,13 @@ def _gpu_with_chart() -> dict | tuple[dict, str]:
                   labelcolor=_CHART_TEXT_COLOR)
         _style_chart_dark(fig, ax)
         fig.tight_layout()
-        return data, _fig_to_b64(fig)
+        encoded = _fig_to_b64(fig)
+        return data, encoded
     except Exception as exc:
         sys.stderr.write(f"[syscontrol] _gpu_with_chart rendering failed: {exc}\n")
-        plt.close(fig)
         return data
+    finally:
+        plt.close(fig)
 
 
 def get_hardware_profile(use_case: str = "") -> dict:
@@ -1069,10 +1090,9 @@ def _get_startup_items_macos() -> dict:
 
 def _get_startup_items_windows() -> dict:
     """Return startup entries from the Windows registry Run keys."""
-    try:
-        import winreg
-    except ImportError:
+    if sys.platform != "win32":
         return {"platform": "Windows", "error": "winreg not available", "items": [], "count": 0}
+    import winreg
 
     items: list[dict] = []
     run_keys = [
@@ -1570,7 +1590,8 @@ def _fetch_openmeteo(
     with urllib.request.urlopen(
         f"https://api.open-meteo.com/v1/forecast?{params}", timeout=10
     ) as r:
-        return json.loads(r.read().decode())
+        result: dict = json.loads(r.read().decode())
+        return result
 
 
 def get_weather(location: str = "", units: str = "imperial") -> dict:
@@ -2488,7 +2509,7 @@ def tail_system_logs(lines: int = 50, filter_str: str = "") -> dict:
 
 # ── Browser / Web tools ──────────────────────────────────────────────────────
 
-_BROWSER_PERMISSION_FILE = pathlib.Path.home() / ".syscontrol" / "browser_permission"
+_BROWSER_PERMISSION_FILE = _USER_DATA_DIR / "browser_permission"
 
 # Browsers the AppleScript helpers know how to talk to, in preference order.
 # Arc, Brave, and Edge all use the Chrome AppleScript dictionary.
@@ -2556,7 +2577,7 @@ def grant_browser_access() -> dict:
     ONLY call this after the user has explicitly said yes.
     """
     try:
-        _BROWSER_PERMISSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_user_data_dir()
         _BROWSER_PERMISSION_FILE.write_text("granted")
         browser = _running_browser()
         return {
@@ -2629,7 +2650,7 @@ def web_fetch(url: str, max_chars: int = 8000) -> dict:
         text = _strip_html(html, max_chars)
         return {
             "url": url,
-            "status": r.status,   # type: ignore[possibly-undefined]
+            "status": r.status,
             "content_length": len(text),
             "text": text,
             "truncated": len(text) == max_chars,
@@ -2922,30 +2943,28 @@ def send_imessage(recipient: str, message: str) -> dict:
 def _query_imessage_db(db_path: "pathlib.Path", contact_q: str, limit: int) -> list[dict]:
     """Query chat.db read-only and return a list of message dicts (newest first)."""
     import sqlite3 as _sqlite3
-    conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
-    conn.row_factory = _sqlite3.Row
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT
-            m.text,
-            m.is_from_me,
-            datetime(m.date / 1000000000 + strftime('%s','2001-01-01'), 'unixepoch', 'localtime') AS sent_at,
-            h.id AS handle
-        FROM message m
-        JOIN chat_message_join cmj ON cmj.message_id = m.rowid
-        JOIN chat c ON c.rowid = cmj.chat_id
-        JOIN chat_handle_join chj ON chj.chat_id = c.rowid
-        JOIN handle h ON h.rowid = chj.handle_id
-        WHERE h.id LIKE ?
-          AND m.text IS NOT NULL AND m.text != ''
-        ORDER BY m.date DESC
-        LIMIT ?
-        """,
-        (contact_q, limit),
-    )
-    rows = cur.fetchall()
-    conn.close()
+    from contextlib import closing
+    with closing(_sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)) as conn:
+        conn.row_factory = _sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                m.text,
+                m.is_from_me,
+                datetime(m.date / 1000000000 + strftime('%s','2001-01-01'), 'unixepoch', 'localtime') AS sent_at,
+                h.id AS handle
+            FROM message m
+            JOIN chat_message_join cmj ON cmj.message_id = m.rowid
+            JOIN chat c ON c.rowid = cmj.chat_id
+            JOIN chat_handle_join chj ON chj.chat_id = c.rowid
+            JOIN handle h ON h.rowid = chj.handle_id
+            WHERE h.id LIKE ?
+              AND m.text IS NOT NULL AND m.text != ''
+            ORDER BY m.date DESC
+            LIMIT ?
+            """,
+            (contact_q, limit),
+        ).fetchall()
     return [
         {"from": "me" if r["is_from_me"] else r["handle"], "text": r["text"], "sent_at": r["sent_at"]}
         for r in rows
@@ -3365,7 +3384,7 @@ def get_volume() -> dict:
             return {"error": proc.stderr.strip()}
         # Output format: "output volume:75, input volume:54, alert volume:100, output muted:false"
         raw = proc.stdout.strip()
-        result = {}
+        result: dict[str, str | int | bool] = {}
         for part in raw.split(","):
             part = part.strip()
             if ":" in part:
@@ -3802,7 +3821,7 @@ def glob_files(pattern: str, path: str = ".") -> dict:
                 files.append({
                     "path": str(p),
                     "size_bytes": st.st_size,
-                    "modified": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+                    "modified": datetime.datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
                 })
             except OSError:
                 continue
@@ -3819,7 +3838,7 @@ def glob_files(pattern: str, path: str = ".") -> dict:
 
 def _grep_single_file(
     p: pathlib.Path,
-    regex: re.Pattern,  # type: ignore[type-arg]
+    regex: re.Pattern,
     context_lines: int,
 ) -> list[dict]:
     """Search a single file for regex matches, returning results with context."""
@@ -3970,7 +3989,7 @@ def _parse_git_porcelain(output: str) -> dict[str, list[str]]:
     return {"staged": staged, "unstaged": unstaged, "untracked": untracked}
 
 
-def _run_git(args: list[str], cwd: str, timeout: int = 10) -> subprocess.CompletedProcess:  # type: ignore[type-arg]
+def _run_git(args: list[str], cwd: str, timeout: int = 10) -> subprocess.CompletedProcess:
     """Run a git command and return the CompletedProcess."""
     return subprocess.run(
         ["git"] + args, capture_output=True, text=True, timeout=timeout, cwd=cwd,
@@ -4270,7 +4289,7 @@ def read_document(path: str) -> dict:
         else:
             return {"error": f"Unsupported file type '{suffix}'. Supported: .docx, .txt, .md"}
 
-        word_count = sum(len(para["text"].split()) for para in paragraphs)
+        word_count = sum(len(str(para["text"]).split()) for para in paragraphs)
         return {"path": str(p), "paragraphs": paragraphs, "word_count": word_count}
     except PermissionError:
         return {"error": f"Permission denied: {path}"}
@@ -4837,7 +4856,7 @@ def _run_deep_research(
 #     "allow_clipboard":       true
 #   }
 
-_SYSCONTROL_CONFIG_FILE = _REMINDER_DIR / "config.json"
+_SYSCONTROL_CONFIG_FILE = _USER_DATA_DIR / "config.json"
 
 
 _CONFIG_CACHE: dict = {}
@@ -5408,7 +5427,7 @@ def eject_disk(mountpoint: str) -> dict:
 
 def list_user_tools() -> dict:
     """Return all user-installed tools (created via create_tool)."""
-    if _FROZEN:
+    if _BUNDLED:
         return {"count": 0, "user_tools": [], "note": "Tool creation is not available in the bundled app."}
     text  = _SERVER_FILE.read_text()
     names = [
@@ -5442,6 +5461,7 @@ def append_memory_note(note: str) -> dict:
         return {"error": "Note is empty — nothing saved."}
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     entry = f"\n- [{timestamp}] {note.strip()}\n"
+    _ensure_user_data_dir()
     with _MEMORY_LOCK, _MEMORY_FILE.open("a", encoding="utf-8") as fh:
         if _HAS_FCNTL:
             _fcntl.flock(fh, _fcntl.LOCK_EX)
@@ -5687,7 +5707,7 @@ def create_tool(
 
     Requires allow_tool_creation: true in ~/.syscontrol/config.json.
     """
-    if _FROZEN:
+    if _BUNDLED:
         return {
             "error": (
                 "create_tool is not available in the bundled .app — "
@@ -5728,7 +5748,22 @@ def create_tool(
 
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
-TOOLS = {
+
+class ToolEntry(TypedDict):
+    """Schema for a single entry in the ``TOOLS`` dispatch table.
+
+    ``fn`` accepts the JSON-RPC ``arguments`` dict and returns either a
+    plain JSON-serialisable value (``dict``, ``list``, etc.) or a
+    ``(data, base64_png)`` tuple when the tool produces an inline chart.
+    """
+
+    description: str
+    parallel: bool
+    inputSchema: dict[str, Any]
+    fn: Callable[[dict], Any]
+
+
+TOOLS: dict[str, ToolEntry] = {
     "get_cpu_usage": {
         "description": "Returns CPU usage percentage (total and per-core), core count, and frequency, with an inline bar chart.",
         "parallel": True,

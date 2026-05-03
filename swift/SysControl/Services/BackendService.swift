@@ -18,6 +18,7 @@ final class BackendService: @unchecked Sendable {
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
     private var readTask: Task<Void, Never>?
+    private let writeQueue = DispatchQueue(label: "com.syscontrol.backend.stdin")
 
     init() {
         onToolFinished = { _, _ in }
@@ -118,7 +119,18 @@ final class BackendService: @unchecked Sendable {
     }
 
     func shutdown() {
-        sendCommand(["type": "shutdown"])
+        // Send shutdown synchronously so the bytes flush before SIGTERM —
+        // the async writeQueue used by sendCommand could otherwise be drained
+        // *after* terminate(), in which case the bridge never sees the message.
+        if let pipe = stdinPipe,
+           let data = try? JSONSerialization.data(withJSONObject: ["type": "shutdown"]),
+           var json = String(data: data, encoding: .utf8) {
+            json += "\n"
+            if let payload = json.data(using: .utf8) {
+                let writeHandle = pipe.fileHandleForWriting
+                writeQueue.sync { writeHandle.write(payload) }
+            }
+        }
         readTask?.cancel()
         process?.terminate()
         process = nil
@@ -169,7 +181,13 @@ final class BackendService: @unchecked Sendable {
               var json = String(data: data, encoding: .utf8) else { return }
         json += "\n"
         guard let payload = json.data(using: .utf8) else { return }
-        pipe.fileHandleForWriting.write(payload)
+        // FileHandle.write is not thread-safe — concurrent calls from the
+        // main actor and any background task can interleave bytes and produce
+        // malformed JSON lines that the bridge cannot parse.  Serialise.
+        let writeHandle = pipe.fileHandleForWriting
+        writeQueue.async {
+            writeHandle.write(payload)
+        }
     }
 
     private static let newlineByte: UInt8 = 0x0A

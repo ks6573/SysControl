@@ -13,7 +13,7 @@ Protocol (stdin → bridge):
     {"type":"shutdown"}
 
 Protocol (bridge → stdout):
-    {"type":"ready","tool_count":57,"model":"..."}
+    {"type":"ready","tool_count":91,"model":"..."}
     {"type":"token","text":"Hello"}
     {"type":"tool_started","names":["get_cpu_usage"]}
     {"type":"tool_finished","name":"get_cpu_usage","result":"..."}
@@ -36,13 +36,12 @@ from openai import OpenAI
 
 from agent.core import (
     LOCAL_BASE_URL,
-    RESPONSE_STYLE_GUIDANCE,
     MCPClient,
     MCPClientPool,
     TurnCallbacks,
+    build_full_system_prompt,
     llm_client_max_retries,
     llm_client_timeout,
-    load_memory,
     load_system_prompt,
     mcp_to_openai_tools,
     run_streaming_turn,
@@ -187,23 +186,9 @@ def _initialise_agent() -> tuple[MCPClientPool, list[dict], dict]:
     mcp_tools = mcp_client.list_tools()
     tools     = mcp_to_openai_tools(mcp_tools)
 
-    system_prompt  = load_system_prompt()
-    tool_names     = [t["function"]["name"] for t in tools]
-    tool_list_block = (
-        "\n\n---\n\n# Available Tools\n\n"
-        "You have access to the following tools (call them by name):\n"
-        + "\n".join(f"- {n}" for n in tool_names)
-    )
-    full_system = system_prompt + tool_list_block
-    if load_memory() is not None:
-        full_system += (
-            "\n\n---\n\n# Memory\n\n"
-            "A persistent memory file exists with notes from past sessions. "
-            "Call `read_memory` when the user references something from a previous session, "
-            "asks what you remember, or when prior context seems relevant. "
-            "Call `append_memory_note` to save a key fact mid-session without waiting for exit."
-        )
-    full_system += RESPONSE_STYLE_GUIDANCE
+    system_prompt = load_system_prompt()
+    tool_names    = [t["function"]["name"] for t in tools]
+    full_system   = build_full_system_prompt(system_prompt, tool_names)
 
     system_message = {"role": "system", "content": full_system}
     return pool, tools, system_message
@@ -361,7 +346,15 @@ def _event_loop(
                 session_histories.clear()
                 _emit({"type": "session_cleared"})
         elif cmd_type == "configure":
-            # Allow runtime reconfiguration of provider.
+            # Allow runtime reconfiguration of provider.  Cancel and wait for
+            # any in-flight turn before swapping the client and clearing
+            # history, otherwise the active turn can read stale or empty state
+            # mid-stream.  Cancelling first means a stuck LLM call doesn't
+            # block configure indefinitely.
+            if turn_thread is not None:
+                _cancel_registry.cancel()
+                turn_thread.join()
+                turn_thread = None
             api_key = cmd.get("api_key", llm.api_key)
             base_url = cmd.get("base_url", str(llm.base_url))
             model = cmd.get("model", model)
