@@ -70,6 +70,7 @@ from agent.core import (
 from agent.paths import MEMORY_FILE, USER_DATA_DIR, ensure_user_data_dir
 from agent.runner import close_subagent_pool
 from agent.slash import CONTINUE, EXIT, SlashCommand, SlashRegistry, SlashResult, parse
+from agent.updater import check_for_update, current_version, update_via_uv
 
 # ── Memory ────────────────────────────────────────────────────────────────────
 
@@ -604,6 +605,14 @@ def parse_args() -> argparse.Namespace:
         default="standard",
         help="Coding-mode approval policy: plan is read-only, standard asks before risky tools, nuke auto-accepts.",
     )
+    parser.add_argument(
+        "--update", action="store_true",
+        help="Check for and install the latest SysControl release, then exit.",
+    )
+    parser.add_argument(
+        "--version", action="store_true",
+        help="Print the installed SysControl version and exit.",
+    )
     return parser.parse_args()
 
 
@@ -801,6 +810,54 @@ def _cmd_exit(_ctx: ReplContext, _args: str) -> SlashResult:
     return EXIT
 
 
+def _cmd_update(_ctx: ReplContext, args: str) -> SlashResult:
+    force = args.strip().lower() in {"force", "-f", "--force"}
+    info = check_for_update()
+    print(f"\n{BOLD}SysControl{RESET} {DIM}v{info.current}{RESET}")
+    if info.error:
+        print(f"{YELLOW}Could not reach GitHub: {info.error}{RESET}\n")
+        return CONTINUE
+    if info.latest:
+        print(f"{DIM}  Latest release: v{info.latest}{RESET}")
+    if not info.is_newer and not force:
+        print(f"{GREEN}✓ Already on the latest release.{RESET} "
+              f"{DIM}(use '/update force' to reinstall){RESET}\n")
+        return CONTINUE
+
+    print(f"{DIM}  Running: uv tool install --force git+{REPO_URL_DISPLAY}{RESET}")
+    ok, msg = update_via_uv()
+    print()
+    if ok:
+        print(f"{GREEN}✓ Updated.{RESET} {DIM}Restart the CLI to load the new version.{RESET}\n")
+    else:
+        print(f"{YELLOW}Update failed:{RESET} {msg}\n")
+    return CONTINUE
+
+
+REPO_URL_DISPLAY = "https://github.com/ks6573/SysControl.git"
+
+
+def _run_update_flow() -> int:
+    """Shell-mode entry for `syscontrol --update`. Returns a process exit code."""
+    info = check_for_update()
+    print(f"{BOLD}SysControl{RESET} {DIM}v{info.current}{RESET}")
+    if info.error:
+        print(f"{YELLOW}Could not reach GitHub: {info.error}{RESET}")
+        return 1
+    if info.latest:
+        print(f"{DIM}  Latest release: v{info.latest}{RESET}")
+    if not info.is_newer:
+        print(f"{GREEN}✓ Already on the latest release.{RESET}")
+        return 0
+    print(f"{DIM}  Running: uv tool install --force git+{REPO_URL_DISPLAY}{RESET}")
+    ok, msg = update_via_uv()
+    if ok:
+        print(f"{GREEN}✓ Updated.{RESET} {DIM}Restart the CLI to load the new version.{RESET}")
+        return 0
+    print(f"{YELLOW}Update failed:{RESET} {msg}")
+    return 1
+
+
 def _cmd_approval(ctx: ReplContext, args: str) -> SlashResult:
     mode = args.strip().lower()
     if mode not in APPROVAL_GUIDANCE:
@@ -830,6 +887,9 @@ def _build_registry(coding: bool) -> SlashRegistry:
                               _cmd_model, usage="/model"))
     reg.register(SlashCommand("memory", "Append a note to SysControl_Memory.md",
                               _cmd_memory, usage="/memory <note>"))
+    reg.register(SlashCommand("update", "Check for and install the latest SysControl release",
+                              _cmd_update, usage="/update [force]",
+                              arg_choices=("force",)))
     reg.register(SlashCommand("exit", "Quit the session", _cmd_exit,
                               usage="/exit", aliases=("quit", "bye")))
     if coding:
@@ -995,6 +1055,11 @@ def _repl_loop(ctx: ReplContext) -> None:
 def main() -> None:
     """CLI entry point."""
     args = parse_args()
+    if args.version:
+        print(f"syscontrol {current_version()}")
+        return
+    if args.update:
+        sys.exit(_run_update_flow())
     if args.coding:
         args.mode = "coding"
     print_banner(args.mode)

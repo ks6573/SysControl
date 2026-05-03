@@ -88,7 +88,7 @@ A terminal agent that runs the same backend as the app. Two install paths:
 
 Installs `uv` if missing, then runs `uv tool install` against the GitHub repo, exposing `syscontrol` and `syscontrol-server` on your `PATH` in an isolated venv. No clone required.
 
-To update later: `syscontrol-cli-update`
+To update later: run `syscontrol --update` (or `/update` inside the REPL); the standalone `syscontrol-cli-update` script is also still installed.
 
 To uninstall: re-run with `-- --uninstall`.
 
@@ -147,6 +147,7 @@ The interactive CLI supports a built-in slash menu (type `/` to pop the completi
 | `/model` | Show the active model and provider |
 | `/memory <note>` | Append a timestamped note to `SysControl_Memory.md` |
 | `/approval plan\|standard\|nuke` | Switch coding-mode approval policy (coding mode only) |
+| `/update [force]` | Check for and install the latest SysControl release |
 | `/exit` | Quit the session |
 
 | Key | Action |
@@ -534,8 +535,10 @@ After installing via the [one-liner](#cli) (or `pip install -e .` from a clone):
 | Script | Description |
 |---|---|
 | `syscontrol` | Interactive CLI agent |
+| `syscontrol --update` | Check for and install the latest release in place |
+| `syscontrol --version` | Print the installed version and exit |
 | `syscontrol-server` | MCP server (stdio) |
-| `syscontrol-cli-update` | Reinstall the CLI from the latest master |
+| `syscontrol-cli-update` | Standalone updater script (same as `syscontrol --update`) |
 
 From a clone without installing, use `uv run`:
 
