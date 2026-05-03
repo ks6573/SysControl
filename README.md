@@ -134,6 +134,32 @@ git status/diff, and shell commands. Approval modes:
 
 Inside coding mode, use `/approval plan`, `/approval standard`, or `/approval nuke` to switch policies.
 
+### Slash Commands & Keyboard Shortcuts
+
+The interactive CLI supports a built-in slash menu (type `/` to pop the completion list) and standard editor key bindings.
+
+| Command | Description |
+|---|---|
+| `/help` | Show all commands and keyboard shortcuts |
+| `/clear` | Clear the screen |
+| `/reset` | Clear conversation history (keeps system prompt) |
+| `/tools [filter]` | List available tools, optionally filtered by substring |
+| `/model` | Show the active model and provider |
+| `/memory <note>` | Append a timestamped note to `SysControl_Memory.md` |
+| `/approval plan\|standard\|nuke` | Switch coding-mode approval policy (coding mode only) |
+| `/exit` | Quit the session |
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | History navigation |
+| `Ctrl+R` | Reverse history search |
+| `Tab` | Complete the current slash command or argument |
+| `Ctrl+L` | Clear the screen |
+| `Esc, Enter` | Insert newline (multi-line input) |
+| `Ctrl+D` | Exit the session |
+
+History is persisted to `~/.syscontrol/cli_history` and survives restarts.
+
 ### Local Mode (Ollama)
 
 ```bash

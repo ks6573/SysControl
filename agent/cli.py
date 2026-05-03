@@ -23,9 +23,19 @@ import json
 import sys
 import threading
 import time
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from openai import OpenAI
+from prompt_toolkit import PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style
 
 from agent.core import (
     BLUE,
@@ -59,6 +69,7 @@ from agent.core import (
 )
 from agent.paths import MEMORY_FILE, USER_DATA_DIR, ensure_user_data_dir
 from agent.runner import close_subagent_pool
+from agent.slash import CONTINUE, EXIT, SlashCommand, SlashRegistry, SlashResult, parse
 
 # ── Memory ────────────────────────────────────────────────────────────────────
 
@@ -713,95 +724,257 @@ def _init_mcp_and_prompt() -> tuple[MCPClient, str]:
     return mcp_client, system_prompt
 
 
-def _repl_loop(
-    ollama_client: OpenAI,
-    pool: MCPClientPool,
-    tools: list[dict],
-    system_message: dict,
-    model: str,
-    provider_label: str,
-    cli_mode: str = "system",
-    approval_controller: ApprovalController | None = None,
-    base_system_prompt: str | None = None,
-) -> None:
-    """Interactive read-eval-print loop for the CLI agent.
+@dataclass
+class ReplContext:
+    """Mutable session state shared between the REPL loop and slash handlers."""
 
-    Args:
-        ollama_client: OpenAI-compatible LLM client.
-        pool: MCP client pool for tool execution.
-        tools: Tool definitions in OpenAI format.
-        system_message: Pre-built system message dict.
-        model: Model identifier string.
-        provider_label: Human-readable provider name for the status line.
-    """
-    mode_label = ""
-    if cli_mode == "coding" and approval_controller is not None:
-        mode_label = f"  ·  coding:{approval_controller.mode}"
-    print(
-        f"\r{GREEN}✓{RESET} Connected — {len(tools)} tools available. "
-        f"{DIM}[{provider_label}  ·  {model}{mode_label}]{RESET}"
+    ollama_client: OpenAI
+    pool: MCPClientPool
+    tools: list[dict]
+    system_message: dict
+    model: str
+    provider_label: str
+    cli_mode: str = "system"
+    approval_controller: ApprovalController | None = None
+    base_system_prompt: str | None = None
+    messages: list[dict] = field(default_factory=list)
+    registry: SlashRegistry = field(default_factory=SlashRegistry)
+
+
+# ── Slash commands ───────────────────────────────────────────────────────────
+
+def _cmd_help(ctx: ReplContext, _args: str) -> SlashResult:
+    width = max(len(c.usage or f"/{c.name}") for c in ctx.registry.visible(ctx))
+    print(f"\n{BOLD}Commands{RESET}")
+    for cmd in ctx.registry.visible(ctx):
+        usage = cmd.usage or f"/{cmd.name}"
+        print(f"  {CYAN}{usage:<{width}}{RESET}   {cmd.description}")
+    print(f"\n{BOLD}Keyboard{RESET}")
+    print(f"  {CYAN}↑/↓{RESET}            History     {CYAN}Ctrl+R{RESET}     Reverse-search")
+    print(f"  {CYAN}Tab{RESET}            Complete    {CYAN}Ctrl+L{RESET}     Clear screen")
+    print(f"  {CYAN}Esc, Enter{RESET}     Newline     {CYAN}Ctrl+D{RESET}     Exit\n")
+    return CONTINUE
+
+
+def _cmd_clear(_ctx: ReplContext, _args: str) -> SlashResult:
+    print("\033[2J\033[H", end="")
+    return CONTINUE
+
+
+def _cmd_reset(ctx: ReplContext, _args: str) -> SlashResult:
+    ctx.messages.clear()
+    print(f"{GREEN}✓ Conversation history cleared.{RESET}\n")
+    return CONTINUE
+
+
+def _cmd_tools(ctx: ReplContext, args: str) -> SlashResult:
+    needle = args.strip().lower()
+    names = sorted(t["function"]["name"] for t in ctx.tools)
+    if needle:
+        names = [n for n in names if needle in n.lower()]
+    if not names:
+        print(f"{DIM}No tools matched '{needle}'.{RESET}\n")
+        return CONTINUE
+    print(f"{BOLD}{len(names)} tool(s){RESET}")
+    for n in names:
+        print(f"  {n}")
+    print()
+    return CONTINUE
+
+
+def _cmd_model(ctx: ReplContext, _args: str) -> SlashResult:
+    print(f"{DIM}model: {ctx.model}  ·  {ctx.provider_label}{RESET}\n")
+    return CONTINUE
+
+
+def _cmd_memory(_ctx: ReplContext, args: str) -> SlashResult:
+    note = args.strip()
+    if not note:
+        print(f"{YELLOW}Usage: /memory <note text>{RESET}\n")
+        return CONTINUE
+    _append_memory_note(note)
+    print()
+    return CONTINUE
+
+
+def _cmd_exit(_ctx: ReplContext, _args: str) -> SlashResult:
+    return EXIT
+
+
+def _cmd_approval(ctx: ReplContext, args: str) -> SlashResult:
+    mode = args.strip().lower()
+    if mode not in APPROVAL_GUIDANCE:
+        print(f"{YELLOW}Usage: /approval plan|standard|nuke{RESET}\n")
+        return CONTINUE
+    assert ctx.approval_controller is not None
+    ctx.approval_controller.set_mode(mode)
+    ctx.pool.set_tool_approver(ctx.approval_controller.approve)
+    ensure_coding_permissions(mode)
+    if ctx.base_system_prompt is not None:
+        ctx.system_message = _coding_system_message(ctx.base_system_prompt, mode)
+    print(f"{GREEN}✓ Coding approval mode is now {mode}.{RESET}\n")
+    return CONTINUE
+
+
+def _build_registry(coding: bool) -> SlashRegistry:
+    """Build the slash-command registry for the current CLI profile."""
+    reg = SlashRegistry()
+    reg.register(SlashCommand("help", "Show available commands and shortcuts",
+                              _cmd_help, usage="/help", aliases=("?",)))
+    reg.register(SlashCommand("clear", "Clear the screen", _cmd_clear, usage="/clear"))
+    reg.register(SlashCommand("reset", "Clear conversation history (keeps system prompt)",
+                              _cmd_reset, usage="/reset"))
+    reg.register(SlashCommand("tools", "List available tools (optional substring filter)",
+                              _cmd_tools, usage="/tools [filter]"))
+    reg.register(SlashCommand("model", "Show the active model and provider",
+                              _cmd_model, usage="/model"))
+    reg.register(SlashCommand("memory", "Append a note to SysControl_Memory.md",
+                              _cmd_memory, usage="/memory <note>"))
+    reg.register(SlashCommand("exit", "Quit the session", _cmd_exit,
+                              usage="/exit", aliases=("quit", "bye")))
+    if coding:
+        reg.register(SlashCommand(
+            "approval", "Switch coding-mode approval policy",
+            _cmd_approval, usage="/approval plan|standard|nuke",
+            aliases=("mode",), arg_choices=tuple(APPROVAL_GUIDANCE.keys()),
+        ))
+    return reg
+
+
+# ── prompt_toolkit integration ───────────────────────────────────────────────
+
+class _SlashCompleter(Completer):
+    """Pop a completion menu when the user types `/<name>` or `/<name> <arg>`."""
+
+    def __init__(self, ctx: ReplContext) -> None:
+        self._ctx = ctx
+
+    def get_completions(
+        self, document: Document, _complete_event: CompleteEvent,
+    ) -> Iterable[Completion]:
+        text = document.text_before_cursor
+        if not text.startswith("/"):
+            return
+        head, sep, tail = text[1:].partition(" ")
+        if not sep:
+            partial = head.lower()
+            for cmd in self._ctx.registry.visible(self._ctx):
+                for key in (cmd.name, *cmd.aliases):
+                    if key.startswith(partial):
+                        yield Completion(
+                            f"/{key}",
+                            start_position=-len(text),
+                            display_meta=cmd.description,
+                        )
+                        break
+            return
+        match = self._ctx.registry.get(head.lower())
+        if match is None or not match.arg_choices:
+            return
+        partial = tail.lower()
+        for choice in match.arg_choices:
+            if choice.startswith(partial):
+                yield Completion(choice, start_position=-len(tail))
+
+
+def _build_prompt_session(ctx: ReplContext) -> PromptSession:
+    """Configure prompt_toolkit with history, key bindings, and slash completion."""
+    ensure_user_data_dir()
+    history = FileHistory(str(USER_DATA_DIR / "cli_history"))
+    bindings = KeyBindings()
+
+    @bindings.add("c-l")
+    def _clear_screen(event: object) -> None:
+        print("\033[2J\033[H", end="", flush=True)
+        event.app.invalidate()  # type: ignore[attr-defined]
+
+    @bindings.add("escape", "enter")
+    def _insert_newline(event: object) -> None:
+        event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
+
+    style = Style.from_dict({"completion-menu.completion": "bg:#222222 #cccccc",
+                             "completion-menu.completion.current": "bg:#0066cc #ffffff",
+                             "completion-menu.meta.completion": "bg:#222222 #888888",
+                             "completion-menu.meta.completion.current": "bg:#0066cc #cccccc"})
+
+    return PromptSession(
+        history=history,
+        completer=_SlashCompleter(ctx),
+        complete_while_typing=True,
+        auto_suggest=AutoSuggestFromHistory(),
+        key_bindings=bindings,
+        style=style,
+        enable_history_search=True,
+        multiline=False,
     )
-    print(f"{DIM}  Type your request, /help for commands, or 'exit' / 'bye' / 'goodbye' to quit.{RESET}\n")
 
-    messages: list[dict] = []
+
+def _read_input(session: PromptSession) -> str | None:
+    """Return the next user input, or None on EOF/Ctrl+D."""
+    try:
+        text: str = session.prompt(ANSI(f"{BOLD}{BLUE}You:{RESET} "))
+    except EOFError:
+        return None
+    except KeyboardInterrupt:
+        return ""  # Ctrl+C at the prompt clears it; keep looping
+    return text.strip()
+
+
+def _dispatch_slash(ctx: ReplContext, raw: str) -> SlashResult:
+    name, args = parse(raw)
+    cmd = ctx.registry.get(name)
+    if cmd is None:
+        print(f"{YELLOW}Unknown command '/{name}'. Type /help for options.{RESET}\n")
+        return CONTINUE
+    return cmd.handler(ctx, args)
+
+
+def _print_status_line(ctx: ReplContext) -> None:
+    mode_label = ""
+    if ctx.cli_mode == "coding" and ctx.approval_controller is not None:
+        mode_label = f"  ·  coding:{ctx.approval_controller.mode}"
+    print(
+        f"\r{GREEN}✓{RESET} Connected — {len(ctx.tools)} tools available. "
+        f"{DIM}[{ctx.provider_label}  ·  {ctx.model}{mode_label}]{RESET}"
+    )
+    print(f"{DIM}  Type your request, '/' for commands, Ctrl+D to exit.{RESET}\n")
+
+
+def _repl_loop(ctx: ReplContext) -> None:
+    """Interactive read-eval-print loop for the CLI agent."""
+    _print_status_line(ctx)
+    session = _build_prompt_session(ctx)
 
     while True:
-        try:
-            user_input = input(f"{BOLD}{BLUE}You:{RESET} ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n{DIM}Goodbye!{RESET}")
-            offer_memory_save(messages)
+        user_input = _read_input(session)
+        if user_input is None:
+            print(f"{DIM}Goodbye!{RESET}")
+            offer_memory_save(ctx.messages)
             break
-
         if not user_input:
             continue
 
         if user_input.startswith("/"):
-            cmd, _, value = user_input[1:].partition(" ")
-            cmd = cmd.strip().lower()
-            value = value.strip().lower()
-            if cmd in {"help", "?"}:
-                print(f"{BOLD}Commands:{RESET}")
-                print("  /help                 Show this help")
-                if cli_mode == "coding":
-                    print("  /approval plan        Switch to read-only planning")
-                    print("  /approval standard    Ask before edits and shell commands")
-                    print("  /approval nuke        Auto-accept edits and shell commands")
-                    print("  /mode plan|standard|nuke  Alias for /approval")
-                print("  exit                  Quit")
-                print()
+            result = _dispatch_slash(ctx, user_input)
+            if result.exit:
+                print(f"{DIM}Goodbye!{RESET}")
+                offer_memory_save(ctx.messages)
+                break
+            if result.message is None:
                 continue
-            if cli_mode == "coding" and cmd in {"approval", "mode"}:
-                if value not in APPROVAL_GUIDANCE:
-                    print(f"{YELLOW}Usage: /approval plan|standard|nuke{RESET}\n")
-                    continue
-                assert approval_controller is not None
-                approval_controller.set_mode(value)
-                pool.set_tool_approver(approval_controller.approve)
-                ensure_coding_permissions(value)
-                if base_system_prompt is not None:
-                    system_message = _coding_system_message(base_system_prompt, value)
-                print(f"{GREEN}✓ Coding approval mode is now {value}.{RESET}\n")
-                continue
-            print(f"{YELLOW}Unknown command. Type /help for options.{RESET}\n")
-            continue
+            user_input = result.message
 
         if user_input.lower() in EXIT_PHRASES:
             print(f"{DIM}Goodbye!{RESET}")
-            offer_memory_save(messages)
+            offer_memory_save(ctx.messages)
             break
 
-        messages.append({"role": "user", "content": user_input})
+        ctx.messages.append({"role": "user", "content": user_input})
 
         try:
             run_turn(
-                ollama_client,
-                pool,
-                tools,
-                system_message,
-                messages,
-                model,
-                approval_controller,
+                ctx.ollama_client, ctx.pool, ctx.tools, ctx.system_message,
+                ctx.messages, ctx.model, ctx.approval_controller,
             )
         except _LLMError as e:
             print(f"\n{YELLOW}LLM error: {e}{RESET}")
@@ -864,17 +1037,19 @@ def main() -> None:
             max_retries=llm_client_max_retries(),
         )
 
-        _repl_loop(
-            ollama_client,
-            pool,
-            tools,
-            system_message,
-            model,
-            provider_label,
-            args.mode,
-            approval_controller,
-            full_system,
+        ctx = ReplContext(
+            ollama_client=ollama_client,
+            pool=pool,
+            tools=tools,
+            system_message=system_message,
+            model=model,
+            provider_label=provider_label,
+            cli_mode=args.mode,
+            approval_controller=approval_controller,
+            base_system_prompt=full_system,
+            registry=_build_registry(coding=args.mode == "coding"),
         )
+        _repl_loop(ctx)
 
     finally:
         close_subagent_pool()
