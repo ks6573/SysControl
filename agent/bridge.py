@@ -128,17 +128,16 @@ def _read_command() -> dict | None:
 _CHART_IMAGE_RE = re.compile(r"\[chart_image:(.+?)\]")
 _INLINE_IMAGE_PREFIXES = ("syscontrol_chart_", "syscontrol_artifact_")
 _ALLOWED_HISTORY_ROLES = {"system", "user", "assistant", "tool"}
+_TMP_DIR_REAL = os.path.realpath(tempfile.gettempdir())
 
 
 def _emit_tool_finished(name: str, result: str) -> None:
     """Emit tool_finished event and any inline image events found in the result."""
     _emit({"type": "tool_finished", "name": name})
-    tmp_dir = os.path.realpath(tempfile.gettempdir())
     for match in _CHART_IMAGE_RE.finditer(result):
-        path = match.group(1)
         # Validate: must be inside the system temp dir with expected prefix
-        resolved = os.path.realpath(path)
-        if os.path.commonpath([resolved, tmp_dir]) != tmp_dir:
+        resolved = os.path.realpath(match.group(1))
+        if os.path.commonpath([resolved, _TMP_DIR_REAL]) != _TMP_DIR_REAL:
             continue
         if not os.path.basename(resolved).startswith(_INLINE_IMAGE_PREFIXES):
             continue

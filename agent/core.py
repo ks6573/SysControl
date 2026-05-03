@@ -85,9 +85,7 @@ MAX_TOKENS         = 16384
 POOL_SIZE          = 4          # max parallel MCP worker processes
 MAX_PARALLEL_TOOLS = POOL_SIZE  # batch size capped to pool capacity
 MAX_TOOL_ROUNDS    = 15         # circuit-breaker for runaway tool-call loops
-_MAX_CHART_BYTES   = 10 * 1024 * 1024  # Backward-compatible alias.
 _MAX_ARTIFACT_BYTES = 25 * 1024 * 1024  # 25 MB cap on decoded visual artifacts
-_CHART_FILE_PREFIX = "syscontrol_chart_"
 _ARTIFACT_FILE_PREFIX = "syscontrol_artifact_"
 _IMAGE_TOOL_NAME = "generate_image"
 _IMAGE_MODEL_DEFAULT = "gpt-image-1"
@@ -117,11 +115,6 @@ RESPONSE_STYLE_GUIDANCE: str = (
 OLLAMA_CLOUD_MODEL    = "gpt-oss:120b"
 OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
 
-# Backward-compatible aliases for older call sites/imports.  These still point
-# to Ollama Cloud; "OpenAI" only describes the compatible HTTP protocol/client.
-CLOUD_MODEL    = OLLAMA_CLOUD_MODEL
-CLOUD_BASE_URL = OLLAMA_CLOUD_BASE_URL
-
 LOCAL_MODEL    = "qwen3:30b"  # any model pulled via: ollama pull <model>
 LOCAL_BASE_URL = "http://localhost:11434/v1"
 LOCAL_API_KEY  = "ollama"   # Ollama doesn't require a real key
@@ -137,10 +130,10 @@ def _field(obj: Any, name: str) -> Any:
 
 def _write_b64_image_artifact(
     img_data: str,
-    tracked_files: list[str],
+    track: Callable[[str], None],
     mime_type: str = "image/png",
 ) -> tuple[str | None, str | None]:
-    """Decode a base64 image, save it to temp, and track it for cleanup."""
+    """Decode a base64 image, save it to temp, and register it for cleanup."""
     if not img_data:
         return None, "missing image data"
     try:
@@ -156,28 +149,31 @@ def _write_b64_image_artifact(
     elif mime_type == "image/webp":
         ext = ".webp"
 
-    digest = hashlib.md5(img_data[:64].encode()).hexdigest()[:10]  # noqa: S324
-    path = os.path.join(
-        tempfile.gettempdir(),
-        f"{_ARTIFACT_FILE_PREFIX}{digest}{ext}",
-    )
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(decoded)
-    tracked_files.append(path)
-    return path, None
+    digest = hashlib.md5(decoded).hexdigest()[:10]  # noqa: S324
+    base = os.path.join(tempfile.gettempdir(), f"{_ARTIFACT_FILE_PREFIX}{digest}")
+    for suffix in ("", *(f"_{i}" for i in range(1, 32))):
+        path = f"{base}{suffix}{ext}"
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as f:
+            f.write(decoded)
+        track(path)
+        return path, None
+    return None, "could not allocate temp filename"
 
 
 def _format_tool_result_with_image(
     data: dict,
     img_b64: str,
-    tracked_files: list[str],
+    track: Callable[[str], None],
     mime_type: str = "image/png",
 ) -> str:
-    """Return JSON text plus the legacy inline-image marker consumed by the GUI."""
+    """Return JSON text plus the inline-image marker consumed by the GUI."""
     parts = [json.dumps(data, indent=2)]
     if img_b64:
-        path, error = _write_b64_image_artifact(img_b64, tracked_files, mime_type)
+        path, error = _write_b64_image_artifact(img_b64, track, mime_type)
         if path:
             parts.append(f"\n[chart_image:{path}]")
         else:
@@ -230,7 +226,7 @@ def _call_generate_image_tool(
     args: dict,
     provider_api_key: str | None,
     provider_base_url: str | None,
-    tracked_files: list[str],
+    track: Callable[[str], None],
 ) -> str:
     """Generate an image with OpenAI Images and return a GUI-renderable result."""
     request = _image_generation_request(args)
@@ -293,7 +289,7 @@ def _call_generate_image_tool(
     }
     if revised_prompt:
         meta["revised_prompt"] = revised_prompt
-    return _format_tool_result_with_image(meta, img_b64, tracked_files)
+    return _format_tool_result_with_image(meta, img_b64, track)
 
 # ANSI colours — only emitted when stdout is a real terminal.
 _USE_COLOR = sys.stdout.isatty()
@@ -330,13 +326,7 @@ class MCPClient:
             RuntimeError: If the subprocess fails to start or the handshake
                 times out / returns an unexpected response.
         """
-        # In a frozen PyInstaller bundle, sys.executable points to the app
-        # binary, not a Python interpreter. Re-invoke with --mcp-server so
-        # the app entry-point can dispatch correctly.
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "--mcp-server"]
-        else:
-            cmd = [sys.executable, str(SERVER_PATH)]
+        cmd = [sys.executable, str(SERVER_PATH)]
 
         proc_env = dict(extra_env) if extra_env is not None else None
 
@@ -545,7 +535,7 @@ class MCPClient:
                 img_data = item.get("data", "")
                 mime_type = item.get("mimeType", "image/png")
                 path, error = _write_b64_image_artifact(
-                    img_data, self._chart_files, mime_type,
+                    img_data, self.track_artifact, mime_type,
                 )
                 if path:
                     text_parts.append(f"\n[chart_image:{path}]")
@@ -553,6 +543,10 @@ class MCPClient:
                     text_parts.append(f"[visual artifact: {error}]")
 
         return "\n".join(text_parts) if text_parts else "[no content returned]"
+
+    def track_artifact(self, path: str) -> None:
+        """Register a temp file for cleanup when this client is closed."""
+        self._chart_files.append(path)
 
     def close(self) -> None:
         """Gracefully shut down the subprocess: close stdin → terminate → kill.
@@ -697,7 +691,7 @@ class MCPClientPool:
                 args,
                 self._provider_api_key,
                 self._provider_base_url,
-                client._chart_files,
+                client.track_artifact,
             )
         return client.call_tool(name, args)
 
@@ -1116,8 +1110,8 @@ def _accumulate_stream_chunks(
                 callbacks.on_token(delta.content)
 
             if delta.tool_calls:
-                for fallback_index, tc in enumerate(delta.tool_calls):
-                    index = tc.index if tc.index is not None else fallback_index
+                for tc in delta.tool_calls:
+                    index = tc.index if tc.index is not None else len(tool_calls)
                     while len(tool_calls) <= index:
                         tool_calls.append(
                             {"id": "", "function": {"name": "", "arguments": ""}}
@@ -1170,11 +1164,9 @@ def _prepare_tool_calls(tool_calls: list[dict], callbacks: TurnCallbacks) -> lis
             callbacks.on_error("Tool", str(exc))
             return None
 
-        arguments = json.dumps(args, separators=(",", ":"))
-        call_id = str(tc.get("id") or "").strip()
-        if not call_id:
-            digest = hashlib.md5(f"{index}:{name}:{arguments}".encode()).hexdigest()[:8]  # noqa: S324
-            call_id = f"call_{index}_{digest}"
+        raw = (tc.get("function") or {}).get("arguments")
+        arguments = raw if isinstance(raw, str) and raw else json.dumps(args, separators=(",", ":"))
+        call_id = str(tc.get("id") or "").strip() or f"call_{index}"
         prepared.append({
             "id": call_id,
             "type": "function",

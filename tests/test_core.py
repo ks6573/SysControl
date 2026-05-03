@@ -151,7 +151,7 @@ class TestToolCallHandling:
 
         assert result is None
         assert errors == []
-        assert messages[0]["tool_calls"][0]["id"].startswith("call_0_")
+        assert messages[0]["tool_calls"][0]["id"] == "call_0"
         assert messages[1]["tool_call_id"] == messages[0]["tool_calls"][0]["id"]
 
     def test_handle_finish_reason_executes_tool_calls_even_when_finish_reason_stop(self) -> None:

@@ -129,6 +129,7 @@ def _append_memory_note(note: str) -> None:
 def print_banner(mode: str = "system") -> None:
     """Print the startup banner and memory-file status to stdout."""
     subtitle = "Your AI coding assistant" if mode == "coding" else "Your AI system monitoring assistant"
+    subtitle = subtitle[:47]
     print(f"\n{BOLD}{CYAN}┌─────────────────────────────────────────────────────┐")
     print("│               SysControl Agent                      │")
     print(f"│     {subtitle:<47} │")
@@ -292,7 +293,7 @@ class ApprovalController:
     def __init__(self, mode: str) -> None:
         self.mode = mode
         self._auto_approve_rest = False
-        self._spinner = None
+        self._spinner: "_Spinner | None" = None
 
     def bind_spinner(self, spinner: "_Spinner") -> None:
         self._spinner = spinner
@@ -622,6 +623,16 @@ def _prompt_cloud_api_key() -> str:
     return api_key
 
 
+def _cloud_selection(args: argparse.Namespace, api_key: str) -> ProviderSelection:
+    model = args.model or OLLAMA_CLOUD_MODEL
+    return ProviderSelection(api_key, OLLAMA_CLOUD_BASE_URL, model, "☁  Ollama Cloud")
+
+
+def _local_selection(args: argparse.Namespace) -> ProviderSelection:
+    model = args.model or _resolve_local_model()
+    return ProviderSelection(LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)")
+
+
 def select_provider(args: argparse.Namespace) -> ProviderSelection:
     """Resolve the LLM provider from CLI flags or interactive prompts.
 
@@ -631,18 +642,11 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
     Returns:
         A ``ProviderSelection`` with api_key, base_url, model, and label.
     """
-    # ── Cloud ──────────────────────────────────────────────────────────────
     if args.provider == "cloud":
-        api_key = args.api_key or _prompt_cloud_api_key()
-        model = args.model or OLLAMA_CLOUD_MODEL
-        return ProviderSelection(api_key, OLLAMA_CLOUD_BASE_URL, model, "☁  Ollama Cloud")
-
-    # ── Local ──────────────────────────────────────────────────────────────
+        return _cloud_selection(args, args.api_key or _prompt_cloud_api_key())
     if args.provider == "local":
-        model = args.model or _resolve_local_model()
-        return ProviderSelection(LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)")
+        return _local_selection(args)
 
-    # ── Interactive fallback ───────────────────────────────────────────────
     prompt = (
         f"\n{BOLD}Select AI model "
         f"(type {CYAN}cloud{RESET}{BOLD} or {CYAN}local{RESET}{BOLD}):{RESET} "
@@ -656,16 +660,10 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
             sys.exit(0)
 
         if choice == "cloud":
-            api_key = _prompt_cloud_api_key()
-            model = args.model or OLLAMA_CLOUD_MODEL
-            return ProviderSelection(api_key, OLLAMA_CLOUD_BASE_URL, model, "☁  Ollama Cloud")
-
-        elif choice == "local":
-            model = args.model or _resolve_local_model()
-            return ProviderSelection(LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)")
-
-        else:
-            print(f"{YELLOW}Please type 'cloud' or 'local':{RESET} ", end="", flush=True)
+            return _cloud_selection(args, _prompt_cloud_api_key())
+        if choice == "local":
+            return _local_selection(args)
+        print(f"{YELLOW}Please type 'cloud' or 'local':{RESET} ", end="", flush=True)
 
 
 # ── Main REPL ─────────────────────────────────────────────────────────────────
