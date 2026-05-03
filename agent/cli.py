@@ -67,6 +67,12 @@ from agent.core import (
     mcp_to_openai_tools,
     run_streaming_turn,
 )
+from agent.credentials import (
+    CREDENTIALS_FILE,
+    clear_cloud_api_key,
+    load_cloud_api_key,
+    save_cloud_api_key,
+)
 from agent.paths import MEMORY_FILE, USER_DATA_DIR, ensure_user_data_dir
 from agent.runner import close_subagent_pool
 from agent.slash import CONTINUE, EXIT, SlashCommand, SlashRegistry, SlashResult, parse
@@ -606,6 +612,10 @@ def parse_args() -> argparse.Namespace:
         help="Coding-mode approval policy: plan is read-only, standard asks before risky tools, nuke auto-accepts.",
     )
     parser.add_argument(
+        "--no-save-key", action="store_true",
+        help="Do not persist the Ollama Cloud API key to ~/.syscontrol/cli_credentials.json.",
+    )
+    parser.add_argument(
         "--update", action="store_true",
         help="Check for and install the latest SysControl release, then exit.",
     )
@@ -626,12 +636,7 @@ class ProviderSelection(NamedTuple):
 
 
 def _prompt_cloud_api_key() -> str:
-    """Interactively prompt for the Ollama cloud API key.
-
-    Returns:
-        The non-empty API key string.  Exits the process on EOF/interrupt
-        or if the user provides an empty key.
-    """
+    """Interactively prompt for the Ollama cloud API key."""
     try:
         api_key = getpass.getpass(f"{BOLD}Ollama API key:{RESET} ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -640,6 +645,32 @@ def _prompt_cloud_api_key() -> str:
     if not api_key:
         print(f"{YELLOW}⚠  API key cannot be empty.{RESET}")
         sys.exit(1)
+    return api_key
+
+
+def _resolve_cloud_api_key(args: argparse.Namespace) -> str:
+    """Pick the cloud API key from --api-key, the saved cache, or a prompt.
+
+    The first time the user enters a key it gets persisted to
+    ``~/.syscontrol/cli_credentials.json`` (0600) so subsequent launches
+    don't re-prompt.  ``--no-save-key`` disables persistence; ``/logout``
+    inside the REPL clears the cache.
+    """
+    if args.api_key:
+        api_key = str(args.api_key)
+        if not args.no_save_key:
+            save_cloud_api_key(api_key)
+        return api_key
+
+    cached = load_cloud_api_key()
+    if cached:
+        print(f"{DIM}  Using saved Ollama Cloud API key ({CREDENTIALS_FILE.name}).{RESET}")
+        return cached
+
+    api_key = _prompt_cloud_api_key()
+    if not args.no_save_key:
+        save_cloud_api_key(api_key)
+        print(f"{DIM}  Saved to {CREDENTIALS_FILE} (use /logout or --no-save-key to forget).{RESET}")
     return api_key
 
 
@@ -663,7 +694,7 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
         A ``ProviderSelection`` with api_key, base_url, model, and label.
     """
     if args.provider == "cloud":
-        return _cloud_selection(args, args.api_key or _prompt_cloud_api_key())
+        return _cloud_selection(args, _resolve_cloud_api_key(args))
     if args.provider == "local":
         return _local_selection(args)
 
@@ -680,7 +711,7 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
             sys.exit(0)
 
         if choice == "cloud":
-            return _cloud_selection(args, _prompt_cloud_api_key())
+            return _cloud_selection(args, _resolve_cloud_api_key(args))
         if choice == "local":
             return _local_selection(args)
         print(f"{YELLOW}Please type 'cloud' or 'local':{RESET} ", end="", flush=True)
@@ -810,6 +841,14 @@ def _cmd_exit(_ctx: ReplContext, _args: str) -> SlashResult:
     return EXIT
 
 
+def _cmd_logout(_ctx: ReplContext, _args: str) -> SlashResult:
+    if clear_cloud_api_key():
+        print(f"{GREEN}✓ Cleared saved Ollama Cloud API key.{RESET}\n")
+    else:
+        print(f"{DIM}No saved API key to clear.{RESET}\n")
+    return CONTINUE
+
+
 def _cmd_update(_ctx: ReplContext, args: str) -> SlashResult:
     force = args.strip().lower() in {"force", "-f", "--force"}
     info = check_for_update()
@@ -890,6 +929,8 @@ def _build_registry(coding: bool) -> SlashRegistry:
     reg.register(SlashCommand("update", "Check for and install the latest SysControl release",
                               _cmd_update, usage="/update [force]",
                               arg_choices=("force",)))
+    reg.register(SlashCommand("logout", "Forget the saved Ollama Cloud API key",
+                              _cmd_logout, usage="/logout"))
     reg.register(SlashCommand("exit", "Quit the session", _cmd_exit,
                               usage="/exit", aliases=("quit", "bye")))
     if coding:

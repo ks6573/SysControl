@@ -113,13 +113,16 @@ uv run agent.py
 ```bash
 syscontrol                                          # interactive
 syscontrol --provider local --model qwen3:30b      # local, skip prompt
-syscontrol --provider cloud --api-key sk-...       # cloud, skip prompt
+syscontrol --provider cloud --api-key sk-...       # cloud, skip prompt (key is remembered)
+syscontrol --provider cloud --no-save-key          # cloud, prompt every time
 syscontrol --coding --approval standard            # coding agent, ask before edits/shell
 syscontrol --coding --approval plan                # read-only planning mode
 syscontrol --coding --approval nuke                # auto-accept coding edits/shell
 ```
 
 > Cloned (Option B) users can substitute `uv run agent.py` for `syscontrol` in any of the commands below.
+
+The first time you enter your Ollama Cloud API key (via `--api-key` or the prompt), it's saved to `~/.syscontrol/cli_credentials.json` (`0600`) so you won't be asked again. Use `--no-save-key` to opt out, or `/logout` from the REPL to forget it.
 
 ### Coding Mode
 
@@ -148,6 +151,7 @@ The interactive CLI supports a built-in slash menu (type `/` to pop the completi
 | `/memory <note>` | Append a timestamped note to `SysControl_Memory.md` |
 | `/approval plan\|standard\|nuke` | Switch coding-mode approval policy (coding mode only) |
 | `/update [force]` | Check for and install the latest SysControl release |
+| `/logout` | Forget the saved Ollama Cloud API key |
 | `/exit` | Quit the session |
 
 | Key | Action |
