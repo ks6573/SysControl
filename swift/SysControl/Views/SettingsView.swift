@@ -36,7 +36,7 @@ struct SettingsView: View {
             Section("Provider") {
                 Picker("Provider", selection: $provider) {
                     Text("Local (Ollama)").tag(ProviderKind.local)
-                    Text("Cloud (Ollama Cloud)").tag(ProviderKind.cloud)
+                    Text("Ollama Cloud").tag(ProviderKind.cloud)
                 }
                 .pickerStyle(.segmented)
             }
@@ -285,7 +285,7 @@ struct SettingsView: View {
                 apiKey: key,
                 baseURL: base.isEmpty ? ProviderConfiguration.cloudBaseURL : base,
                 model: model.isEmpty ? ProviderConfiguration.cloudDefaultModel : model,
-                label: "☁ Cloud"
+                label: "☁ Ollama Cloud"
             )
         }
 

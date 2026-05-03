@@ -2,7 +2,7 @@
 
 An AI agent for your Mac that answers questions about your system — and can extend itself with new tools on the fly.
 
-91 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, email, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, Notes, Homebrew, media control, file management, Spotlight search, spreadsheets, Word documents, PDFs, deep web research, sub-agent orchestration, code editing, git integration, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
+92 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, email, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, Notes, Homebrew, media control, file management, Spotlight search, spreadsheets, Word documents, PDFs, image generation, deep web research, sub-agent orchestration, code editing, git integration, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
 Three ways to run it — pick whichever fits your workflow:
 
@@ -114,9 +114,25 @@ uv run agent.py
 syscontrol                                          # interactive
 syscontrol --provider local --model qwen3:30b      # local, skip prompt
 syscontrol --provider cloud --api-key sk-...       # cloud, skip prompt
+syscontrol --coding --approval standard            # coding agent, ask before edits/shell
+syscontrol --coding --approval plan                # read-only planning mode
+syscontrol --coding --approval nuke                # auto-accept coding edits/shell
 ```
 
 > Cloned (Option B) users can substitute `uv run agent.py` for `syscontrol` in any of the commands below.
+
+### Coding Mode
+
+The CLI can run as a coding agent with a narrowed code tool set: file search/read/edit,
+git status/diff, and shell commands. Approval modes:
+
+| Mode | Behavior |
+|---|---|
+| `plan` | Read-only. The agent can inspect and produce an implementation plan, but edits and shell commands are blocked. |
+| `standard` | Reads are automatic; file writes and shell commands ask for approval in the terminal. |
+| `nuke` | Auto-accepts coding edits and shell commands for the session. |
+
+Inside coding mode, use `/approval plan`, `/approval standard`, or `/approval nuke` to switch policies.
 
 ### Local Mode (Ollama)
 
@@ -239,7 +255,7 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 
 ---
 
-## Tools (91 total)
+## Tools (92 total)
 
 ### Monitoring
 
@@ -316,6 +332,7 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 | `get_clipboard` | Return current clipboard text |
 | `set_clipboard` | Write text to the clipboard |
 | `take_screenshot` | Full-screen PNG returned inline. Optionally save to file. macOS only. |
+| `generate_image` | Generate an inline visual image artifact from a prompt. Requires an OpenAI image API key. |
 
 ### App Control & System
 
@@ -446,7 +463,7 @@ SysControl/
 │   ├── runner.py            # Sub-agent runner: isolated context, filtered tools
 │   └── paths.py             # Path resolution (repo root, user data dir, memory file)
 ├── mcp/
-│   ├── server.py            # MCP tool server (91 tools + self-extension)
+│   ├── server.py            # MCP tool server (92 tools + self-extension)
 │   └── prompt.json          # System prompt for the agent
 ├── deep_research/           # Deep research agent (iterative web research with citation verification)
 ├── swift/
@@ -475,7 +492,7 @@ SysControl/
 └────────┬─────────────┘
          │  JSON-RPC (stdio)
 ┌────────▼─────────────┐
-│    MCP Server        │   91 tools, self-extension, permission checks
+│    MCP Server        │   92 tools, self-extension, permission checks
 │  (mcp/server.py)     │   Concurrent tool execution via client pool
 └──────────────────────┘
 ```

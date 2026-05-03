@@ -106,15 +106,17 @@ final class ChatSession: Identifiable, Codable {
     }
 
     func appendChartImage(_ path: String) {
-        // Validate: must be in temp dir with expected prefix, and file must exist
+        // Validate: must be in temp dir with an expected prefix, and file must exist
         let resolved = (path as NSString).resolvingSymlinksInPath
-        let tmpDir = NSTemporaryDirectory()
+        let tmpDir = (NSTemporaryDirectory() as NSString).resolvingSymlinksInPath
         let basename = (resolved as NSString).lastPathComponent
-        guard resolved.hasPrefix(tmpDir),
-              basename.hasPrefix("syscontrol_chart_"),
+        let allowedPrefix = basename.hasPrefix("syscontrol_chart_")
+            || basename.hasPrefix("syscontrol_artifact_")
+        guard resolved.hasPrefix(tmpDir + "/"),
+              allowedPrefix,
               FileManager.default.fileExists(atPath: resolved) else { return }
 
-        // Attach chart to the current streaming message, or create a new one
+        // Attach image artifact to the current streaming message, or create a new one
         if let idx = _streamingMessageIndex,
            idx < messages.count,
            messages[idx].id == _streamingMessageID {

@@ -19,6 +19,7 @@ import argparse
 import datetime
 import getpass
 import itertools
+import json
 import sys
 import threading
 import time
@@ -29,8 +30,6 @@ from openai import OpenAI
 from agent.core import (
     BLUE,
     BOLD,
-    CLOUD_BASE_URL,
-    CLOUD_MODEL,
     CYAN,
     DIM,
     EXIT_PHRASES,
@@ -39,6 +38,8 @@ from agent.core import (
     LOCAL_API_KEY,
     LOCAL_BASE_URL,
     LOCAL_MODEL,
+    OLLAMA_CLOUD_BASE_URL,
+    OLLAMA_CLOUD_MODEL,
     RESET,
     SERVER_PATH,
     YELLOW,
@@ -56,7 +57,7 @@ from agent.core import (
     mcp_to_openai_tools,
     run_streaming_turn,
 )
-from agent.paths import MEMORY_FILE, ensure_user_data_dir
+from agent.paths import MEMORY_FILE, USER_DATA_DIR, ensure_user_data_dir
 from agent.runner import close_subagent_pool
 
 # ── Memory ────────────────────────────────────────────────────────────────────
@@ -125,11 +126,13 @@ def _append_memory_note(note: str) -> None:
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 
-def print_banner() -> None:
+def print_banner(mode: str = "system") -> None:
     """Print the startup banner and memory-file status to stdout."""
+    subtitle = "Your AI coding assistant" if mode == "coding" else "Your AI system monitoring assistant"
+    subtitle = subtitle[:47]
     print(f"\n{BOLD}{CYAN}┌─────────────────────────────────────────────────────┐")
     print("│               SysControl Agent                      │")
-    print("│     Your AI system monitoring assistant             │")
+    print(f"│     {subtitle:<47} │")
     print(f"└─────────────────────────────────────────────────────┘{RESET}")
     if load_memory() is not None:
         print(f"{DIM}  Memory file found — agent can recall past sessions via read_memory.{RESET}")
@@ -145,6 +148,187 @@ class _ToolError(Exception):
 
 class _MCPError(Exception):
     """Wraps errors from the MCP subprocess itself (crash or closed pipe)."""
+
+
+# ── CLI profiles / approval policies ─────────────────────────────────────────
+
+CODING_READ_TOOLS: tuple[str, ...] = (
+    "read_file",
+    "read_file_lines",
+    "list_directory",
+    "grep_files",
+    "glob_files",
+    "git_status",
+    "git_diff",
+)
+
+CODING_WRITE_TOOLS: tuple[str, ...] = (
+    "write_file",
+    "edit_file",
+    "move_file",
+    "copy_file",
+    "delete_file",
+    "create_directory",
+)
+
+CODING_EXEC_TOOLS: tuple[str, ...] = ("run_shell_command",)
+CODING_TOOLS: tuple[str, ...] = CODING_READ_TOOLS + CODING_WRITE_TOOLS + CODING_EXEC_TOOLS
+RISKY_CODING_TOOLS: frozenset[str] = frozenset(CODING_WRITE_TOOLS + CODING_EXEC_TOOLS)
+
+CONFIG_FILE = USER_DATA_DIR / "config.json"
+
+CODING_PROMPT = """
+---
+
+# CLI Coding Agent Mode
+
+You are running as a coding agent in the user's current working directory.
+Behave like a pragmatic terminal coding assistant:
+- Inspect before editing. Use `grep_files`, `glob_files`, `read_file_lines`,
+  `git_status`, and `git_diff` to understand the codebase and protect user work.
+- Make focused changes with `edit_file` or `write_file`; avoid unrelated refactors.
+- Run relevant checks with `run_shell_command` after edits when the policy allows it.
+- Never discard or overwrite user changes unless the user explicitly asks.
+- Explain what changed and what you verified.
+- If the task is ambiguous, ask one concise follow-up; otherwise make a sensible
+  assumption and move.
+
+Approval policy for this session:
+{approval_guidance}
+"""
+
+APPROVAL_GUIDANCE = {
+    "plan": (
+        "PLAN mode. Read/search/git-status tools are allowed. Do not edit files, "
+        "create/delete/move files, or run shell commands. Produce a concrete plan "
+        "and ask the user to switch to standard or nuke before implementation."
+    ),
+    "standard": (
+        "STANDARD mode. Read/search/git-status tools are allowed automatically. "
+        "File writes and shell commands require explicit CLI approval before they run."
+    ),
+    "nuke": (
+        "NUKE mode. Read, edit, and shell tools may run without per-call approval. "
+        "Still avoid destructive work unrelated to the user's task."
+    ),
+}
+
+
+def _filter_tools(tools: list[dict], allowed_names: tuple[str, ...]) -> list[dict]:
+    """Return OpenAI tool definitions whose function names are allowed."""
+    allowed = set(allowed_names)
+    return [t for t in tools if t.get("function", {}).get("name") in allowed]
+
+
+def _coding_system_message(base_prompt: str, approval_mode: str) -> dict:
+    """Build the coding-mode system message for the current approval policy."""
+    guidance = APPROVAL_GUIDANCE[approval_mode]
+    return {"role": "system", "content": base_prompt + CODING_PROMPT.format(
+        approval_guidance=guidance,
+    )}
+
+
+def _load_config_file() -> dict:
+    try:
+        loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _save_config_file(config: dict) -> None:
+    ensure_user_data_dir()
+    CONFIG_FILE.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _ensure_flags(flags: tuple[str, ...], auto: bool) -> None:
+    """Ensure MCP permission flags needed by coding mode are enabled."""
+    config = _load_config_file()
+    missing = [flag for flag in flags if config.get(flag) is not True]
+    if not missing:
+        return
+
+    if not auto:
+        print(f"\n{YELLOW}Coding mode needs MCP permissions: {', '.join(missing)}{RESET}")
+        print(f"{DIM}  These are stored in {CONFIG_FILE}. Risky tool calls still follow the CLI approval mode.{RESET}")
+        print(f"{BOLD}Enable them now? [y/N]:{RESET} ", end="", flush=True)
+        try:
+            if input("").strip().lower() not in {"y", "yes"}:
+                print(f"{DIM}Continuing without changing permissions; gated tools may return permission hints.{RESET}")
+                return
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{DIM}Continuing without changing permissions.{RESET}")
+            return
+
+    for flag in missing:
+        config[flag] = True
+    _save_config_file(config)
+    print(f"{GREEN}✓ Enabled {', '.join(missing)} in {CONFIG_FILE}{RESET}")
+
+
+def ensure_coding_permissions(approval_mode: str) -> None:
+    """Enable or offer the MCP gates required for the selected coding policy."""
+    if approval_mode == "plan":
+        _ensure_flags(("allow_file_read",), auto=False)
+    elif approval_mode == "standard":
+        _ensure_flags(("allow_file_read", "allow_file_write", "allow_shell"), auto=False)
+    elif approval_mode == "nuke":
+        _ensure_flags(("allow_file_read", "allow_file_write", "allow_shell"), auto=True)
+
+
+def _summarize_tool_call(name: str, args: dict) -> str:
+    """Return a concise human prompt for a risky tool call."""
+    if name == "run_shell_command":
+        return f"run shell: {args.get('command', '')}"
+    if name in {"write_file", "edit_file", "delete_file", "create_directory"}:
+        return f"{name}: {args.get('path', '')}"
+    if name in {"move_file", "copy_file"}:
+        return f"{name}: {args.get('src', '')} → {args.get('dst', '')}"
+    return name
+
+
+class ApprovalController:
+    """Interactive approval state for coding-mode tool calls."""
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self._auto_approve_rest = False
+        self._spinner: _Spinner | None = None
+
+    def bind_spinner(self, spinner: "_Spinner") -> None:
+        self._spinner = spinner
+
+    def set_mode(self, mode: str) -> None:
+        self.mode = mode
+        self._auto_approve_rest = mode == "nuke"
+
+    def approve(self, name: str, args: dict) -> bool:
+        if name not in RISKY_CODING_TOOLS:
+            return True
+        if self.mode == "plan":
+            print(f"\n{YELLOW}Plan mode blocked {name}.{RESET}")
+            return False
+        if self.mode == "nuke" or self._auto_approve_rest:
+            return True
+
+        if self._spinner is not None:
+            self._spinner.stop()
+        summary = _summarize_tool_call(name, args)
+        print(f"\n{BOLD}{YELLOW}Approve tool call?{RESET} {summary}")
+        print(f"{DIM}  y = yes, n = no, a = approve all for this session, p = switch to plan{RESET}")
+        print(f"{BOLD}[y/n/a/p]:{RESET} ", end="", flush=True)
+        try:
+            choice = input("").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        if choice in {"a", "all"}:
+            self._auto_approve_rest = True
+            return True
+        if choice in {"p", "plan"}:
+            self.set_mode("plan")
+            return False
+        return choice in {"y", "yes"}
 
 
 # ── Spinner ────────────────────────────────────────────────────────────────────
@@ -274,6 +458,7 @@ def run_turn(
     system_message: dict,
     messages: list[dict],
     model: str,
+    approval_controller: ApprovalController | None = None,
 ) -> None:
     """Execute one user turn: stream the LLM response and run tool calls.
 
@@ -291,6 +476,8 @@ def run_turn(
         _ToolError: On tool execution failure.
     """
     spinner = _Spinner()
+    if approval_controller is not None:
+        approval_controller.bind_spinner(spinner)
     callbacks, pending, errors = _build_cli_callbacks(spinner)
 
     spinner.start("Thinking…")
@@ -389,6 +576,23 @@ def parse_args() -> argparse.Namespace:
         "--api-key",
         help="Ollama API key for the cloud provider (skips the getpass prompt).",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["system", "coding"],
+        default="system",
+        help="Run the normal system assistant or the coding-agent CLI profile.",
+    )
+    parser.add_argument(
+        "--coding",
+        action="store_true",
+        help="Shortcut for --mode coding.",
+    )
+    parser.add_argument(
+        "--approval",
+        choices=["plan", "standard", "nuke"],
+        default="standard",
+        help="Coding-mode approval policy: plan is read-only, standard asks before risky tools, nuke auto-accepts.",
+    )
     return parser.parse_args()
 
 
@@ -419,6 +623,16 @@ def _prompt_cloud_api_key() -> str:
     return api_key
 
 
+def _cloud_selection(args: argparse.Namespace, api_key: str) -> ProviderSelection:
+    model = args.model or OLLAMA_CLOUD_MODEL
+    return ProviderSelection(api_key, OLLAMA_CLOUD_BASE_URL, model, "☁  Ollama Cloud")
+
+
+def _local_selection(args: argparse.Namespace) -> ProviderSelection:
+    model = args.model or _resolve_local_model()
+    return ProviderSelection(LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)")
+
+
 def select_provider(args: argparse.Namespace) -> ProviderSelection:
     """Resolve the LLM provider from CLI flags or interactive prompts.
 
@@ -428,18 +642,11 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
     Returns:
         A ``ProviderSelection`` with api_key, base_url, model, and label.
     """
-    # ── Cloud ──────────────────────────────────────────────────────────────
     if args.provider == "cloud":
-        api_key = args.api_key or _prompt_cloud_api_key()
-        model = args.model or CLOUD_MODEL
-        return ProviderSelection(api_key, CLOUD_BASE_URL, model, "☁  Cloud")
-
-    # ── Local ──────────────────────────────────────────────────────────────
+        return _cloud_selection(args, args.api_key or _prompt_cloud_api_key())
     if args.provider == "local":
-        model = args.model or _resolve_local_model()
-        return ProviderSelection(LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)")
+        return _local_selection(args)
 
-    # ── Interactive fallback ───────────────────────────────────────────────
     prompt = (
         f"\n{BOLD}Select AI model "
         f"(type {CYAN}cloud{RESET}{BOLD} or {CYAN}local{RESET}{BOLD}):{RESET} "
@@ -453,16 +660,10 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
             sys.exit(0)
 
         if choice == "cloud":
-            api_key = _prompt_cloud_api_key()
-            model = args.model or CLOUD_MODEL
-            return ProviderSelection(api_key, CLOUD_BASE_URL, model, "☁  Cloud")
-
-        elif choice == "local":
-            model = args.model or _resolve_local_model()
-            return ProviderSelection(LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)")
-
-        else:
-            print(f"{YELLOW}Please type 'cloud' or 'local':{RESET} ", end="", flush=True)
+            return _cloud_selection(args, _prompt_cloud_api_key())
+        if choice == "local":
+            return _local_selection(args)
+        print(f"{YELLOW}Please type 'cloud' or 'local':{RESET} ", end="", flush=True)
 
 
 # ── Main REPL ─────────────────────────────────────────────────────────────────
@@ -519,6 +720,9 @@ def _repl_loop(
     system_message: dict,
     model: str,
     provider_label: str,
+    cli_mode: str = "system",
+    approval_controller: ApprovalController | None = None,
+    base_system_prompt: str | None = None,
 ) -> None:
     """Interactive read-eval-print loop for the CLI agent.
 
@@ -530,8 +734,14 @@ def _repl_loop(
         model: Model identifier string.
         provider_label: Human-readable provider name for the status line.
     """
-    print(f"\r{GREEN}✓{RESET} Connected — {len(tools)} tools available. {DIM}[{provider_label}  ·  {model}]{RESET}")
-    print(f"{DIM}  Type your question, or 'exit' / 'bye' / 'goodbye' to quit.{RESET}\n")
+    mode_label = ""
+    if cli_mode == "coding" and approval_controller is not None:
+        mode_label = f"  ·  coding:{approval_controller.mode}"
+    print(
+        f"\r{GREEN}✓{RESET} Connected — {len(tools)} tools available. "
+        f"{DIM}[{provider_label}  ·  {model}{mode_label}]{RESET}"
+    )
+    print(f"{DIM}  Type your request, /help for commands, or 'exit' / 'bye' / 'goodbye' to quit.{RESET}\n")
 
     messages: list[dict] = []
 
@@ -546,6 +756,36 @@ def _repl_loop(
         if not user_input:
             continue
 
+        if user_input.startswith("/"):
+            cmd, _, value = user_input[1:].partition(" ")
+            cmd = cmd.strip().lower()
+            value = value.strip().lower()
+            if cmd in {"help", "?"}:
+                print(f"{BOLD}Commands:{RESET}")
+                print("  /help                 Show this help")
+                if cli_mode == "coding":
+                    print("  /approval plan        Switch to read-only planning")
+                    print("  /approval standard    Ask before edits and shell commands")
+                    print("  /approval nuke        Auto-accept edits and shell commands")
+                    print("  /mode plan|standard|nuke  Alias for /approval")
+                print("  exit                  Quit")
+                print()
+                continue
+            if cli_mode == "coding" and cmd in {"approval", "mode"}:
+                if value not in APPROVAL_GUIDANCE:
+                    print(f"{YELLOW}Usage: /approval plan|standard|nuke{RESET}\n")
+                    continue
+                assert approval_controller is not None
+                approval_controller.set_mode(value)
+                pool.set_tool_approver(approval_controller.approve)
+                ensure_coding_permissions(value)
+                if base_system_prompt is not None:
+                    system_message = _coding_system_message(base_system_prompt, value)
+                print(f"{GREEN}✓ Coding approval mode is now {value}.{RESET}\n")
+                continue
+            print(f"{YELLOW}Unknown command. Type /help for options.{RESET}\n")
+            continue
+
         if user_input.lower() in EXIT_PHRASES:
             print(f"{DIM}Goodbye!{RESET}")
             offer_memory_save(messages)
@@ -554,7 +794,15 @@ def _repl_loop(
         messages.append({"role": "user", "content": user_input})
 
         try:
-            run_turn(ollama_client, pool, tools, system_message, messages, model)
+            run_turn(
+                ollama_client,
+                pool,
+                tools,
+                system_message,
+                messages,
+                model,
+                approval_controller,
+            )
         except _LLMError as e:
             print(f"\n{YELLOW}LLM error: {e}{RESET}")
             print(f"{DIM}  Check your API key or network connection, then try again.{RESET}")
@@ -574,7 +822,9 @@ def _repl_loop(
 def main() -> None:
     """CLI entry point."""
     args = parse_args()
-    print_banner()
+    if args.coding:
+        args.mode = "coding"
+    print_banner(args.mode)
 
     if not SERVER_PATH.exists():
         print(f"mcp/server.py not found at {SERVER_PATH}", file=sys.stderr)
@@ -585,22 +835,46 @@ def main() -> None:
     print(f"\n{DIM}Connecting to system monitor backend…{RESET}", end="", flush=True)
 
     mcp_client, system_prompt = _init_mcp_and_prompt()
-    pool = MCPClientPool(mcp_client)
+    approval_controller: ApprovalController | None = None
+    if args.mode == "coding":
+        ensure_coding_permissions(args.approval)
+        approval_controller = ApprovalController(args.approval)
+    pool = MCPClientPool(
+        mcp_client,
+        provider_api_key=api_key,
+        provider_base_url=base_url,
+        tool_approver=approval_controller.approve if approval_controller else None,
+    )
 
     try:
         mcp_tools = mcp_client.list_tools()
-        tools = mcp_to_openai_tools(mcp_tools)
+        all_tools = mcp_to_openai_tools(mcp_tools)
+        tools = _filter_tools(all_tools, CODING_TOOLS) if args.mode == "coding" else all_tools
 
         tool_names = [t["function"]["name"] for t in tools]
         full_system = build_full_system_prompt(system_prompt, tool_names)
-        system_message = {"role": "system", "content": full_system}
+        system_message = (
+            _coding_system_message(full_system, args.approval)
+            if args.mode == "coding"
+            else {"role": "system", "content": full_system}
+        )
         ollama_client = OpenAI(
             api_key=api_key, base_url=base_url,
             timeout=llm_client_timeout(),
             max_retries=llm_client_max_retries(),
         )
 
-        _repl_loop(ollama_client, pool, tools, system_message, model, provider_label)
+        _repl_loop(
+            ollama_client,
+            pool,
+            tools,
+            system_message,
+            model,
+            provider_label,
+            args.mode,
+            approval_controller,
+            full_system,
+        )
 
     finally:
         close_subagent_pool()
@@ -609,4 +883,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -25,7 +25,7 @@ struct ProviderConfiguration: Codable, Equatable {
         apiKey: "",
         baseURL: cloudBaseURL,
         model: cloudDefaultModel,
-        label: "☁ Cloud"
+        label: "☁ Ollama Cloud"
     )
 
     static var localTagsURL: String {

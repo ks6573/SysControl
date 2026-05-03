@@ -3,6 +3,9 @@
 
 from agent.core import (
     TurnCallbacks,
+    _execute_tool_calls,
+    _handle_finish_reason,
+    _parse_tool_call_args,
     colorize,
     load_memory,
     mcp_to_openai_tools,
@@ -103,6 +106,75 @@ class TestMCPToOpenAITools:
 
     def test_empty_list(self) -> None:
         assert mcp_to_openai_tools([]) == []
+
+
+# ── tool-call handling ───────────────────────────────────────────────────────
+
+
+class TestToolCallHandling:
+    """Regression tests for provider/tool-call edge cases."""
+
+    def test_parse_tool_call_accepts_dict_arguments(self) -> None:
+        name, args = _parse_tool_call_args({
+            "function": {"name": "get_cpu_usage", "arguments": {"n": 1}},
+        })
+        assert name == "get_cpu_usage"
+        assert args == {"n": 1}
+
+    def test_parse_tool_call_rejects_invalid_json(self) -> None:
+        try:
+            _parse_tool_call_args({
+                "function": {"name": "get_cpu_usage", "arguments": "{bad"},
+            })
+        except ValueError as exc:
+            assert "not valid JSON" in str(exc)
+        else:
+            raise AssertionError("invalid JSON arguments should raise")
+
+    def test_execute_tool_calls_synthesizes_missing_call_id(self) -> None:
+        class Pool:
+            def call_tools_parallel(self, tool_calls):
+                tc = tool_calls[0]
+                return [(tc["id"], tc["function"]["name"], "ok")]
+
+        messages: list[dict] = []
+        errors: list[tuple[str, str]] = []
+        callbacks = TurnCallbacks(on_error=lambda cat, msg: errors.append((cat, msg)))
+        result = _execute_tool_calls(
+            [{"id": "", "function": {"name": "get_cpu_usage", "arguments": "{}"}}],
+            "",
+            Pool(),
+            messages,
+            callbacks,
+            0,
+        )
+
+        assert result is None
+        assert errors == []
+        assert messages[0]["tool_calls"][0]["id"] == "call_0"
+        assert messages[1]["tool_call_id"] == messages[0]["tool_calls"][0]["id"]
+
+    def test_handle_finish_reason_executes_tool_calls_even_when_finish_reason_stop(self) -> None:
+        class Pool:
+            def call_tools_parallel(self, tool_calls):
+                tc = tool_calls[0]
+                return [(tc["id"], tc["function"]["name"], "ok")]
+
+        messages: list[dict] = []
+        callbacks = TurnCallbacks()
+        result = _handle_finish_reason(
+            "stop",
+            "",
+            [{"id": "tc_1", "function": {"name": "get_cpu_usage", "arguments": "{}"}}],
+            Pool(),
+            messages,
+            callbacks,
+            0,
+        )
+
+        assert result is None
+        assert messages[0]["role"] == "assistant"
+        assert messages[1] == {"role": "tool", "tool_call_id": "tc_1", "content": "ok"}
 
 
 # ── colorize ─────────────────────────────────────────────────────────────────
