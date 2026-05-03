@@ -293,7 +293,7 @@ class ApprovalController:
     def __init__(self, mode: str) -> None:
         self.mode = mode
         self._auto_approve_rest = False
-        self._spinner: "_Spinner | None" = None
+        self._spinner: _Spinner | None = None
 
     def bind_spinner(self, spinner: "_Spinner") -> None:
         self._spinner = spinner
