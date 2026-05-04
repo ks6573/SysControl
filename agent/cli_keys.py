@@ -32,7 +32,7 @@ DIM_CLOSE = "\033[0m"
 DOUBLE_PRESS_WINDOW = 1.0  # seconds
 
 
-def build_key_bindings() -> KeyBindings:
+def build_key_bindings(on_shift_tab: Callable[[], str] | None = None) -> KeyBindings:
     """Build the REPL key bindings used by `_build_prompt_session`."""
     bindings = KeyBindings()
 
@@ -60,6 +60,15 @@ def build_key_bindings() -> KeyBindings:
             buf.validate_and_handle()
         else:
             event.app.exit(exception=EOFError())  # type: ignore[attr-defined]
+
+    @bindings.add("s-tab")
+    def _shift_tab(event: object) -> None:
+        if on_shift_tab is None:
+            return
+        buf = event.current_buffer  # type: ignore[attr-defined]
+        buf.text = on_shift_tab()
+        buf.cursor_position = len(buf.text)
+        buf.validate_and_handle()
 
     return bindings
 

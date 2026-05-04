@@ -43,6 +43,7 @@ from prompt_toolkit.layout.processors import Processor, Transformation, Transfor
 from prompt_toolkit.styles import Style
 
 from agent import cli_compact, cli_session
+from agent.cli_coding import CheckRunner, ProjectCommand, ProjectProfile
 from agent.cli_completers import build_completer, expand_at_mentions
 from agent.cli_keys import build_key_bindings, install_sigint_handler
 from agent.core import (
@@ -198,7 +199,9 @@ def _format_card_row(label: str, value: str, action: str = "", *, width: int) ->
 
 def _mode_label(ctx: "ReplContext") -> str:
     if ctx.cli_mode == "coding" and ctx.approval_controller is not None:
-        return f"coding agent · {ctx.approval_controller.mode}"
+        mode = ctx.approval_controller.mode
+        suffix = "just do it" if mode == "auto" else mode
+        return f"coding agent · {suffix}"
     return "system monitor"
 
 
@@ -207,7 +210,7 @@ def _print_launch_card(ctx: "ReplContext") -> None:
     width = _terminal_width()
     provider = _clean_provider(ctx.provider_label)
     provider_action = "/logout to forget" if "cloud" in provider.lower() else ""
-    mode_action = "/approval to change" if ctx.cli_mode == "coding" else "--coding to launch"
+    mode_action = "/approval to change" if ctx.cli_mode == "coding" else "Shift+Tab to code"
     print()
     _print_card_rule("╭", "╮", width=width)
     _print_card_line(f">_ SysControl (v{current_version()})", width=width)
@@ -346,6 +349,22 @@ CODING_TOOLS: tuple[str, ...] = CODING_READ_TOOLS + CODING_WRITE_TOOLS + CODING_
 RISKY_CODING_TOOLS: frozenset[str] = frozenset(CODING_WRITE_TOOLS + CODING_EXEC_TOOLS)
 
 CONFIG_FILE = USER_DATA_DIR / "config.json"
+APPROVAL_MODE_CHOICES: tuple[str, ...] = ("plan", "normal", "auto")
+APPROVAL_MODE_ALIASES: dict[str, str] = {
+    "plan": "plan",
+    "read-only": "plan",
+    "readonly": "plan",
+    "normal": "normal",
+    "standard": "normal",
+    "ask": "normal",
+    "auto": "auto",
+    "auto-accept": "auto",
+    "auto_accept": "auto",
+    "just-do-it": "auto",
+    "just_do_it": "auto",
+    "just do it": "auto",
+    "nuke": "auto",
+}
 
 CODING_PROMPT = """
 ---
@@ -371,17 +390,26 @@ APPROVAL_GUIDANCE = {
     "plan": (
         "PLAN mode. Read/search/git-status tools are allowed. Do not edit files, "
         "create/delete/move files, or run shell commands. Produce a concrete plan "
-        "and ask the user to switch to standard or nuke before implementation."
+        "and ask the user to switch to normal or auto before implementation."
     ),
-    "standard": (
-        "STANDARD mode. Read/search/git-status tools are allowed automatically. "
+    "normal": (
+        "NORMAL mode. Read/search/git-status tools are allowed automatically. "
         "File writes and shell commands require explicit CLI approval before they run."
     ),
-    "nuke": (
-        "NUKE mode. Read, edit, and shell tools may run without per-call approval. "
-        "Still avoid destructive work unrelated to the user's task."
+    "auto": (
+        "AUTO mode (\"just do it\"). Read, edit, and shell tools may run without "
+        "per-call approval. Still avoid destructive work unrelated to the user's task, "
+        "and explain what changed plus what was verified."
     ),
 }
+
+
+def _normalize_approval_mode(raw: str) -> str | None:
+    """Map user-facing approval aliases to canonical coding sub-modes."""
+    key = raw.strip().lower().replace(" ", "-")
+    if key == "just-do-it":
+        return "auto"
+    return APPROVAL_MODE_ALIASES.get(key) or APPROVAL_MODE_ALIASES.get(raw.strip().lower())
 
 
 def _filter_tools(tools: list[dict], allowed_names: tuple[str, ...]) -> list[dict]:
@@ -438,11 +466,12 @@ def _ensure_flags(flags: tuple[str, ...], auto: bool) -> None:
 
 def ensure_coding_permissions(approval_mode: str) -> None:
     """Enable or offer the MCP gates required for the selected coding policy."""
+    approval_mode = _normalize_approval_mode(approval_mode) or "normal"
     if approval_mode == "plan":
         _ensure_flags(("allow_file_read",), auto=False)
-    elif approval_mode == "standard":
+    elif approval_mode == "normal":
         _ensure_flags(("allow_file_read", "allow_file_write", "allow_shell"), auto=False)
-    elif approval_mode == "nuke":
+    elif approval_mode == "auto":
         _ensure_flags(("allow_file_read", "allow_file_write", "allow_shell"), auto=True)
 
 
@@ -487,7 +516,7 @@ class ApprovalController:
     """Interactive approval state for coding-mode tool calls."""
 
     def __init__(self, mode: str) -> None:
-        self.mode = mode
+        self.mode = _normalize_approval_mode(mode) or "normal"
         self._auto_approve_rest = False
         self._spinner: _Spinner | None = None
 
@@ -495,8 +524,8 @@ class ApprovalController:
         self._spinner = spinner
 
     def set_mode(self, mode: str) -> None:
-        self.mode = mode
-        self._auto_approve_rest = mode == "nuke"
+        self.mode = _normalize_approval_mode(mode) or "normal"
+        self._auto_approve_rest = self.mode == "auto"
 
     def approve(self, name: str, args: dict) -> bool:
         if name not in RISKY_CODING_TOOLS:
@@ -504,7 +533,7 @@ class ApprovalController:
         if self.mode == "plan":
             print(f"\n{YELLOW}Plan mode blocked {name}.{RESET}")
             return False
-        if self.mode == "nuke" or self._auto_approve_rest:
+        if self.mode == "auto" or self._auto_approve_rest:
             return True
 
         if self._spinner is not None:
@@ -818,9 +847,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--approval",
-        choices=["plan", "standard", "nuke"],
-        default="standard",
-        help="Coding-mode approval policy: plan is read-only, standard asks before risky tools, nuke auto-accepts.",
+        choices=["plan", "normal", "auto", "standard", "nuke"],
+        default="normal",
+        help="Coding-mode approval policy: plan is read-only, normal asks before risky tools, auto just does it.",
     )
     parser.add_argument(
         "--no-save-key", action="store_true",
@@ -993,6 +1022,8 @@ class ReplContext:
     ollama_client: OpenAI
     pool: MCPClientPool
     tools: list[dict]
+    all_tools: list[dict]
+    raw_system_prompt: str
     system_message: dict
     model: str
     provider_label: str
@@ -1007,6 +1038,47 @@ class ReplContext:
     session_started_at: str | None = None
 
 
+def _active_tools_for_mode(ctx: ReplContext, mode: str) -> list[dict]:
+    if mode == "coding":
+        return _filter_tools(ctx.all_tools, CODING_TOOLS)
+    return ctx.all_tools
+
+
+def _rebuild_mode_state(ctx: ReplContext, mode: str, approval_mode: str | None = None) -> None:
+    """Update active tools, registry, tool approver, and system instructions."""
+    mode = "coding" if mode == "coding" else "system"
+    if mode == "coding":
+        normalized = _normalize_approval_mode(approval_mode or (
+            ctx.approval_controller.mode if ctx.approval_controller else "normal"
+        )) or "normal"
+        ensure_coding_permissions(normalized)
+        if ctx.approval_controller is None:
+            ctx.approval_controller = ApprovalController(normalized)
+        else:
+            ctx.approval_controller.set_mode(normalized)
+        ctx.pool.set_tool_approver(ctx.approval_controller.approve)
+    else:
+        ctx.approval_controller = None
+        ctx.pool.set_tool_approver(None)
+
+    ctx.cli_mode = mode
+    ctx.tools = _active_tools_for_mode(ctx, mode)
+    tool_names = [t["function"]["name"] for t in ctx.tools]
+    ctx.base_system_prompt = build_full_system_prompt(ctx.raw_system_prompt, tool_names)
+    ctx.system_message = (
+        _coding_system_message(ctx.base_system_prompt, ctx.approval_controller.mode)
+        if mode == "coding" and ctx.approval_controller is not None
+        else {"role": "system", "content": ctx.base_system_prompt}
+    )
+    ctx.registry = _build_registry(coding=mode == "coding")
+
+
+def _toggle_mode_command(ctx: ReplContext) -> str:
+    """Slash command submitted by Shift+Tab."""
+    _ = ctx
+    return "/mode"
+
+
 # ── Slash commands ───────────────────────────────────────────────────────────
 
 def _cmd_help(ctx: ReplContext, _args: str) -> SlashResult:
@@ -1018,7 +1090,8 @@ def _cmd_help(ctx: ReplContext, _args: str) -> SlashResult:
     print(f"\n{BOLD}Keyboard{RESET}")
     print(f"  {CYAN}↑/↓{RESET}            History     {CYAN}Ctrl+R{RESET}     Reverse-search")
     print(f"  {CYAN}Tab{RESET}            Complete    {CYAN}Ctrl+L{RESET}     Clear screen")
-    print(f"  {CYAN}Esc, Enter{RESET}     Newline     {CYAN}Ctrl+D{RESET}     Exit\n")
+    print(f"  {CYAN}Shift+Tab{RESET}      Mode toggle {CYAN}Ctrl+D{RESET}     Exit")
+    print(f"  {CYAN}Esc, Enter{RESET}     Newline\n")
     return CONTINUE
 
 
@@ -1056,6 +1129,72 @@ def _cmd_model(ctx: ReplContext, args: str) -> SlashResult:
         return CONTINUE
     print(f"{DIM}model: {ctx.model}  ·  {ctx.provider_label}{RESET}")
     print(f"{DIM}  Usage: /model <model-name> to switch for the rest of this session.{RESET}\n")
+    return CONTINUE
+
+
+def _ensure_coding_for_check(ctx: ReplContext) -> bool:
+    if ctx.cli_mode == "coding":
+        return True
+    print(f"{YELLOW}Coding checks run in coding mode.{RESET} {DIM}Use Shift+Tab or /mode coding first.{RESET}\n")
+    return False
+
+
+def _print_check_plan(label: str, profile: ProjectProfile, command: ProjectCommand) -> None:
+    width = _terminal_width()
+    _print_card_rule("╭", "╮", width=width)
+    _print_card_line(f"{label} Check", width=width)
+    _print_card_line(width=width)
+    _print_card_line(_format_card_row("project:", profile.kind, str(profile.root), width=width), width=width)
+    _print_card_line(_format_card_row("command:", command.command, "", width=width), width=width)
+    _print_card_line(_format_card_row("reason:", command.reason, "", width=width), width=width)
+    _print_card_rule("╰", "╯", width=width)
+
+
+def _run_coding_check(ctx: ReplContext, label: str, command: ProjectCommand) -> None:
+    assert ctx.approval_controller is not None
+    if ctx.approval_controller.mode == "plan":
+        print(f"{DIM}Plan mode: would run `{command.command}` ({command.reason}).{RESET}\n")
+        return
+
+    print(f"{DIM}  $ {command.command}{RESET}")
+    started = time.monotonic()
+    result = ctx.pool.call_one(
+        "run_shell_command",
+        {"command": command.command, "timeout": command.timeout},
+    )
+    elapsed = time.monotonic() - started
+    ctx.last_tool_results[f"{label.lower()}_check"] = result
+    if result.startswith("[tool denied"):
+        print(f"{YELLOW}{result}{RESET}\n")
+        return
+    if result.startswith("[tool error"):
+        print(f"{YELLOW}{result}{RESET}\n")
+        return
+    print(result if result else f"{DIM}(no output){RESET}")
+    print(f"{DIM}  {label} check finished in {elapsed:.1f}s · /show {label.lower()}_check for raw output{RESET}\n")
+
+
+def _cmd_test(ctx: ReplContext, args: str) -> SlashResult:
+    if not _ensure_coding_for_check(ctx):
+        return CONTINUE
+    profile, command = CheckRunner().test_command(args)
+    if command is None:
+        print(f"{YELLOW}No test command detected for {profile.kind}.{RESET} {DIM}Try /test <command>.{RESET}\n")
+        return CONTINUE
+    _print_check_plan("Test", profile, command)
+    _run_coding_check(ctx, "Test", command)
+    return CONTINUE
+
+
+def _cmd_lint(ctx: ReplContext, args: str) -> SlashResult:
+    if not _ensure_coding_for_check(ctx):
+        return CONTINUE
+    profile, command = CheckRunner().lint_command(args)
+    if command is None:
+        print(f"{YELLOW}No lint command detected for {profile.kind}.{RESET} {DIM}Try /lint <command>.{RESET}\n")
+        return CONTINUE
+    _print_check_plan("Lint", profile, command)
+    _run_coding_check(ctx, "Lint", command)
     return CONTINUE
 
 
@@ -1306,18 +1445,55 @@ def _run_update_flow() -> int:
     return 1
 
 
+def _cmd_mode(ctx: ReplContext, args: str) -> SlashResult:
+    """Toggle system/coding mode, optionally with a coding approval sub-mode."""
+    raw = args.strip()
+    parts = raw.split()
+    target = "coding" if ctx.cli_mode == "system" else "system"
+    approval_mode: str | None = None
+
+    if parts:
+        first = parts[0].lower()
+        if first in {"system", "sys"}:
+            target = "system"
+        elif first in {"coding", "code", "agent"}:
+            target = "coding"
+            if len(parts) > 1:
+                approval_mode = _normalize_approval_mode(" ".join(parts[1:]))
+                if approval_mode is None:
+                    print(f"{YELLOW}Usage: /mode coding [plan|normal|auto]{RESET}\n")
+                    return CONTINUE
+        else:
+            maybe_mode = _normalize_approval_mode(raw)
+            if maybe_mode is None:
+                print(f"{YELLOW}Usage: /mode [system|coding] [plan|normal|auto]{RESET}\n")
+                return CONTINUE
+            target = "coding"
+            approval_mode = maybe_mode
+
+    _rebuild_mode_state(ctx, target, approval_mode)
+    if ctx.cli_mode == "coding":
+        assert ctx.approval_controller is not None
+        print(
+            f"{GREEN}✓ Coding mode enabled.{RESET} "
+            f"{DIM}Sub-mode: {ctx.approval_controller.mode} · Shift+Tab toggles back.{RESET}\n"
+        )
+    else:
+        print(f"{GREEN}✓ System monitor mode enabled.{RESET} {DIM}Shift+Tab toggles coding mode.{RESET}\n")
+    return CONTINUE
+
+
 def _cmd_approval(ctx: ReplContext, args: str) -> SlashResult:
-    mode = args.strip().lower()
+    mode = _normalize_approval_mode(args)
     if mode not in APPROVAL_GUIDANCE:
-        print(f"{YELLOW}Usage: /approval plan|standard|nuke{RESET}\n")
+        print(f"{YELLOW}Usage: /approval plan|normal|auto{RESET} {DIM}(auto = just do it){RESET}\n")
         return CONTINUE
-    assert ctx.approval_controller is not None
-    ctx.approval_controller.set_mode(mode)
-    ctx.pool.set_tool_approver(ctx.approval_controller.approve)
-    ensure_coding_permissions(mode)
-    if ctx.base_system_prompt is not None:
-        ctx.system_message = _coding_system_message(ctx.base_system_prompt, mode)
-    print(f"{GREEN}✓ Coding approval mode is now {mode}.{RESET}\n")
+    if ctx.cli_mode != "coding":
+        _rebuild_mode_state(ctx, "coding", mode)
+        print(f"{GREEN}✓ Coding mode enabled.{RESET} {DIM}Sub-mode: {mode}.{RESET}\n")
+        return CONTINUE
+    _rebuild_mode_state(ctx, "coding", mode)
+    print(f"{GREEN}✓ Coding sub-mode is now {mode}.{RESET}\n")
     return CONTINUE
 
 
@@ -1333,6 +1509,13 @@ def _build_registry(coding: bool) -> SlashRegistry:
                               _cmd_tools, usage="/tools [filter]"))
     reg.register(SlashCommand("model", "Show or change the active model",
                               _cmd_model, usage="/model [name]"))
+    reg.register(SlashCommand("mode", "Toggle system/coding mode (Shift+Tab)",
+                              _cmd_mode, usage="/mode [system|coding] [sub-mode]",
+                              arg_choices=("system", "coding", *APPROVAL_MODE_CHOICES)))
+    reg.register(SlashCommand("test", "Run detected or provided test command",
+                              _cmd_test, usage="/test [command]"))
+    reg.register(SlashCommand("lint", "Run detected or provided lint/typecheck command",
+                              _cmd_lint, usage="/lint [command]"))
     reg.register(SlashCommand("doctor", "Run a quick live health scan",
                               _cmd_doctor, usage="/doctor"))
     reg.register(SlashCommand("monitor", "Show a one-shot terminal system dashboard",
@@ -1355,12 +1538,13 @@ def _build_registry(coding: bool) -> SlashRegistry:
                               arg_choices=("undo",)))
     reg.register(SlashCommand("exit", "Quit the session", _cmd_exit,
                               usage="/exit", aliases=("quit", "bye")))
-    if coding:
-        reg.register(SlashCommand(
-            "approval", "Switch coding-mode approval policy",
-            _cmd_approval, usage="/approval plan|standard|nuke",
-            aliases=("mode",), arg_choices=tuple(APPROVAL_GUIDANCE.keys()),
-        ))
+    reg.register(SlashCommand(
+        "approval",
+        "Switch coding sub-mode" if coding else "Set coding sub-mode",
+        _cmd_approval,
+        usage="/approval plan|normal|auto",
+        arg_choices=APPROVAL_MODE_CHOICES,
+    ))
     return reg
 
 
@@ -1460,7 +1644,7 @@ def _help_footer(ctx: ReplContext) -> Callable[[], FormattedText]:
         if not text:
             return FormattedText([
                 ("class:tb.hint", status),
-                ("class:tb.hint", "  / for commands · @file · !cmd"),
+                ("class:tb.hint", "  Shift+Tab mode · / commands · @file · !cmd"),
             ])
 
         if not text.startswith("/"):
@@ -1513,7 +1697,7 @@ def _build_prompt_session(ctx: ReplContext) -> PromptSession:
         completer=build_completer(_SlashCompleter(ctx)),
         complete_while_typing=True,
         auto_suggest=AutoSuggestFromHistory(),
-        key_bindings=build_key_bindings(),
+        key_bindings=build_key_bindings(lambda: _toggle_mode_command(ctx)),
         style=style,
         enable_history_search=True,
         multiline=True,
@@ -1693,6 +1877,7 @@ def main() -> None:
         sys.exit(_run_update_flow())
     if args.coding:
         args.mode = "coding"
+    args.approval = _normalize_approval_mode(args.approval) or "normal"
     print_banner(args.mode)
 
     if not SERVER_PATH.exists():
@@ -1735,6 +1920,8 @@ def main() -> None:
             ollama_client=ollama_client,
             pool=pool,
             tools=tools,
+            all_tools=all_tools,
+            raw_system_prompt=system_prompt,
             system_message=system_message,
             model=model,
             provider_label=provider_label,

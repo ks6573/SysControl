@@ -117,9 +117,9 @@ syscontrol --provider cloud --api-key sk-...       # cloud, skip prompt (key is 
 syscontrol --provider cloud --no-save-key          # cloud, prompt every time
 syscontrol --continue                              # resume the most recent session
 syscontrol --resume                                # pick a previous session from a list
-syscontrol --coding --approval standard            # coding agent, ask before edits/shell
+syscontrol --coding --approval normal              # coding agent, ask before edits/shell
 syscontrol --coding --approval plan                # read-only planning mode
-syscontrol --coding --approval nuke                # auto-accept coding edits/shell
+syscontrol --coding --approval auto                # auto-accept coding edits/shell
 ```
 
 > Cloned (Option B) users can substitute `uv run agent.py` for `syscontrol` in any of the commands below.
@@ -134,10 +134,12 @@ git status/diff, and shell commands. Approval modes:
 | Mode | Behavior |
 |---|---|
 | `plan` | Read-only. The agent can inspect and produce an implementation plan, but edits and shell commands are blocked. |
-| `standard` | Reads are automatic; file writes and shell commands ask for approval in the terminal. |
-| `nuke` | Auto-accepts coding edits and shell commands for the session. |
+| `normal` | Reads are automatic; file writes and shell commands ask for approval in the terminal. |
+| `auto` | "Just do it" mode. Auto-accepts coding edits and shell commands for the session. |
 
-Inside coding mode, use `/approval plan`, `/approval standard`, or `/approval nuke` to switch policies.
+Press `Shift+Tab` to toggle between system monitor mode and coding mode. Inside coding mode,
+use `/approval plan`, `/approval normal`, or `/approval auto` to switch policies. The old
+`standard` and `nuke` names still work as aliases.
 
 ### Slash Commands & Keyboard Shortcuts
 
@@ -150,12 +152,15 @@ The interactive CLI feels like Codex / Claude Code: type `/` to pop a completion
 | `/reset` | Clear conversation history (keeps system prompt) |
 | `/tools [filter]` | List available tools, optionally filtered by substring |
 | `/model` | Show the active model and provider |
+| `/mode [system\|coding] [plan\|normal\|auto]` | Toggle system/coding mode or enter a coding sub-mode |
+| `/test [command]` | Run a detected test command, or a provided command, in coding mode |
+| `/lint [command]` | Run a detected lint/typecheck command, or a provided command, in coding mode |
 | `/memory <note>` | Append a timestamped note to `SysControl_Memory.md` |
 | `/show [tool_name]` | Dump the full output of the most recent tool call |
 | `/sessions` | List recently saved CLI sessions |
 | `/init` | Generate a `CLAUDE.md` for the current project |
 | `/compact [undo]` | Summarize the conversation; `undo` restores the prior history |
-| `/approval plan\|standard\|nuke` | Switch coding-mode approval policy (coding mode only) |
+| `/approval plan\|normal\|auto` | Switch coding-mode approval policy |
 | `/update [force]` | Check for and install the latest SysControl release |
 | `/logout` | Forget the saved Ollama Cloud API key |
 | `/exit` | Quit the session |
@@ -168,6 +173,7 @@ The interactive CLI feels like Codex / Claude Code: type `/` to pop a completion
 | `↑` / `↓` | History navigation |
 | `Ctrl+R` | Reverse history search |
 | `Tab` | Complete the current slash command, `@file`, or argument |
+| `Shift+Tab` | Toggle system/coding mode |
 | `Ctrl+L` | Clear the screen |
 | `Esc, Enter` | Always insert a newline (alternative to letting Enter add one in multi-line mode) |
 
