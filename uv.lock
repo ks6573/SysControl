@@ -1333,7 +1333,7 @@ wheels = [
 
 [[package]]
 name = "syscontrol"
-version = "1.11.0"
+version = "1.14.0"
 source = { editable = "." }
 dependencies = [
     { name = "matplotlib" },

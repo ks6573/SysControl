@@ -22,13 +22,14 @@ import getpass
 import itertools
 import json
 import os
+import shutil
 import sys
 import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from openai import OpenAI
 from prompt_toolkit import PromptSession
@@ -145,18 +146,164 @@ def _append_memory_note(note: str) -> None:
     print(f"{GREEN}✓ Note saved to {MEMORY_FILE.name}{RESET}")
 
 
+# ── Terminal presentation ─────────────────────────────────────────────────────
+
+_CARD_MAX_WIDTH = 72
+_CARD_MIN_WIDTH = 54
+_METER_WIDTH = 24
+
+
+def _terminal_width(max_width: int = _CARD_MAX_WIDTH) -> int:
+    """Return a compact width for cards that still fits narrow terminals."""
+    cols = shutil.get_terminal_size((max_width + 4, 24)).columns
+    return max(_CARD_MIN_WIDTH, min(max_width, cols - 4))
+
+
+def _clip(text: object, width: int) -> str:
+    """Clip display text to a single line without introducing layout jitter."""
+    s = str(text)
+    if len(s) <= width:
+        return s
+    return s[: max(0, width - 1)] + "…"
+
+
+def _cwd_display(*, basename: bool = False) -> str:
+    cwd = os.getcwd().replace(os.path.expanduser("~"), "~")
+    return os.path.basename(os.getcwd()) or "/" if basename else cwd
+
+
+def _clean_provider(label: str) -> str:
+    return " ".join(label.split())
+
+
+def _print_card_line(text: str = "", *, width: int) -> None:
+    print(f"{DIM}│{RESET} {_clip(text, width - 4):<{width - 4}} {DIM}│{RESET}")
+
+
+def _print_card_rule(left: str, right: str, *, width: int) -> None:
+    fill = "─" * max(0, width - 2)
+    print(f"{DIM}{left}{fill}{right}{RESET}")
+
+
+def _format_card_row(label: str, value: str, action: str = "", *, width: int) -> str:
+    action_width = 20 if width >= 66 and action else 0
+    value_width = max(14, width - 4 - 12 - action_width)
+    row = f"{label:<10} {_clip(value, value_width):<{value_width}}"
+    if action_width:
+        row += f" {_clip(action, action_width):<{action_width}}"
+    return row
+
+
+def _mode_label(ctx: "ReplContext") -> str:
+    if ctx.cli_mode == "coding" and ctx.approval_controller is not None:
+        return f"coding agent · {ctx.approval_controller.mode}"
+    return "system monitor"
+
+
+def _print_launch_card(ctx: "ReplContext") -> None:
+    """Print the Codex-style launch card and startup tip."""
+    width = _terminal_width()
+    provider = _clean_provider(ctx.provider_label)
+    provider_action = "/logout to forget" if "cloud" in provider.lower() else ""
+    mode_action = "/approval to change" if ctx.cli_mode == "coding" else "--coding to launch"
+    print()
+    _print_card_rule("╭", "╮", width=width)
+    _print_card_line(f">_ SysControl (v{current_version()})", width=width)
+    _print_card_line(width=width)
+    _print_card_line(_format_card_row("model:", ctx.model, "/model to change", width=width), width=width)
+    _print_card_line(
+        _format_card_row("provider:", provider, provider_action, width=width),
+        width=width,
+    )
+    _print_card_line(_format_card_row("mode:", _mode_label(ctx), mode_action, width=width), width=width)
+    _print_card_line(_format_card_row("directory:", _cwd_display(), "", width=width), width=width)
+    if load_memory() is not None:
+        _print_card_line(_format_card_row("memory:", "available", "/memory to add note", width=width), width=width)
+    _print_card_rule("╰", "╯", width=width)
+    print(f"\n{BOLD}Tip:{RESET} Try {CYAN}/doctor{RESET} for a quick health scan, {CYAN}/monitor{RESET} for a terminal dashboard, or {CYAN}@file{RESET} to inline context.\n")
+
+
+def _meter(percent: float | int | None, *, width: int = _METER_WIDTH) -> str:
+    if percent is None:
+        return "─" * width
+    value = max(0.0, min(100.0, float(percent)))
+    filled = round((value / 100.0) * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+def _json_tool_result(raw: str) -> dict[str, Any] | None:
+    """Parse the JSON text returned by ``MCPClient.call_tool``."""
+    if raw.startswith("[tool error"):
+        return None
+    text = raw.split("\n[chart_image:", 1)[0].strip()
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _as_float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _primary_disk(snapshot: dict[str, Any]) -> dict[str, Any]:
+    partitions = snapshot.get("disk", {}).get("partitions", [])
+    if not isinstance(partitions, list) or not partitions:
+        return {}
+    root = next((p for p in partitions if p.get("mountpoint") == "/"), None)
+    return root if isinstance(root, dict) else partitions[0]
+
+
+def _print_system_snapshot(snapshot: dict[str, Any], realtime: dict[str, Any] | None = None) -> None:
+    """Render a compact system snapshot artifact from live MCP data."""
+    width = _terminal_width()
+    cpu_pct = _as_float(snapshot.get("cpu", {}).get("total_percent"))
+    ram = snapshot.get("ram", {}).get("ram", {})
+    ram_pct = _as_float(ram.get("percent_used"))
+    disk = _primary_disk(snapshot)
+    disk_pct = _as_float(disk.get("percent_used"))
+    battery = snapshot.get("battery", {})
+    battery_pct = _as_float(battery.get("percent")) if isinstance(battery, dict) else None
+    net = (realtime or {}).get("network", {}) if isinstance(realtime, dict) else {}
+    down = net.get("download_mbps")
+    up = net.get("upload_mbps")
+
+    print()
+    _print_card_rule("╭", "╮", width=width)
+    _print_card_line("System Snapshot", width=width)
+    _print_card_line(width=width)
+    _print_card_line(f"CPU      {_meter(cpu_pct)}  {cpu_pct if cpu_pct is not None else 'n/a'}%", width=width)
+    ram_text = (
+        f"{ram.get('used_gb', 'n/a')} / {ram.get('total_gb', 'n/a')} GB"
+        if isinstance(ram, dict) else "n/a"
+    )
+    _print_card_line(f"Memory   {_meter(ram_pct)}  {ram_text}", width=width)
+    disk_text = f"{disk.get('free_gb', 'n/a')} GB free" if disk else "n/a"
+    _print_card_line(f"Disk     {_meter(disk_pct)}  {disk_text}", width=width)
+    if battery_pct is not None:
+        plugged = "charging" if battery.get("plugged_in") else "battery"
+        _print_card_line(f"Battery  {_meter(battery_pct)}  {battery_pct:g}% {plugged}", width=width)
+    if down is not None or up is not None:
+        _print_card_line(f"Network  download {down} Mbps · upload {up} Mbps", width=width)
+    _print_card_rule("╰", "╯", width=width)
+
+
 # ── Banner ────────────────────────────────────────────────────────────────────
 
 def print_banner(mode: str = "system") -> None:
-    """Print a quiet one-line greeting (no ASCII art).
+    """Reserve the launch surface for the full session card.
 
-    The full status (model · provider · cwd) lands on its own dim line just
-    before the REPL prompt opens.
+    Provider/model information is not known until after startup, so the
+    Codex-style card is printed from ``_print_launch_card`` just before the
+    prompt opens.
     """
-    role = "coding agent" if mode == "coding" else "system monitor"
-    print(f"\n{DIM}SysControl  ·  {role}{RESET}")
-    if load_memory() is not None:
-        print(f"{DIM}  memory available · type /memory to add a note{RESET}")
+    _ = mode
 
 
 # ── Error classification ───────────────────────────────────────────────────────
@@ -308,6 +455,32 @@ def _summarize_tool_call(name: str, args: dict) -> str:
     return name
 
 
+def _print_approval_card(name: str, args: dict, summary: str) -> None:
+    """Render a compact approval prompt card for risky coding tools."""
+    width = _terminal_width()
+    target = ""
+    if name in {"write_file", "edit_file", "delete_file", "create_directory"}:
+        target = str(args.get("path", ""))
+    elif name in {"move_file", "copy_file"}:
+        target = f"{args.get('src', '')} → {args.get('dst', '')}"
+    elif name == "run_shell_command":
+        target = str(args.get("command", ""))
+
+    print()
+    _print_card_rule("╭", "╮", width=width)
+    _print_card_line(f"Approval Required                                     {name}", width=width)
+    _print_card_line(width=width)
+    if target:
+        _print_card_line("Target", width=width)
+        _print_card_line(target, width=width)
+        _print_card_line(width=width)
+    _print_card_line("Summary", width=width)
+    _print_card_line(summary, width=width)
+    _print_card_line(width=width)
+    _print_card_line("y yes   n no   a approve session   p plan mode", width=width)
+    _print_card_rule("╰", "╯", width=width)
+
+
 class ApprovalController:
     """Interactive approval state for coding-mode tool calls."""
 
@@ -335,8 +508,7 @@ class ApprovalController:
         if self._spinner is not None:
             self._spinner.stop()
         summary = _summarize_tool_call(name, args)
-        print(f"\n{BOLD}{YELLOW}Approve tool call?{RESET} {summary}")
-        print(f"{DIM}  y = yes, n = no, a = approve all for this session, p = switch to plan{RESET}")
+        _print_approval_card(name, args, summary)
         print(f"{BOLD}[y/n/a/p]:{RESET} ", end="", flush=True)
         try:
             choice = input("").strip().lower()
@@ -487,11 +659,11 @@ def _build_cli_callbacks(
 
 
 def _render_tool_summary(name: str, result: str, elapsed: float) -> None:
-    """Print a one-line themed header per finished tool call."""
+    """Print a compact timeline row per finished tool call."""
     char_count = len(result or "")
     line_count = (result or "").count("\n") + (1 if result else 0)
     suffix = "no output" if not result else f"{line_count} line{'s' if line_count != 1 else ''}, {char_count} chars"
-    print(f"{DIM}  → {name} · {elapsed:.1f}s · {suffix}{RESET}", flush=True)
+    print(f"{DIM}  • {name:<24} {elapsed:.1f}s · {suffix}{RESET}", flush=True)
 
 
 def run_turn(
@@ -874,8 +1046,111 @@ def _cmd_tools(ctx: ReplContext, args: str) -> SlashResult:
     return CONTINUE
 
 
-def _cmd_model(ctx: ReplContext, _args: str) -> SlashResult:
-    print(f"{DIM}model: {ctx.model}  ·  {ctx.provider_label}{RESET}\n")
+def _cmd_model(ctx: ReplContext, args: str) -> SlashResult:
+    model = args.strip()
+    if model:
+        ctx.model = model
+        print(f"{GREEN}✓ Model set to {model}.{RESET} {DIM}Provider: {ctx.provider_label}{RESET}\n")
+        return CONTINUE
+    print(f"{DIM}model: {ctx.model}  ·  {ctx.provider_label}{RESET}")
+    print(f"{DIM}  Usage: /model <model-name> to switch for the rest of this session.{RESET}\n")
+    return CONTINUE
+
+
+def _call_json_tool(ctx: ReplContext, name: str, args: dict | None = None) -> dict[str, Any] | None:
+    raw = ctx.pool.call_one(name, args or {})
+    ctx.last_tool_results[name] = raw
+    parsed = _json_tool_result(raw)
+    if parsed is None:
+        print(f"{YELLOW}{name} failed:{RESET} {raw}\n")
+    return parsed
+
+
+def _collect_system_snapshot(ctx: ReplContext) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+    """Fetch the live data used by /doctor and /monitor."""
+    snapshot = _call_json_tool(ctx, "get_full_snapshot")
+    realtime = _call_json_tool(ctx, "get_realtime_io", {"interval": 1})
+    alerts = _call_json_tool(ctx, "get_system_alerts")
+    battery = _call_json_tool(ctx, "get_battery_status")
+    if snapshot is not None and isinstance(battery, dict) and "error" not in battery:
+        snapshot["battery"] = battery
+    return snapshot, realtime, alerts
+
+
+def _print_alerts(alerts: dict[str, Any] | None) -> None:
+    if not alerts:
+        return
+    summary = alerts.get("summary") or "No summary returned."
+    count = int(alerts.get("alert_count") or 0)
+    if count == 0:
+        print(f"{GREEN}✓ {summary}{RESET}")
+        return
+    color = YELLOW
+    if alerts.get("has_critical"):
+        color = YELLOW
+    print(f"{color}{summary}{RESET}")
+    for alert in alerts.get("alerts", [])[:5]:
+        if not isinstance(alert, dict):
+            continue
+        severity = str(alert.get("severity", "")).upper()
+        resource = alert.get("resource", "system")
+        message = alert.get("message", "")
+        print(f"  {severity:<8} {resource}: {message}")
+
+
+def _print_process_table(title: str, rows: list[dict[str, Any]]) -> None:
+    print(f"\n{BOLD}{title}{RESET}")
+    print(f"{DIM}{'process':<28} {'cpu':>7} {'mem':>7} {'status':>12}{RESET}")
+    for proc in rows[:5]:
+        name = _clip(proc.get("name", "unknown"), 28)
+        cpu = _as_float(proc.get("cpu_percent")) or 0.0
+        mem = _as_float(proc.get("memory_percent")) or 0.0
+        status = _clip(proc.get("status", ""), 12)
+        print(f"  {name:<28} {cpu:>6.1f}% {mem:>6.1f}% {status:>12}")
+
+
+def _cmd_doctor(ctx: ReplContext, _args: str) -> SlashResult:
+    """Run a one-shot health scan and render a compact artifact."""
+    spinner = _Spinner()
+    spinner.start("Running doctor scan…")
+    try:
+        snapshot, realtime, alerts = _collect_system_snapshot(ctx)
+    finally:
+        spinner.stop()
+    if snapshot is None:
+        return CONTINUE
+
+    print(f"\n{BOLD}SysControl Doctor{RESET}")
+    _print_alerts(alerts)
+    _print_system_snapshot(snapshot, realtime)
+    mem_rows = snapshot.get("top_processes_by_memory", [])
+    if isinstance(mem_rows, list):
+        _print_process_table("Top Memory Processes", mem_rows)
+    print(f"\n{DIM}/show get_full_snapshot for raw data · /monitor for dashboard view{RESET}\n")
+    return CONTINUE
+
+
+def _cmd_monitor(ctx: ReplContext, _args: str) -> SlashResult:
+    """Render a terminal dashboard from live system data."""
+    spinner = _Spinner()
+    spinner.start("Sampling system monitor…")
+    try:
+        snapshot, realtime, alerts = _collect_system_snapshot(ctx)
+    finally:
+        spinner.stop()
+    if snapshot is None:
+        return CONTINUE
+
+    print(f"\n{BOLD}>_ SysControl Monitor{RESET} {DIM}one-shot · refresh with /monitor · ask with /doctor{RESET}")
+    _print_alerts(alerts)
+    _print_system_snapshot(snapshot, realtime)
+    cpu_rows = snapshot.get("top_processes_by_cpu", [])
+    mem_rows = snapshot.get("top_processes_by_memory", [])
+    if isinstance(cpu_rows, list):
+        _print_process_table("Top CPU Processes", cpu_rows)
+    if isinstance(mem_rows, list):
+        _print_process_table("Top Memory Processes", mem_rows)
+    print(f"\n{DIM}q quit is implicit here; run /monitor again to refresh, /show get_realtime_io for throughput JSON.{RESET}\n")
     return CONTINUE
 
 
@@ -1054,8 +1329,12 @@ def _build_registry(coding: bool) -> SlashRegistry:
                               _cmd_reset, usage="/reset"))
     reg.register(SlashCommand("tools", "List available tools (optional substring filter)",
                               _cmd_tools, usage="/tools [filter]"))
-    reg.register(SlashCommand("model", "Show the active model and provider",
-                              _cmd_model, usage="/model"))
+    reg.register(SlashCommand("model", "Show or change the active model",
+                              _cmd_model, usage="/model [name]"))
+    reg.register(SlashCommand("doctor", "Run a quick live health scan",
+                              _cmd_doctor, usage="/doctor"))
+    reg.register(SlashCommand("monitor", "Show a one-shot terminal system dashboard",
+                              _cmd_monitor, usage="/monitor"))
     reg.register(SlashCommand("memory", "Append a note to SysControl_Memory.md",
                               _cmd_memory, usage="/memory <note>"))
     reg.register(SlashCommand("update", "Check for and install the latest SysControl release",
@@ -1123,12 +1402,7 @@ class _SlashCompleter(Completer):
 
 
 def _help_footer(ctx: ReplContext) -> Callable[[], FormattedText]:
-    """Render a Claude-Code-style slash-command list under the prompt.
-
-    Visible when the buffer is empty or begins with ``/``; collapses to a
-    single thin status line as soon as the user starts typing real text so
-    it never gets in the way of long input.
-    """
+    """Render a compact status line or filtered slash palette."""
     from prompt_toolkit.application import get_app
 
     def _render() -> FormattedText:
@@ -1136,7 +1410,7 @@ def _help_footer(ctx: ReplContext) -> Callable[[], FormattedText]:
         with contextlib.suppress(Exception):
             text = get_app().current_buffer.text
 
-        cwd = os.path.basename(os.getcwd()) or "/"
+        cwd = _cwd_display(basename=True)
         approval = (
             f"·{ctx.approval_controller.mode} "
             if ctx.cli_mode == "coding" and ctx.approval_controller is not None
@@ -1147,25 +1421,34 @@ def _help_footer(ctx: ReplContext) -> Callable[[], FormattedText]:
             f"· {cwd} "
         )
 
-        showing_help = (not text) or text.startswith("/")
-        if not showing_help:
+        if not text:
             return FormattedText([
                 ("class:tb.hint", status),
-                ("class:tb.hint", "  /help · Enter submits · Ctrl-D submits multiline · Ctrl-C cancels"),
+                ("class:tb.hint", "  / for commands · @file · !cmd"),
+            ])
+
+        if not text.startswith("/"):
+            return FormattedText([
+                ("class:tb.hint", status),
+                ("class:tb.hint", "  Enter submits · Ctrl-D submits multiline · Ctrl-C cancels"),
             ])
 
         rows: list[tuple[str, str]] = [("class:tb.hint", status + "\n")]
         prefix = text[1:].lower() if text.startswith("/") else ""
         commands = [c for c in ctx.registry.visible(ctx) if c.name.startswith(prefix)]
         if not commands:
-            commands = ctx.registry.visible(ctx)
+            rows.append(("class:tb.desc", "  no matching commands\n"))
+            rows.append(("class:tb.hint", "  /help lists everything"))
+            return FormattedText(rows)
         width = max(len(c.usage or f"/{c.name}") for c in commands)
-        for cmd in commands[:14]:
+        for cmd in commands[:6]:
             usage = cmd.usage or f"/{cmd.name}"
             rows.append(("class:tb.cmd", f"  {usage:<{width}}  "))
             rows.append(("class:tb.desc", f"{cmd.description}\n"))
-        rows.append(("class:tb.hint",
-                     "  Enter submits · Ctrl-D for multi-line · Ctrl-C cancels · @file inlines · !cmd shells"))
+        if len(commands) > 6:
+            rows.append(("class:tb.hint", f"  +{len(commands) - 6} more · /help lists all commands"))
+        else:
+            rows.append(("class:tb.hint", "  Enter runs command · Tab completes"))
         return FormattedText(rows)
 
     return _render
@@ -1204,7 +1487,7 @@ def _build_prompt_session(ctx: ReplContext) -> PromptSession:
 def _read_input(session: PromptSession) -> str | None:
     """Return the next user input, or None on EOF/Ctrl+D."""
     try:
-        text: str = session.prompt(FormattedText([("class:prompt.glyph", "▎ ")]))
+        text: str = session.prompt(FormattedText([("class:prompt.glyph", "› ")]))
     except EOFError:
         return None
     except KeyboardInterrupt:
@@ -1287,15 +1570,8 @@ def _run_shell_escape(ctx: ReplContext, command: str) -> None:
 
 
 def _print_status_line(ctx: ReplContext) -> None:
-    """Print the single dim preamble line that opens every session."""
-    cwd = os.getcwd().replace(os.path.expanduser("~"), "~")
-    mode_suffix = ""
-    if ctx.cli_mode == "coding" and ctx.approval_controller is not None:
-        mode_suffix = f" · {ctx.approval_controller.mode}"
-    print(
-        f"\r{DIM}working in {cwd}  ·  {ctx.model}  ·  "
-        f"{ctx.provider_label}  ·  {len(ctx.tools)} tools{mode_suffix}{RESET}\n"
-    )
+    """Print the launch card that opens every session."""
+    _print_launch_card(ctx)
 
 
 def _repl_loop(ctx: ReplContext) -> None:

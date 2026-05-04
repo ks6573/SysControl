@@ -36,6 +36,7 @@ def _write(data: dict) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")
+    os.chmod(CREDENTIALS_FILE, 0o600)
 
 
 def load_cloud_api_key() -> str | None:

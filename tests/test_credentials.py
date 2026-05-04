@@ -31,6 +31,14 @@ def test_save_writes_file_with_owner_only_perms(_isolated_credentials_file: Path
     assert mode == 0o600, f"expected 0600 perms, got {oct(mode)}"
 
 
+def test_save_repairs_existing_permissive_file(_isolated_credentials_file: Path) -> None:
+    _isolated_credentials_file.write_text("{}", encoding="utf-8")
+    os.chmod(_isolated_credentials_file, 0o644)
+    credentials.save_cloud_api_key("sk-test-repair")
+    mode = _isolated_credentials_file.stat().st_mode & 0o777
+    assert mode == 0o600, f"expected repaired 0600 perms, got {oct(mode)}"
+
+
 def test_save_strips_whitespace() -> None:
     credentials.save_cloud_api_key("  sk-padded  ")
     assert credentials.load_cloud_api_key() == "sk-padded"
