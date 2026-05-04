@@ -37,7 +37,9 @@ from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.formatted_text.utils import fragment_list_len
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
 from prompt_toolkit.styles import Style
 
 from agent import cli_compact, cli_session
@@ -1401,6 +1403,40 @@ class _SlashCompleter(Completer):
                 yield Completion(choice, start_position=-len(tail))
 
 
+class _InputBandProcessor(Processor):
+    """Give the active prompt a full-width Codex-style input band."""
+
+    _style = "class:input-band"
+    _prompt_style = "class:input-band class:prompt.glyph"
+
+    def apply_transformation(self, ti: TransformationInput) -> Transformation:
+        prefix_text = "  › " if ti.lineno == 0 else "    "
+        prefix = [(self._prompt_style, prefix_text)]
+        styled_fragments = [
+            (f"{style} {self._style}".strip(), text, *rest)
+            for style, text, *rest in ti.fragments
+        ]
+        fragments = prefix + styled_fragments
+        visible = fragment_list_len(fragments)
+        pad = max(0, ti.width - visible)
+        if pad:
+            fragments.append((self._style, " " * pad))
+
+        shift = len(prefix_text)
+
+        def source_to_display(i: int) -> int:
+            return i + shift
+
+        def display_to_source(i: int) -> int:
+            return max(0, i - shift)
+
+        return Transformation(
+            fragments,
+            source_to_display=source_to_display,
+            display_to_source=display_to_source,
+        )
+
+
 def _help_footer(ctx: ReplContext) -> Callable[[], FormattedText]:
     """Render a compact status line or filtered slash palette."""
     from prompt_toolkit.application import get_app
@@ -1467,7 +1503,8 @@ def _build_prompt_session(ctx: ReplContext) -> PromptSession:
         "tb.hint": "fg:#666666",
         "tb.cmd": "fg:#5fafff bold",
         "tb.desc": "fg:#aaaaaa",
-        "prompt.glyph": "fg:#5fafff bold",
+        "input-band": "bg:#343b49 #edf1f7",
+        "prompt.glyph": "bg:#343b49 fg:#edf1f7 bold",
         "bottom-toolbar": "noreverse",
     })
 
@@ -1481,13 +1518,14 @@ def _build_prompt_session(ctx: ReplContext) -> PromptSession:
         enable_history_search=True,
         multiline=True,
         bottom_toolbar=_help_footer(ctx),
+        input_processors=[_InputBandProcessor()],
     )
 
 
 def _read_input(session: PromptSession) -> str | None:
     """Return the next user input, or None on EOF/Ctrl+D."""
     try:
-        text: str = session.prompt(FormattedText([("class:prompt.glyph", "› ")]))
+        text: str = session.prompt("")
     except EOFError:
         return None
     except KeyboardInterrupt:
