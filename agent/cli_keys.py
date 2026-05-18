@@ -1,19 +1,23 @@
 """
-Key bindings and SIGINT handling for the SysControl CLI prompt.
+Key bindings, SIGINT, and SIGWINCH handling for the SysControl CLI prompt.
 
-Two responsibilities:
+Responsibilities:
 
 1. ``build_key_bindings()`` returns the prompt_toolkit ``KeyBindings`` for the
-   interactive REPL (Codex-style multi-line: Enter submits a single-line buffer,
-   inserts a newline once the buffer is multi-line; Ctrl-D submits any non-empty
-   buffer and only triggers EOF on an empty buffer; Ctrl-L clears the screen;
-   Esc-Enter always inserts a newline).
+   interactive REPL (Claude-Code-style: Enter always submits the buffer; Ctrl-J
+   and Esc-Enter explicitly insert a newline for multi-line input; Ctrl-D
+   submits any non-empty buffer and only triggers EOF on an empty buffer;
+   Ctrl-L clears the screen).
 
 2. ``install_sigint_handler(...)`` installs a ``SIGINT`` handler for the lifetime
    of the REPL.  The first Ctrl-C during a streaming turn signals cancellation
    via a ``threading.Event`` (already plumbed through ``TurnCallbacks`` and
    ``run_streaming_turn``).  A second Ctrl-C within ``DOUBLE_PRESS_WINDOW`` shuts
    the MCP pool down cleanly and exits with status 130.
+
+3. ``install_resize_handler(...)`` installs a ``SIGWINCH`` handler that invokes
+   a callback whenever the terminal is resized so the REPL can invalidate cached
+   widths and re-render its status footer / cards.
 """
 
 from __future__ import annotations
@@ -45,13 +49,21 @@ def build_key_bindings(on_shift_tab: Callable[[], str] | None = None) -> KeyBind
     def _insert_newline_alt(event: object) -> None:
         event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
 
+    @bindings.add("c-j")
+    def _insert_newline_ctrl_j(event: object) -> None:
+        # Claude-Code-style: Ctrl-J inserts an explicit newline for multi-line
+        # input.  Esc-Enter is preserved as an alias for terminals that emit a
+        # different sequence.
+        event.current_buffer.insert_text("\n")  # type: ignore[attr-defined]
+
     @bindings.add("enter")
     def _enter(event: object) -> None:
+        # Always submit on Enter.  Multi-line input is composed with Ctrl-J or
+        # Esc-Enter to avoid the "once-multiline-always-newline" trap from the
+        # previous binding (which inserted a newline if the buffer already
+        # contained one).
         buf = event.current_buffer  # type: ignore[attr-defined]
-        if "\n" in buf.text:
-            buf.insert_text("\n")
-        else:
-            buf.validate_and_handle()
+        buf.validate_and_handle()
 
     @bindings.add("c-d")
     def _ctrl_d(event: object) -> None:
@@ -111,3 +123,29 @@ def install_sigint_handler(
         yield
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+@contextlib.contextmanager
+def install_resize_handler(on_resize: Callable[[], None]) -> Iterator[None]:
+    """Install a SIGWINCH handler that calls *on_resize* when the terminal is
+    resized.  Restores the prior handler on exit.
+
+    Only installs on the main thread.  Silently no-ops on platforms that do not
+    expose SIGWINCH (e.g. Windows).
+    """
+    sigwinch = getattr(signal, "SIGWINCH", None)
+    if sigwinch is None or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    previous = signal.getsignal(sigwinch)
+
+    def _handler(_signum: int, _frame: object) -> None:
+        with contextlib.suppress(Exception):
+            on_resize()
+
+    signal.signal(sigwinch, _handler)
+    try:
+        yield
+    finally:
+        signal.signal(sigwinch, previous)

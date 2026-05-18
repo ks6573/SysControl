@@ -671,6 +671,15 @@ class MCPClientPool:
         self._provider_base_url = provider_base_url
         self._tool_approver = tool_approver
 
+    @property
+    def primary_client(self) -> MCPClient:
+        """The eagerly-created MCP client at slot 0.
+
+        Exposed so introspection code (``/mcp``, health checks) can read the
+        subprocess state without reaching into ``_clients``.
+        """
+        return self._clients[0]
+
     def set_provider_config(self, api_key: str | None, base_url: str | None) -> None:
         """Update provider details for native tools that need configured credentials."""
         self._provider_api_key = api_key
@@ -1034,12 +1043,31 @@ class TurnCallbacks:
     """Callbacks injected by CLI / GUI to handle presentation during a turn.
 
     Every callback has a safe no-op default so callers only override what they need.
+
+    Optional hooks:
+        on_subagent_started: fired when the LLM dispatches a ``run_agent`` tool
+            call.  Receives (agent_name, task_excerpt).
+        on_subagent_finished: fired after the ``run_agent`` call returns.
+            Receives (agent_name, result_preview).
+        on_usage: fired when the streaming API reports token usage (requires
+            ``stream_options={"include_usage": True}`` on the request, which we
+            enable in ``_create_llm_stream``).  Receives (prompt_tokens,
+            completion_tokens).
     """
 
     on_token: Callable[[str], None] = field(default_factory=lambda: lambda _t: None)
     on_tool_started: Callable[[list[str]], None] = field(default_factory=lambda: lambda _n: None)
     on_tool_finished: Callable[[str, str], None] = field(default_factory=lambda: lambda _n, _r: None)
     on_error: Callable[[str, str], None] = field(default_factory=lambda: lambda _c, _m: None)
+    on_subagent_started: Callable[[str, str], None] = field(
+        default_factory=lambda: lambda _a, _t: None
+    )
+    on_subagent_finished: Callable[[str, str], None] = field(
+        default_factory=lambda: lambda _a, _r: None
+    )
+    on_usage: Callable[[int, int], None] = field(
+        default_factory=lambda: lambda _p, _c: None
+    )
     cancel_event: threading.Event | None = field(default=None)
 
 
@@ -1062,12 +1090,13 @@ def _create_llm_stream(
         # always pick up the overload through keyword arguments.  Cast it.
         return cast(
             "Stream[ChatCompletionChunk]",
-            llm.chat.completions.create(
+            llm.chat.completions.create(  # type: ignore[call-overload]
                 model=model,
                 max_tokens=MAX_TOKENS,
-                tools=tools,  # type: ignore[arg-type]
-                messages=[system_message, *messages],  # type: ignore[list-item]
+                tools=tools,
+                messages=[system_message, *messages],
                 stream=True,
+                stream_options={"include_usage": True},
             ),
         )
     except openai.OpenAIError as exc:
@@ -1108,6 +1137,15 @@ def _accumulate_stream_chunks(
                 with contextlib.suppress(Exception):
                     stream.close()
                 return "".join(content_parts), tool_calls, "cancelled"
+
+            # Usage chunk (sent at end of stream when include_usage=True).  It
+            # has no choices array, so handle before the choice extraction.
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+                with contextlib.suppress(Exception):
+                    callbacks.on_usage(int(prompt_tokens), int(completion_tokens))
 
             choice = chunk.choices[0] if chunk.choices else None
             if choice is None:
@@ -1222,6 +1260,20 @@ def _execute_tool_calls(
     names = [tc["function"]["name"] for tc in prepared]
     callbacks.on_tool_started(names)
 
+    # Sub-agent visibility — when a run_agent call is dispatched, surface the
+    # delegated (agent_name, task) so the CLI / GUI can show a breadcrumb.
+    for tc in prepared:
+        if tc["function"]["name"] != "run_agent":
+            continue
+        try:
+            args = json.loads(tc["function"]["arguments"] or "{}")
+            sub_name = str(args.get("agent_name") or args.get("name") or "?")
+            sub_task = str(args.get("task") or "")
+            with contextlib.suppress(Exception):
+                callbacks.on_subagent_started(sub_name, sub_task)
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
         results = pool.call_tools_parallel(prepared)
     except RuntimeError as exc:
@@ -1231,6 +1283,10 @@ def _execute_tool_calls(
         callbacks.on_error("Tool", f"Tool execution failed: {exc}")
         return "error"
 
+    # Index the prepared calls so we can recover the sub-agent name from the
+    # tool_call_id when emitting on_subagent_finished.
+    prepared_by_id: dict[str, dict] = {tc["id"]: tc for tc in prepared}
+
     for tc_id, name, result in results:
         messages.append({
             "role": "tool",
@@ -1238,6 +1294,17 @@ def _execute_tool_calls(
             "content": result,
         })
         callbacks.on_tool_finished(name, result)
+        if name == "run_agent":
+            matched = prepared_by_id.get(tc_id)
+            sub_name = "?"
+            if matched is not None:
+                try:
+                    args = json.loads(matched["function"]["arguments"] or "{}")
+                    sub_name = str(args.get("agent_name") or args.get("name") or "?")
+                except Exception:  # noqa: BLE001
+                    pass
+            with contextlib.suppress(Exception):
+                callbacks.on_subagent_finished(sub_name, result)
 
     return None  # continue loop
 

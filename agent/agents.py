@@ -15,7 +15,7 @@ coder       Code editor/developer (read, search, edit code, git, shell).
 """
 from __future__ import annotations
 
-import functools
+import threading
 from dataclasses import dataclass
 
 
@@ -172,10 +172,51 @@ BUILT_IN_AGENTS: dict[str, AgentSpec] = {
 
 
 class AgentRegistry:
-    """Provides lookup access to AgentSpec instances."""
+    """Provides lookup access to AgentSpec instances.
+
+    Built-in agents are loaded eagerly from ``BUILT_IN_AGENTS``.  User-defined
+    agents are loaded from ``~/.syscontrol/agents/*.md`` using the same
+    frontmatter schema as skills (see ``agent.skills``).  User agents may
+    override built-ins by re-using the same name.
+    """
 
     def __init__(self) -> None:
         self._agents: dict[str, AgentSpec] = dict(BUILT_IN_AGENTS)
+        self._load_user_agents()
+
+    def _load_user_agents(self) -> None:
+        """Populate the registry from ``~/.syscontrol/agents/*.md``."""
+        # Local import so importing ``agent.agents`` for the built-ins alone
+        # doesn't pull in path/frontmatter modules.
+        try:
+            from agent.frontmatter import split_frontmatter, split_list
+            from agent.paths import USER_AGENTS_DIR
+        except Exception:  # noqa: BLE001
+            return
+        if not USER_AGENTS_DIR.exists():
+            return
+        for path in sorted(USER_AGENTS_DIR.glob("*.md")):
+            try:
+                front, body = split_frontmatter(path.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            name = (front.get("name") or path.stem).strip()
+            if not name:
+                continue
+            description = front.get("description", "").strip() or "(user-defined agent)"
+            max_rounds_raw = front.get("max_rounds", "").strip()
+            try:
+                max_rounds = int(max_rounds_raw) if max_rounds_raw else 8
+            except ValueError:
+                max_rounds = 8
+            allowed: tuple[str, ...] | None = split_list(front.get("tools", "")) or None
+            self._agents[name] = AgentSpec(
+                name=name,
+                description=description,
+                system_prompt=body.strip() or description,
+                allowed_tools=allowed,
+                max_rounds=max(1, min(max_rounds, 30)),
+            )
 
     def get(self, name: str) -> AgentSpec:
         """Return the AgentSpec for *name*.
@@ -199,12 +240,37 @@ class AgentRegistry:
 
 
 # Lazy singleton — initialized on first access, not at import time.
-# functools.cache uses an internal RLock, so concurrent first-calls are safe
-# without an explicit double-checked-locking pattern.
-@functools.cache
+#
+# ``functools.cache`` happens to use an internal lock on Python 3.13+ but does
+# not strictly guarantee that the wrapped function is called at most once
+# under concurrent first-access — multiple threads may each compute a value
+# before any of them write it back to the cache.  Loading user agents now
+# performs file I/O, so we cannot rely on a fast no-op constructor to hide
+# that race.  Use an explicit double-checked locking pattern.
+_REGISTRY_LOCK = threading.Lock()
+_REGISTRY_SINGLETON: AgentRegistry | None = None
+
+
 def _get_registry() -> AgentRegistry:
     """Return the module-level AgentRegistry, creating it on first call."""
-    return AgentRegistry()
+    global _REGISTRY_SINGLETON
+    if _REGISTRY_SINGLETON is not None:
+        return _REGISTRY_SINGLETON
+    with _REGISTRY_LOCK:
+        if _REGISTRY_SINGLETON is None:
+            _REGISTRY_SINGLETON = AgentRegistry()
+        return _REGISTRY_SINGLETON
+
+
+def _clear_registry_cache_for_tests() -> None:
+    """Test-only helper: drop the cached registry so the next call reloads."""
+    global _REGISTRY_SINGLETON
+    with _REGISTRY_LOCK:
+        _REGISTRY_SINGLETON = None
+
+
+# Backwards-compatibility shim for tests that called ``_get_registry.cache_clear``.
+_get_registry.cache_clear = _clear_registry_cache_for_tests  # type: ignore[attr-defined]
 
 
 def get_agent(name: str) -> AgentSpec:

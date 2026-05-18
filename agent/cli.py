@@ -43,9 +43,11 @@ from prompt_toolkit.layout.processors import Processor, Transformation, Transfor
 from prompt_toolkit.styles import Style
 
 from agent import cli_compact, cli_session
+from agent.agents import list_agents
 from agent.cli_coding import CheckRunner, ProjectCommand, ProjectProfile
 from agent.cli_completers import build_completer, expand_at_mentions
 from agent.cli_keys import build_key_bindings, install_sigint_handler
+from agent.commands_user import load_user_commands
 from agent.core import (
     BOLD,
     CYAN,
@@ -80,8 +82,10 @@ from agent.credentials import (
     load_cloud_api_key,
     save_cloud_api_key,
 )
-from agent.paths import MEMORY_FILE, USER_DATA_DIR, ensure_user_data_dir
-from agent.runner import close_subagent_pool
+from agent.paths import MEMORY_FILE, SKILLS_DIR, USER_DATA_DIR, ensure_user_data_dir
+from agent.runner import close_subagent_pool, run_subagent
+from agent.skills import get_registry as get_skill_registry
+from agent.skills import scaffold_skill
 from agent.slash import CONTINUE, EXIT, SlashCommand, SlashRegistry, SlashResult, parse
 from agent.updater import check_for_update, current_version, update_via_uv
 
@@ -631,6 +635,7 @@ def _build_cli_callbacks(
     spinner: _Spinner,
     cancel_event: threading.Event,
     tool_results: dict[str, str] | None = None,
+    ctx: "ReplContext | None" = None,
 ) -> tuple[TurnCallbacks, list[str], list[tuple[str, str]]]:
     """Build CLI-specific presentation callbacks for a single turn.
 
@@ -640,6 +645,10 @@ def _build_cli_callbacks(
         tool_results: Optional mutable dict the ``on_tool_finished`` callback
             populates with the latest result text per tool name.  Consumed by
             the ``/show`` slash command.
+        ctx: Optional REPL context — when provided, token counts from the
+            ``on_usage`` callback are accumulated into ``ctx.in_tokens`` and
+            ``ctx.out_tokens`` so ``/cost`` and the status footer can display
+            them.
 
     Returns:
         A ``(callbacks, pending_buf, errors)`` triple.  *pending_buf* is a
@@ -678,15 +687,41 @@ def _build_cli_callbacks(
         if not errors:  # keep only the first error
             errors.append((category, message))
 
+    def _on_subagent_started(agent_name: str, task: str) -> None:
+        # Surface a breadcrumb so the user sees which sub-agent is running.
+        spinner.stop()
+        excerpt = _clip(task, 60) if task else ""
+        suffix = f" · {excerpt}" if excerpt else ""
+        sys.stdout.write(f"{DIM}  ↳ agent: {agent_name}{suffix}{RESET}\n")
+        sys.stdout.flush()
+        spinner.start(f"Running run_agent ({agent_name})…")
+
+    def _on_subagent_finished(agent_name: str, _result: str) -> None:
+        sys.stdout.write(f"{DIM}  ↳ agent: {agent_name} done{RESET}\n")
+        sys.stdout.flush()
+
+    def _on_usage(prompt_tokens: int, completion_tokens: int) -> None:
+        if ctx is None:
+            return
+        # Streaming may emit multiple usage chunks per turn (rare); accumulate.
+        ctx.in_tokens += int(prompt_tokens or 0)
+        ctx.out_tokens += int(completion_tokens or 0)
+
     callbacks = TurnCallbacks(
         on_token=_on_token,
         on_tool_started=_on_tool_started,
         on_tool_finished=_on_tool_finished,
         on_error=_on_error,
+        on_subagent_started=_on_subagent_started,
+        on_subagent_finished=_on_subagent_finished,
+        on_usage=_on_usage,
         cancel_event=cancel_event,
     )
 
     return callbacks, pending, errors
+
+
+_TOOL_RESULT_HINT_THRESHOLD = 2048  # chars; show /show hint above this
 
 
 def _render_tool_summary(name: str, result: str, elapsed: float) -> None:
@@ -694,7 +729,8 @@ def _render_tool_summary(name: str, result: str, elapsed: float) -> None:
     char_count = len(result or "")
     line_count = (result or "").count("\n") + (1 if result else 0)
     suffix = "no output" if not result else f"{line_count} line{'s' if line_count != 1 else ''}, {char_count} chars"
-    print(f"{DIM}  • {name:<24} {elapsed:.1f}s · {suffix}{RESET}", flush=True)
+    hint = f" · {CYAN}/show {name}{RESET}{DIM} for full output" if char_count > _TOOL_RESULT_HINT_THRESHOLD else ""
+    print(f"{DIM}  • {name:<24} {elapsed:.1f}s · {suffix}{hint}{RESET}", flush=True)
 
 
 def run_turn(
@@ -707,6 +743,7 @@ def run_turn(
     approval_controller: ApprovalController | None = None,
     cancel_event: threading.Event | None = None,
     tool_results: dict[str, str] | None = None,
+    ctx: "ReplContext | None" = None,
 ) -> None:
     """Execute one user turn: stream the LLM response and run tool calls.
 
@@ -721,6 +758,8 @@ def run_turn(
             abort the in-flight LLM stream.
         tool_results: Optional dict the renderer populates with the most recent
             output per tool name (consumed by ``/show``).
+        ctx: Optional REPL context for telemetry accumulation (token counts,
+            elapsed time).  When ``None``, no telemetry is recorded.
 
     Raises:
         _LLMError: On API/auth/connection/timeout errors.
@@ -734,6 +773,7 @@ def run_turn(
         spinner,
         cancel_event if cancel_event is not None else threading.Event(),
         tool_results,
+        ctx=ctx,
     )
 
     spinner.start("Thinking…")
@@ -741,6 +781,10 @@ def run_turn(
     finish_reason, elapsed = run_streaming_turn(
         ollama_client, pool, tools, system_message, messages, model, callbacks,
     )
+
+    if ctx is not None:
+        ctx.last_turn_elapsed = elapsed
+        ctx.turn_count += 1
 
     # Flush any partial last line.
     if pending[0]:
@@ -1036,6 +1080,11 @@ class ReplContext:
     compact_undo: list[dict] | None = None
     session_path: Path | None = None
     session_started_at: str | None = None
+    # Token + timing telemetry (updated by streaming callbacks).
+    in_tokens: int = 0
+    out_tokens: int = 0
+    last_turn_elapsed: float = 0.0
+    turn_count: int = 0
 
 
 def _active_tools_for_mode(ctx: ReplContext, mode: str) -> list[dict]:
@@ -1088,10 +1137,11 @@ def _cmd_help(ctx: ReplContext, _args: str) -> SlashResult:
         usage = cmd.usage or f"/{cmd.name}"
         print(f"  {CYAN}{usage:<{width}}{RESET}   {cmd.description}")
     print(f"\n{BOLD}Keyboard{RESET}")
+    print(f"  {CYAN}Enter{RESET}          Submit      {CYAN}Ctrl+J{RESET}     Newline (also Esc+Enter)")
     print(f"  {CYAN}↑/↓{RESET}            History     {CYAN}Ctrl+R{RESET}     Reverse-search")
     print(f"  {CYAN}Tab{RESET}            Complete    {CYAN}Ctrl+L{RESET}     Clear screen")
     print(f"  {CYAN}Shift+Tab{RESET}      Mode toggle {CYAN}Ctrl+D{RESET}     Exit")
-    print(f"  {CYAN}Esc, Enter{RESET}     Newline\n")
+    print(f"  {CYAN}Ctrl+C{RESET}         Cancel turn (double-tap to exit)\n")
     return CONTINUE
 
 
@@ -1296,11 +1346,550 @@ def _cmd_monitor(ctx: ReplContext, _args: str) -> SlashResult:
 
 
 def _cmd_memory(_ctx: ReplContext, args: str) -> SlashResult:
-    note = args.strip()
-    if not note:
-        print(f"{YELLOW}Usage: /memory <note text>{RESET}\n")
+    """Append, list, search, or clear notes in SysControl_Memory.md."""
+    raw = args.strip()
+    if not raw:
+        print(f"{YELLOW}Usage: /memory <note> | list | search <text> | clear{RESET}\n")
         return CONTINUE
-    _append_memory_note(note)
+
+    head, _, tail = raw.partition(" ")
+    head_lc = head.lower()
+
+    if head_lc == "list":
+        _print_memory_notes()
+        return CONTINUE
+    if head_lc == "search":
+        needle = tail.strip()
+        if not needle:
+            print(f"{YELLOW}Usage: /memory search <text>{RESET}\n")
+            return CONTINUE
+        _print_memory_notes(needle=needle)
+        return CONTINUE
+    if head_lc == "clear":
+        if MEMORY_FILE.exists():
+            try:
+                MEMORY_FILE.unlink()
+                print(f"{GREEN}✓ Memory cleared ({MEMORY_FILE.name}).{RESET}\n")
+            except OSError as exc:
+                print(f"{YELLOW}Could not clear memory: {exc}{RESET}\n")
+        else:
+            print(f"{DIM}Nothing to clear.{RESET}\n")
+        return CONTINUE
+
+    _append_memory_note(raw)
+    print()
+    return CONTINUE
+
+
+def _print_memory_notes(*, needle: str | None = None, limit: int = 20) -> None:
+    """Print the most recent memory notes (timestamped lines beginning with `-`)."""
+    if not MEMORY_FILE.exists():
+        print(f"{DIM}No memory file yet ({MEMORY_FILE.name}).{RESET}\n")
+        return
+    try:
+        text = MEMORY_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"{YELLOW}Could not read memory: {exc}{RESET}\n")
+        return
+    entries = [ln for ln in text.splitlines() if ln.startswith("- [")]
+    if needle:
+        needle_lc = needle.lower()
+        entries = [ln for ln in entries if needle_lc in ln.lower()]
+    if not entries:
+        if needle:
+            print(f"{DIM}No matches for '{needle}'.{RESET}\n")
+        else:
+            print(f"{DIM}No notes yet.{RESET}\n")
+        return
+    print(f"\n{BOLD}{MEMORY_FILE.name}{RESET} "
+          f"{DIM}({len(entries)} note{'s' if len(entries) != 1 else ''}){RESET}")
+    for ln in entries[-limit:]:
+        print(f"  {ln}")
+    print()
+
+
+def _cmd_cost(ctx: ReplContext, _args: str) -> SlashResult:
+    """Show token usage for the session.
+
+    Local Ollama is free; cloud pricing varies by provider/model/plan, so
+    we deliberately omit a dollar estimate rather than show one that could
+    mislead.
+    """
+    total = ctx.in_tokens + ctx.out_tokens
+    plural = "s" if ctx.turn_count != 1 else ""
+    print(f"\n{BOLD}Token usage{RESET} {DIM}(this session){RESET}")
+    print(f"  {CYAN}input{RESET}      {ctx.in_tokens:>8,} tokens")
+    print(f"  {CYAN}output{RESET}     {ctx.out_tokens:>8,} tokens")
+    print(f"  {CYAN}total{RESET}      {total:>8,} tokens "
+          f"{DIM}across {ctx.turn_count} turn{plural}{RESET}\n")
+    return CONTINUE
+
+
+def _cmd_mcp(ctx: ReplContext, _args: str) -> SlashResult:
+    """Print a snapshot of connected MCP server(s) and active tool count."""
+    primary = ctx.pool.primary_client
+    proc = primary.proc
+    if proc is None:
+        proc_state, proc_pid = "not started", None
+    elif proc.poll() is None:
+        proc_state, proc_pid = "running", proc.pid
+    else:
+        proc_state, proc_pid = f"exited({proc.poll()})", proc.pid
+
+    pid_text = f" pid={proc_pid}" if proc_pid is not None else ""
+    print(f"\n{BOLD}MCP servers{RESET}")
+    print(f"  {CYAN}syscontrol-server{RESET}  {proc_state}{pid_text}")
+    print(f"  {DIM}tools (active mode):{RESET} {len(ctx.tools)}  "
+          f"{DIM}· total available:{RESET} {len(ctx.all_tools)}")
+    print(f"  {DIM}/tools to list, /tools <filter> to narrow.{RESET}\n")
+    return CONTINUE
+
+
+def _cmd_agents(_ctx: ReplContext, args: str) -> SlashResult:
+    """List registered sub-agents, or detail one when ``args`` is provided."""
+    agents = list_agents()
+    target = args.strip().lower()
+    if target:
+        match = next((a for a in agents if a["name"].lower() == target), None)
+        if match is None:
+            names = ", ".join(a["name"] for a in agents)
+            print(f"{YELLOW}No agent '{target}'.{RESET} {DIM}Known: {names}{RESET}\n")
+            return CONTINUE
+        from agent.agents import get_agent  # local import to avoid cycle in re-export
+        spec = get_agent(match["name"])
+        tool_list = ", ".join(spec.allowed_tools) if spec.allowed_tools else "all"
+        print(f"\n{BOLD}{spec.name}{RESET}  {DIM}max_rounds={spec.max_rounds}{RESET}")
+        print(f"  {match['description']}")
+        print(f"  {DIM}tools:{RESET} {tool_list}")
+        print(f"  {DIM}invoke via run_agent(agent_name='{spec.name}', task=…){RESET}\n")
+        return CONTINUE
+    if not agents:
+        print(f"{DIM}No sub-agents registered.{RESET}\n")
+        return CONTINUE
+    print(f"\n{BOLD}{len(agents)} sub-agent{'s' if len(agents) != 1 else ''}{RESET} "
+          f"{DIM}(invoke via run_agent / /agents <name>){RESET}")
+    width = max(len(a["name"]) for a in agents)
+    for a in agents:
+        print(f"  {CYAN}{a['name']:<{width}}{RESET}   {a['description']}")
+    print()
+    return CONTINUE
+
+
+def _cmd_resume(ctx: ReplContext, _args: str) -> SlashResult:
+    """Interactively pick a prior session and load it into the current REPL."""
+    summaries = cli_session.list_sessions()
+    if not summaries:
+        print(f"{DIM}No saved sessions to resume.{RESET}\n")
+        return CONTINUE
+    print(f"\n{BOLD}Pick a session to resume{RESET} {DIM}(Enter to cancel){RESET}")
+    for idx, s in enumerate(summaries[:20], 1):
+        snippet = s.first_user_text or "(empty)"
+        print(f"  {CYAN}{idx:>2}){RESET} {DIM}{s.last_active}{RESET}  "
+              f"{s.model:<14} {s.message_count:>3} msgs  {_clip(snippet, 48)}")
+    print(f"{BOLD}#:{RESET} ", end="", flush=True)
+    try:
+        choice = input("").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return CONTINUE
+    if not choice:
+        return CONTINUE
+    if not choice.isdigit():
+        print(f"{YELLOW}Not a number.{RESET}\n")
+        return CONTINUE
+    idx = int(choice)
+    if not 1 <= idx <= len(summaries):
+        print(f"{YELLOW}Out of range.{RESET}\n")
+        return CONTINUE
+    summary = summaries[idx - 1]
+    payload = _load_session_by_path(summary)
+    if payload is None:
+        return CONTINUE
+    ctx.messages = list(payload.get("messages", []))
+    ctx.session_path = Path(payload.get("path") or summary.path)
+    ctx.session_started_at = payload.get("started_at")
+    msg_count = sum(1 for m in ctx.messages if m.get("role") in ("user", "assistant"))
+    print(f"{GREEN}✓ Resumed{RESET} {DIM}({msg_count} prior messages){RESET}\n")
+    return CONTINUE
+
+
+def _load_session_by_path(summary: object) -> dict | None:
+    """Load a session payload from a SessionSummary, with graceful fallback.
+
+    ``cli_session`` exposes ``load_latest`` and ``pick_interactive``; we want a
+    targeted read by path.  Try ``load_path`` if it exists, else parse the JSON
+    ourselves from ``summary.path``.
+    """
+    summary_path = getattr(summary, "path", None)
+    if not summary_path:
+        return None
+    loader = getattr(cli_session, "load_path", None)
+    if callable(loader):
+        try:
+            loaded = loader(Path(summary_path))
+        except (OSError, ValueError) as exc:
+            print(f"{YELLOW}Could not load session: {exc}{RESET}\n")
+            return None
+        return loaded if isinstance(loaded, dict) else None
+    try:
+        parsed = json.loads(Path(summary_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"{YELLOW}Could not load session: {exc}{RESET}\n")
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+_PERMISSION_FLAGS: tuple[str, ...] = (
+    "allow_shell", "allow_messaging", "allow_message_history", "allow_screenshot",
+    "allow_file_read", "allow_file_write", "allow_calendar", "allow_contacts",
+    "allow_accessibility", "allow_tool_creation", "allow_deep_research",
+    "allow_email", "allow_notes", "allow_brew", "allow_agents", "allow_clipboard",
+)
+
+
+def _cmd_permissions(_ctx: ReplContext, args: str) -> SlashResult:
+    """Print or toggle ``~/.syscontrol/config.json`` permission flags."""
+    parts = args.split()
+    cfg = _load_config_file()
+
+    if not parts:
+        print(f"\n{BOLD}Permissions{RESET} {DIM}({CONFIG_FILE}){RESET}")
+        width = max(len(f) for f in _PERMISSION_FLAGS)
+        for flag in _PERMISSION_FLAGS:
+            on = cfg.get(flag) is True
+            marker = f"{GREEN}✓{RESET}" if on else f"{DIM}·{RESET}"
+            label = "allowed" if on else "blocked"
+            print(f"  {marker} {flag:<{width}}   {DIM}{label}{RESET}")
+        print(f"\n{DIM}  /permissions allow <flag>   enable a flag{RESET}")
+        print(f"{DIM}  /permissions deny  <flag>   disable a flag{RESET}\n")
+        return CONTINUE
+
+    action = parts[0].lower()
+    if action not in {"allow", "deny", "on", "off"} or len(parts) < 2:
+        print(f"{YELLOW}Usage: /permissions [allow|deny] <flag>{RESET}\n")
+        return CONTINUE
+    flag = parts[1].lower()
+    if flag not in _PERMISSION_FLAGS:
+        print(f"{YELLOW}Unknown flag '{flag}'.{RESET} "
+              f"{DIM}Run /permissions to list valid flags.{RESET}\n")
+        return CONTINUE
+    cfg[flag] = action in {"allow", "on"}
+    _save_config_file(cfg)
+    state = "allowed" if cfg[flag] else "blocked"
+    print(f"{GREEN}✓ {flag} is now {state}.{RESET} "
+          f"{DIM}(stored in {CONFIG_FILE.name}){RESET}\n")
+    return CONTINUE
+
+
+def _cmd_status(ctx: ReplContext, _args: str) -> SlashResult:
+    """Print runtime status: model, provider, mode, tokens, last-turn elapsed."""
+    approval = (
+        ctx.approval_controller.mode
+        if ctx.cli_mode == "coding" and ctx.approval_controller is not None
+        else "-"
+    )
+    width = _terminal_width()
+    _print_card_rule("╭", "╮", width=width)
+    _print_card_line(f"SysControl Status (v{current_version()})", width=width)
+    _print_card_line(width=width)
+    _print_card_line(_format_card_row("model:", ctx.model, "", width=width), width=width)
+    _print_card_line(_format_card_row("provider:", ctx.provider_label, "", width=width), width=width)
+    _print_card_line(_format_card_row("mode:", ctx.cli_mode, "", width=width), width=width)
+    if ctx.cli_mode == "coding":
+        _print_card_line(_format_card_row("approval:", approval, "", width=width), width=width)
+    _print_card_line(_format_card_row("cwd:", _cwd_display(), "", width=width), width=width)
+    _print_card_line(_format_card_row("tools:", str(len(ctx.tools)), f"of {len(ctx.all_tools)}", width=width), width=width)
+    _print_card_line(_format_card_row(
+        "tokens:",
+        f"{ctx.in_tokens:,}↑ {ctx.out_tokens:,}↓",
+        f"{ctx.turn_count} turns",
+        width=width,
+    ), width=width)
+    _print_card_line(_format_card_row("messages:", str(len(ctx.messages)), "", width=width), width=width)
+    if ctx.last_turn_elapsed > 0:
+        _print_card_line(_format_card_row("last turn:", f"{ctx.last_turn_elapsed:.1f}s", "", width=width), width=width)
+    _print_card_rule("╰", "╯", width=width)
+    print()
+    return CONTINUE
+
+
+def _cmd_export(ctx: ReplContext, args: str) -> SlashResult:
+    """Write the current conversation to a file (markdown or JSON)."""
+    parts = args.split(maxsplit=1)
+    fmt = (parts[0].lower() if parts else "md")
+    if fmt not in {"md", "markdown", "json"}:
+        print(f"{YELLOW}Usage: /export [md|json] [path]{RESET}\n")
+        return CONTINUE
+    fmt = "md" if fmt == "markdown" else fmt
+
+    if len(parts) > 1 and parts[1].strip():
+        dest = Path(os.path.expanduser(parts[1].strip()))
+    else:
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        dest = Path(f"syscontrol-session-{ts}.{fmt}")
+
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if fmt == "json":
+            payload = {
+                "version": current_version(),
+                "model": ctx.model,
+                "provider": ctx.provider_label,
+                "cli_mode": ctx.cli_mode,
+                "exported_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "messages": ctx.messages,
+            }
+            dest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        else:
+            dest.write_text(_messages_to_markdown(ctx), encoding="utf-8")
+    except OSError as exc:
+        print(f"{YELLOW}Export failed: {exc}{RESET}\n")
+        return CONTINUE
+    print(f"{GREEN}✓ Exported{RESET} {DIM}({len(ctx.messages)} messages → {dest}){RESET}\n")
+    return CONTINUE
+
+
+def _messages_to_markdown(ctx: ReplContext) -> str:
+    """Render the message history as a portable markdown transcript."""
+    lines: list[str] = []
+    lines.append(f"# SysControl session — {datetime.datetime.now().isoformat(timespec='seconds')}")
+    lines.append("")
+    lines.append(f"- model: `{ctx.model}`")
+    lines.append(f"- provider: {ctx.provider_label}")
+    lines.append(f"- mode: {ctx.cli_mode}")
+    lines.append("")
+    for msg in ctx.messages:
+        role = str(msg.get("role", ""))
+        content = msg.get("content")
+        if role == "user":
+            lines.append("## User")
+            lines.append("")
+            lines.append(str(content or ""))
+            lines.append("")
+        elif role == "assistant":
+            lines.append("## Assistant")
+            lines.append("")
+            lines.append(str(content or ""))
+            lines.append("")
+        elif role == "tool":
+            name = msg.get("name") or "(tool)"
+            lines.append(f"### Tool result — {name}")
+            lines.append("")
+            lines.append("```")
+            lines.append(str(content or "")[:4096])
+            lines.append("```")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _cmd_review(ctx: ReplContext, args: str) -> SlashResult:
+    """Run a coder sub-agent code review against staged + recent git changes."""
+    focus = args.strip()
+    task = (
+        "Review the code changes in this repository. "
+        "Run `git_status` and `git_diff` to inspect uncommitted work; if there are "
+        "no uncommitted changes, fall back to the last commit via `git_diff HEAD~1`. "
+        "Identify bugs, security issues, correctness gaps, and style violations. "
+        "For each finding cite the file:line and explain the impact in one sentence. "
+        "End with a summary verdict (ship / fix-then-ship / hold) and a short "
+        "list of follow-ups."
+    )
+    if focus:
+        task = f"{task}\n\nFocus area: {focus}"
+    print(f"{DIM}  running coder sub-agent…{RESET}")
+    spinner = _Spinner()
+    spinner.start("Reviewing…")
+    try:
+        from agent.agents import get_agent
+        spec = get_agent("coder")
+        result = run_subagent(
+            spec=spec, task=task,
+            llm=ctx.ollama_client, model=ctx.model,
+            on_progress=lambda s: spinner.start(f"Reviewing: {s}"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        spinner.stop()
+        print(f"{YELLOW}Review failed: {exc}{RESET}\n")
+        return CONTINUE
+    spinner.stop()
+    print(f"\n{BOLD}── code review ──{RESET}")
+    print(result)
+    print()
+    return CONTINUE
+
+
+def _cmd_skills(ctx: ReplContext, args: str) -> SlashResult:
+    """List, inspect, scaffold, or invoke a skill from ``~/.syscontrol/skills``.
+
+    Sub-commands::
+
+        /skills              — list available skills
+        /skills <name>       — run the named skill (same as /<name>)
+        /skills show <name>  — print the raw markdown for a skill
+        /skills new  <name>  — scaffold a new skill template (opens in editor)
+        /skills edit <name>  — open an existing skill in $EDITOR
+        /skills reload       — re-scan the skills directory
+    """
+    parts = args.split(maxsplit=1)
+    sub = (parts[0].lower() if parts else "list")
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in {"", "list", "ls"}:
+        return _print_skill_list()
+    if sub == "reload":
+        reg = get_skill_registry(refresh=True)
+        print(f"{GREEN}✓ Reloaded {len(reg.all())} skill(s) from {SKILLS_DIR}{RESET}\n")
+        return CONTINUE
+    if sub == "show":
+        return _print_skill_body(rest)
+    if sub == "edit":
+        return _edit_skill(rest)
+    if sub == "new":
+        return _new_skill(rest)
+    # Anything else: treat ``sub`` (and rest) as a skill name + freeform task.
+    name = sub
+    task = rest
+    return _invoke_skill(ctx, name, task)
+
+
+def _print_skill_list() -> SlashResult:
+    reg = get_skill_registry()
+    skills = reg.all()
+    if not skills:
+        print(f"{DIM}No skills installed yet ({SKILLS_DIR}).{RESET}")
+        print(f"{DIM}  /skills new <name> creates one from a template.{RESET}\n")
+        return CONTINUE
+    print(f"\n{BOLD}Skills{RESET} {DIM}({SKILLS_DIR}){RESET}")
+    width = max(len(s.name) for s in skills)
+    for s in skills:
+        scope = f"agent={s.agent}" if s.agent else f"tools={len(s.tools) or 'all'}"
+        print(f"  {CYAN}{s.name:<{width}}{RESET}  {s.description}  {DIM}· {scope}{RESET}")
+    print(f"\n{DIM}Run a skill with /<name> or /skills <name>.{RESET}\n")
+    return CONTINUE
+
+
+def _print_skill_body(name: str) -> SlashResult:
+    if not name:
+        print(f"{YELLOW}Usage: /skills show <name>{RESET}\n")
+        return CONTINUE
+    spec = get_skill_registry().get(name)
+    if spec is None:
+        print(f"{YELLOW}No skill '{name}'.{RESET}\n")
+        return CONTINUE
+    print(f"\n{BOLD}── {spec.name} ── {DIM}{spec.path}{RESET}")
+    print(spec.body)
+    print()
+    return CONTINUE
+
+
+def _edit_skill(name: str) -> SlashResult:
+    import subprocess
+    if not name:
+        print(f"{YELLOW}Usage: /skills edit <name>{RESET}\n")
+        return CONTINUE
+    spec = get_skill_registry().get(name)
+    if spec is None:
+        print(f"{YELLOW}No skill '{name}'.{RESET}\n")
+        return CONTINUE
+    editor = os.environ.get("EDITOR") or ("open -t" if sys.platform == "darwin" else "vi")
+    parts = editor.split()
+    with contextlib.suppress(Exception):
+        subprocess.run([*parts, str(spec.path)], check=False)
+    get_skill_registry(refresh=True)
+    print(f"{DIM}Reloaded skills. /skills to list.{RESET}\n")
+    return CONTINUE
+
+
+def _new_skill(name: str) -> SlashResult:
+    if not name:
+        print(f"{YELLOW}Usage: /skills new <name>{RESET}\n")
+        return CONTINUE
+    try:
+        path = scaffold_skill(name)
+    except FileExistsError as exc:
+        print(f"{YELLOW}{exc}{RESET}\n")
+        return CONTINUE
+    except (OSError, ValueError) as exc:
+        print(f"{YELLOW}Could not create skill: {exc}{RESET}\n")
+        return CONTINUE
+    print(f"{GREEN}✓ Created{RESET} {path}")
+    print(f"{DIM}  Edit it with /skills edit {path.stem}, run with /{path.stem}.{RESET}\n")
+    return CONTINUE
+
+
+def _invoke_skill(ctx: ReplContext, name: str, task: str) -> SlashResult:
+    """Run a skill: inject its body as a follow-up system message and send the user's task."""
+    spec = get_skill_registry().get(name)
+    if spec is None:
+        print(f"{YELLOW}No skill '{name}'.{RESET}\n")
+        return CONTINUE
+    # If permissions are missing, warn the user but do not block — the user can
+    # toggle via /permissions and re-run.
+    missing = []
+    if spec.permissions:
+        cfg = _load_config_file()
+        missing = [p for p in spec.permissions if not cfg.get(p)]
+    if missing:
+        print(f"{YELLOW}Skill '{spec.name}' wants permissions you haven't granted: "
+              f"{', '.join(missing)}.{RESET}")
+        print(f"{DIM}  Enable with: /permissions allow <flag>{RESET}")
+    # Compose the user message: skill body + task.  We append a synthetic
+    # system-style instruction at the top so the LLM treats the body as
+    # binding for this turn only.
+    body = spec.body.strip() or spec.description
+    user_payload = (
+        f"[Skill: {spec.name}]\n\n{body}"
+        + (f"\n\n[Task]\n{task}" if task else "")
+    )
+    return SlashResult(message=user_payload)
+
+
+def _cmd_bug(ctx: ReplContext, _args: str) -> SlashResult:
+    """Bundle session, version, and OS info into a tarball for bug reports."""
+    import platform
+    import subprocess
+    import tarfile
+    import tempfile
+
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_path = Path(tempfile.gettempdir()) / f"syscontrol-bug-{ts}.tgz"
+    metadata = {
+        "version": current_version(),
+        "python": sys.version,
+        "platform": platform.platform(),
+        "model": ctx.model,
+        "provider": ctx.provider_label,
+        "cli_mode": ctx.cli_mode,
+        "approval": (
+            ctx.approval_controller.mode if ctx.approval_controller else None
+        ),
+        "in_tokens": ctx.in_tokens,
+        "out_tokens": ctx.out_tokens,
+        "messages": ctx.messages,
+    }
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="syscontrol-bug-") as tmp:
+            tmp_dir = Path(tmp)
+            (tmp_dir / "session.json").write_text(
+                json.dumps(metadata, indent=2, default=str), encoding="utf-8"
+            )
+            if MEMORY_FILE.exists():
+                shutil.copyfile(MEMORY_FILE, tmp_dir / "SysControl_Memory.md")
+            if CONFIG_FILE.exists():
+                shutil.copyfile(CONFIG_FILE, tmp_dir / "config.json")
+            with tarfile.open(out_path, "w:gz") as tar:
+                tar.add(tmp_dir, arcname="syscontrol-bug")
+    except OSError as exc:
+        print(f"{YELLOW}Could not write bug bundle: {exc}{RESET}\n")
+        return CONTINUE
+
+    print(f"{GREEN}✓ Bug bundle written to{RESET} {out_path}")
+    print(f"{DIM}  Attach this file to the GitHub issue: {REPO_URL_DISPLAY}{RESET}")
+    # Reveal in Finder on macOS — safe argument list (no shell).
+    if sys.platform == "darwin":
+        with contextlib.suppress(Exception):
+            subprocess.run(["open", "-R", str(out_path)], check=False, timeout=5)
     print()
     return CONTINUE
 
@@ -1545,6 +2134,42 @@ def _build_registry(coding: bool) -> SlashRegistry:
         usage="/approval plan|normal|auto",
         arg_choices=APPROVAL_MODE_CHOICES,
     ))
+    # ── New Claude-Code-style affordances ───────────────────────────────────
+    reg.register(SlashCommand("cost", "Show token usage and cost estimate",
+                              _cmd_cost, usage="/cost"))
+    reg.register(SlashCommand("mcp", "Show MCP server status and tool counts",
+                              _cmd_mcp, usage="/mcp"))
+    reg.register(SlashCommand("agents", "List sub-agents (or detail one)",
+                              _cmd_agents, usage="/agents [name]"))
+    reg.register(SlashCommand("resume", "Pick a prior session to resume",
+                              _cmd_resume, usage="/resume"))
+    reg.register(SlashCommand("permissions",
+                              "List or toggle MCP permission flags",
+                              _cmd_permissions,
+                              usage="/permissions [allow|deny] <flag>",
+                              arg_choices=("allow", "deny")))
+    reg.register(SlashCommand("status", "Show runtime status and telemetry",
+                              _cmd_status, usage="/status"))
+    reg.register(SlashCommand("export", "Export conversation to file",
+                              _cmd_export, usage="/export [md|json] [path]",
+                              arg_choices=("md", "json")))
+    reg.register(SlashCommand("review",
+                              "Run a coder sub-agent code review of git changes",
+                              _cmd_review, usage="/review [focus]"))
+    reg.register(SlashCommand("bug", "Bundle session into a tarball for bug reports",
+                              _cmd_bug, usage="/bug"))
+    reg.register(SlashCommand(
+        "skills",
+        "List, inspect, or run user skills from ~/.syscontrol/skills",
+        _cmd_skills,
+        usage="/skills [list|<name>|show <name>|edit <name>|new <name>|reload]",
+        arg_choices=("list", "show", "edit", "new", "reload"),
+    ))
+    # Register user-defined slash commands from ~/.syscontrol/commands/*.md
+    # so they appear in /help and the completion menu alongside built-ins.
+    for user_cmd in load_user_commands():
+        with contextlib.suppress(ValueError):
+            reg.register(user_cmd)
     return reg
 
 
@@ -1565,15 +2190,29 @@ class _SlashCompleter(Completer):
         head, sep, tail = text[1:].partition(" ")
         if not sep:
             partial = head.lower()
+            seen: set[str] = set()
             for cmd in self._ctx.registry.visible(self._ctx):
                 for key in (cmd.name, *cmd.aliases):
-                    if key.startswith(partial):
+                    if key.startswith(partial) and key not in seen:
+                        seen.add(key)
                         yield Completion(
                             f"/{key}",
                             start_position=-len(text),
                             display_meta=cmd.description,
                         )
                         break
+            # Surface user skills as `/skill-name` after built-ins so users see
+            # them in the same completion menu.
+            for skill in get_skill_registry().all():
+                key = skill.name.lower()
+                if key in seen or not key.startswith(partial):
+                    continue
+                seen.add(key)
+                yield Completion(
+                    f"/{key}",
+                    start_position=-len(text),
+                    display_meta=f"skill · {skill.description}",
+                )
             return
         match = self._ctx.registry.get(head.lower())
         if match is None:
@@ -1582,6 +2221,9 @@ class _SlashCompleter(Completer):
         choices: tuple[str, ...] = match.arg_choices
         if match.name == "show":
             choices = tuple(self._ctx.last_tool_results.keys())
+        if match.name == "skills" and partial not in {"list", "show", "edit", "new", "reload"}:
+            # When typing `/skills <something>`, also offer skill names.
+            choices = (*choices, *(s.name for s in get_skill_registry().all()))
         for choice in choices:
             if choice.startswith(partial):
                 yield Completion(choice, start_position=-len(tail))
@@ -1636,21 +2278,25 @@ def _help_footer(ctx: ReplContext) -> Callable[[], FormattedText]:
             if ctx.cli_mode == "coding" and ctx.approval_controller is not None
             else ""
         )
+        tokens = (
+            f" · {ctx.in_tokens:,}↑/{ctx.out_tokens:,}↓"
+            if (ctx.in_tokens or ctx.out_tokens) else ""
+        )
         status = (
             f" {ctx.model} · {ctx.provider_label} · {ctx.cli_mode}{approval}"
-            f"· {cwd} "
+            f"· {cwd}{tokens} "
         )
 
         if not text:
             return FormattedText([
                 ("class:tb.hint", status),
-                ("class:tb.hint", "  Shift+Tab mode · / commands · @file · !cmd"),
+                ("class:tb.hint", "  Shift+Tab mode · / commands · @file · !cmd · Ctrl+J newline"),
             ])
 
         if not text.startswith("/"):
             return FormattedText([
                 ("class:tb.hint", status),
-                ("class:tb.hint", "  Enter submits · Ctrl-D submits multiline · Ctrl-C cancels"),
+                ("class:tb.hint", "  Enter submits · Ctrl+J newline · Ctrl-C cancels"),
             ])
 
         rows: list[tuple[str, str]] = [("class:tb.hint", status + "\n")]
@@ -1720,10 +2366,16 @@ def _read_input(session: PromptSession) -> str | None:
 def _dispatch_slash(ctx: ReplContext, raw: str) -> SlashResult:
     name, args = parse(raw)
     cmd = ctx.registry.get(name)
-    if cmd is None:
-        print(f"{YELLOW}Unknown command '/{name}'. Type /help for options.{RESET}\n")
-        return CONTINUE
-    return cmd.handler(ctx, args)
+    if cmd is not None:
+        return cmd.handler(ctx, args)
+    # Fall through to the skill registry — `/diag` runs the `diag` skill when
+    # no built-in slash command matches.
+    skill = get_skill_registry().get(name)
+    if skill is not None:
+        return _invoke_skill(ctx, name, args)
+    print(f"{YELLOW}Unknown command '/{name}'. Type /help for options "
+          f"or /skills to see available skills.{RESET}\n")
+    return CONTINUE
 
 
 def _hydrate_session(ctx: ReplContext, args: argparse.Namespace) -> None:
@@ -1849,6 +2501,7 @@ def _repl_loop(ctx: ReplContext) -> None:
                     ctx.messages, ctx.model, ctx.approval_controller,
                     cancel_event=cancel_event,
                     tool_results=ctx.last_tool_results,
+                    ctx=ctx,
                 )
                 _save_session_safely(ctx)
             except _LLMError as e:
