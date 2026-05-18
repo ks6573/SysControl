@@ -5505,6 +5505,586 @@ def eject_disk(mountpoint: str) -> dict:
         return {"error": str(e)}
 
 
+# ── Skills (user-extensible workflows) ───────────────────────────────────────
+
+
+def list_skills() -> dict:
+    """Return the user's installed skills with descriptions and tool allowlists."""
+    try:
+        from agent.skills import list_skills as _list_skills
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"skill registry unavailable: {exc}", "skills": []}
+    skills = _list_skills()
+    return {"count": len(skills), "skills": skills}
+
+
+def run_skill(name: str, task: str = "") -> dict:
+    """Return the skill body + task as a structured playbook for the LLM to follow.
+
+    The skill body is treated as binding instructions for the next assistant
+    turn.  The orchestrating LLM should execute the body (call the listed tools,
+    produce the requested output) before returning to the user.
+    """
+    if not name:
+        return {"error": "skill name is required."}
+    try:
+        from agent.skills import get_registry
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"skill registry unavailable: {exc}"}
+    spec = get_registry().get(name)
+    if spec is None:
+        return {"error": f"skill '{name}' not found.", "hint": "Call list_skills to enumerate."}
+    return {
+        "name": spec.name,
+        "description": spec.description,
+        "tools": list(spec.tools),
+        "permissions": list(spec.permissions),
+        "agent": spec.agent or None,
+        "playbook": spec.body,
+        "task": task,
+    }
+
+
+# ── File / system housekeeping helpers ────────────────────────────────────────
+
+_TAIL_FILE_MAX_BYTES = 50 * 1024 * 1024  # 50 MB safety cap
+
+
+def tail_file(path: str, lines: int = 200, filter_str: str = "") -> dict:
+    """Return the last *lines* lines of *path*, optionally filtered.
+
+    Reads up to 50 MB and seeks from the end so the call is cheap even on large
+    log files.  Gated by ``allow_file_read``.
+    """
+    denied = _permission_check("allow_file_read", "tail_file")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    lines = max(1, min(lines, 5000))
+
+    filter_str = filter_str[:200]
+    filter_str = re.sub(r"[\x00-\x1f]", "", filter_str)
+
+    p = pathlib.Path(os.path.expanduser(path))
+    if not p.exists():
+        return {"error": f"file not found: {path}"}
+    if not p.is_file():
+        return {"error": f"not a regular file: {path}"}
+    try:
+        size = p.stat().st_size
+    except OSError as exc:
+        return {"error": f"stat failed: {exc}"}
+    if size > _TAIL_FILE_MAX_BYTES:
+        return {"error": f"file is too large to tail safely (>{_TAIL_FILE_MAX_BYTES // (1024 * 1024)} MB)."}
+
+    try:
+        text = p.read_text(errors="replace")
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"error": f"read failed: {exc}"}
+
+    all_lines = text.splitlines()
+    if filter_str:
+        needle = filter_str.lower()
+        all_lines = [ln for ln in all_lines if needle in ln.lower()]
+    tail = all_lines[-lines:]
+    return {
+        "path": str(p),
+        "size_bytes": size,
+        "filter": filter_str or None,
+        "line_count": len(tail),
+        "lines": tail,
+    }
+
+
+def _bucketize(p: pathlib.Path, *, older_than_days: int) -> bool:
+    """Return True if *p* was last modified more than *older_than_days* ago."""
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return False
+    return (time.time() - mtime) > (older_than_days * 86400)
+
+
+def cleanup_downloads(older_than_days: int = 30, dry_run: bool = True) -> dict:
+    """List (dry_run) or delete files in ~/Downloads older than *older_than_days*.
+
+    Returns a summary of candidates and total bytes reclaimable.  When
+    ``dry_run=False`` the files are actually unlinked; requires
+    ``allow_file_write``.
+    """
+    if not dry_run:
+        denied = _permission_check("allow_file_write", "cleanup_downloads")
+        if denied:
+            return denied
+
+    older_than_days = max(1, min(older_than_days, 3650))
+    downloads = pathlib.Path("~/Downloads").expanduser()
+    if not downloads.exists():
+        return {"error": f"~/Downloads not found at {downloads}"}
+
+    candidates: list[dict] = []
+    total_bytes = 0
+    for entry in downloads.iterdir():
+        if entry.name.startswith("."):
+            continue
+        if not entry.is_file():
+            continue
+        if not _bucketize(entry, older_than_days=older_than_days):
+            continue
+        try:
+            sz = entry.stat().st_size
+        except OSError:
+            continue
+        candidates.append({
+            "path": str(entry),
+            "size_bytes": sz,
+            "modified": datetime.datetime.fromtimestamp(entry.stat().st_mtime).isoformat(timespec="seconds"),
+        })
+        total_bytes += sz
+
+    candidates.sort(key=lambda d: -int(d["size_bytes"]))  # largest first
+    deleted: list[str] = []
+    errors: list[str] = []
+    if not dry_run:
+        for c in candidates:
+            try:
+                pathlib.Path(c["path"]).unlink()
+                deleted.append(c["path"])
+            except OSError as exc:
+                errors.append(f"{c['path']}: {exc}")
+
+    return {
+        "path": str(downloads),
+        "older_than_days": older_than_days,
+        "dry_run": bool(dry_run),
+        "candidate_count": len(candidates),
+        "total_bytes": total_bytes,
+        "total_mb": round(total_bytes / (1024 * 1024), 1),
+        "candidates": candidates[:50],
+        "deleted_count": len(deleted),
+        "errors": errors,
+    }
+
+
+def cleanup_caches(target: str = "user", dry_run: bool = True) -> dict:
+    """Report size of macOS ``~/Library/Caches`` (or system caches) and
+    optionally purge per-app subdirectories.
+
+    ``target`` is one of:
+      - ``user`` — ``~/Library/Caches`` (default)
+      - ``system`` — ``/Library/Caches`` (rarely safe to purge; reports only)
+    """
+    if not IS_MACOS:
+        return {"error": "cleanup_caches currently supports macOS only."}
+    if target not in ("user", "system"):
+        return {"error": "target must be 'user' or 'system'."}
+    if not dry_run and target == "user":
+        denied = _permission_check("allow_file_write", "cleanup_caches")
+        if denied:
+            return denied
+    if not dry_run and target == "system":
+        return {"error": "cleanup_caches refuses to purge system caches; use dry_run=True."}
+
+    root = pathlib.Path("~/Library/Caches").expanduser() if target == "user" else pathlib.Path("/Library/Caches")
+    if not root.exists():
+        return {"error": f"cache root not found at {root}"}
+
+    entries: list[dict] = []
+    total_bytes = 0
+    try:
+        children = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    except OSError as exc:
+        return {"error": f"could not list {root}: {exc}"}
+    for child in children:
+        if child.name.startswith("."):
+            continue
+        try:
+            sz, _ = _safe_directory_size(child)
+        except OSError:
+            sz = 0
+        entries.append({
+            "name": child.name,
+            "path": str(child),
+            "size_bytes": sz,
+            "size_mb": round(sz / (1024 * 1024), 1),
+        })
+        total_bytes += sz
+    entries.sort(key=lambda d: -int(d["size_bytes"]))
+
+    deleted: list[str] = []
+    errors: list[str] = []
+    if not dry_run:
+        for e in entries:
+            child = pathlib.Path(e["path"])
+            try:
+                shutil.rmtree(child)
+                deleted.append(child.name)
+            except OSError as exc:
+                errors.append(f"{child.name}: {exc}")
+
+    return {
+        "root": str(root),
+        "target": target,
+        "dry_run": bool(dry_run),
+        "total_bytes": total_bytes,
+        "total_mb": round(total_bytes / (1024 * 1024), 1),
+        "entries": entries[:30],
+        "deleted_count": len(deleted),
+        "errors": errors,
+    }
+
+
+def _safe_directory_size(
+    root: pathlib.Path, *, max_files: int = 500_000,
+) -> tuple[int, int]:
+    """Sum file sizes under *root* without following symlinks.
+
+    Returns ``(total_bytes, file_count)``.  Bounded at ``max_files`` files so
+    pathological trees can't stall the agent.
+    """
+    total = 0
+    count = 0
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for name in filenames:
+            count += 1
+            if count > max_files:
+                return total, count - 1
+            try:
+                total += (pathlib.Path(dirpath) / name).stat().st_size
+            except OSError:
+                continue
+    return total, count
+
+
+def summarize_directory(path: str = ".", depth: int = 3, top_n: int = 20) -> dict:
+    """Return a tree summary of *path* up to *depth*, with per-subdir sizes.
+
+    Useful before deep listings — saves dozens of ``list_directory`` calls.
+    Gated by ``allow_file_read``.
+    """
+    denied = _permission_check("allow_file_read", "summarize_directory")
+    if denied:
+        return denied
+
+    depth = max(1, min(depth, 6))
+    top_n = max(1, min(top_n, 100))
+
+    root = pathlib.Path(os.path.expanduser(path)).resolve()
+    if not root.exists():
+        return {"error": f"path not found: {path}"}
+    if not root.is_dir():
+        return {"error": f"not a directory: {path}"}
+
+    total_files = 0
+    total_bytes = 0
+
+    def _walk(curr: pathlib.Path, level: int) -> dict:
+        nonlocal total_files, total_bytes
+        info: dict[str, object] = {"name": curr.name or "/", "path": str(curr), "level": level}
+        size = 0
+        files = 0
+        children: list[dict] = []
+        try:
+            kids = sorted(curr.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            kids = []
+        for k in kids:
+            if k.name.startswith("."):
+                continue
+            if k.is_dir():
+                if level + 1 < depth:
+                    sub = _walk(k, level + 1)
+                    size += int(sub["size_bytes"])
+                    files += int(sub["file_count"])
+                    children.append(sub)
+                else:
+                    sub_size, sub_files = _safe_directory_size(k)
+                    size += sub_size
+                    files += sub_files
+                    children.append({
+                        "name": k.name, "path": str(k), "level": level + 1,
+                        "size_bytes": sub_size, "file_count": sub_files,
+                        "truncated": True,
+                    })
+            else:
+                try:
+                    size += k.stat().st_size
+                    files += 1
+                except OSError:
+                    continue
+        children.sort(key=lambda d: -int(d["size_bytes"]))
+        info["size_bytes"] = size
+        info["file_count"] = files
+        info["children"] = children[:top_n]
+        total_bytes += size
+        total_files += files
+        return info
+
+    tree = _walk(root, 0)
+    # Flatten top-N subdir summary.
+    flat = []
+    def _collect(node: dict) -> None:
+        if not node.get("children"):
+            return
+        for c in node["children"]:
+            flat.append({
+                "path": c["path"],
+                "size_bytes": c["size_bytes"],
+                "size_mb": round(int(c["size_bytes"]) / (1024 * 1024), 1),
+                "file_count": c["file_count"],
+            })
+            _collect(c)
+    _collect(tree)
+    flat.sort(key=lambda d: -int(d["size_bytes"]))
+
+    return {
+        "root": str(root),
+        "depth": depth,
+        "total_files": total_files,
+        "total_bytes": total_bytes,
+        "total_mb": round(total_bytes / (1024 * 1024), 1),
+        "top_subdirs": flat[:top_n],
+        "tree": tree,
+    }
+
+
+def battery_health_report() -> dict:
+    """Return macOS battery cycle count, condition, and design vs current capacity.
+
+    Parses ``system_profiler SPPowerDataType`` and complements
+    ``get_battery_status`` (which reports the live charge level).
+    """
+    if not IS_MACOS:
+        return {"error": "battery_health_report requires macOS."}
+    try:
+        proc = subprocess.run(
+            ["system_profiler", "SPPowerDataType"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": "system_profiler timed out."}
+    except FileNotFoundError:
+        return {"error": "system_profiler not found."}
+    if proc.returncode != 0:
+        return {"error": proc.stderr.strip() or "system_profiler failed"}
+
+    report: dict[str, object] = {"raw_preview": proc.stdout[:200]}
+    for line in proc.stdout.splitlines():
+        clean = line.strip()
+        if ":" not in clean:
+            continue
+        key, _, val = clean.partition(":")
+        key = key.strip()
+        val = val.strip()
+        if key in {
+            "Cycle Count", "Condition", "Maximum Capacity",
+            "Full Charge Capacity (mAh)", "Charge Remaining (mAh)",
+            "Manufacturer", "Device Name", "Serial Number",
+            "State of Charge (%)",
+        }:
+            report[key] = val
+    return report
+
+
+def process_tree(pid: int | None = None, depth: int = 2) -> dict:
+    """Return a process tree — ancestors + descendants of *pid*, or full tree
+    at *depth* when *pid* is None.
+
+    Uses psutil's parent/children traversal; falls back to ``ps -ef`` parsing
+    if psutil is unavailable.
+    """
+    depth = max(1, min(depth, 6))
+
+    def _node(p: object, level: int) -> dict:
+        # psutil.Process duck-typed for static analysers.
+        try:
+            name = p.name()  # type: ignore[attr-defined]
+            status = p.status()  # type: ignore[attr-defined]
+            cpu = p.cpu_percent(interval=None)  # type: ignore[attr-defined]
+            mem = p.memory_percent()  # type: ignore[attr-defined]
+            kids = p.children(recursive=False)  # type: ignore[attr-defined]
+            ppid = getattr(p, "ppid", lambda: 0)()
+        except Exception:  # noqa: BLE001
+            return {"pid": getattr(p, "pid", -1), "error": "inaccessible"}
+        child_nodes = []
+        if level + 1 < depth:
+            for ch in kids:
+                child_nodes.append(_node(ch, level + 1))
+        return {
+            "pid": getattr(p, "pid", -1),
+            "ppid": ppid,
+            "name": name,
+            "status": status,
+            "cpu_percent": round(float(cpu or 0.0), 2),
+            "memory_percent": round(float(mem or 0.0), 2),
+            "children": child_nodes,
+        }
+
+    if pid is not None:
+        try:
+            target = psutil.Process(pid)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"process {pid} not found: {exc}"}
+        ancestors: list[dict] = []
+        try:
+            cur = target.parent()
+            while cur is not None:
+                ancestors.append({
+                    "pid": cur.pid, "name": cur.name(), "status": cur.status(),
+                })
+                cur = cur.parent()
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "root": _node(target, 0),
+            "ancestors": ancestors,
+        }
+
+    # Full system tree (depth-limited).
+    roots: list[dict] = []
+    for proc in psutil.process_iter(attrs=["pid", "ppid"]):
+        try:
+            if proc.ppid() in (0, 1) and proc.pid != 0:
+                roots.append(_node(proc, 0))
+        except Exception:  # noqa: BLE001
+            continue
+    return {"roots": roots}
+
+
+# Notification Center renders titles up to ~50 chars and bodies up to ~250 on
+# recent macOS; we cap a little above the visible width to allow rich graphemes
+# without an obvious truncation cliff.
+_NOTIFY_TITLE_MAX = 128
+_NOTIFY_BODY_MAX = 256
+
+
+def notify_user(title: str, body: str = "", sound: bool = False) -> dict:
+    """Show a macOS banner notification immediately (not a scheduled reminder).
+
+    Distinct from ``set_reminder`` which writes to ``reminders.json``.
+    """
+    if not IS_MACOS:
+        return {"error": "notify_user currently supports macOS only."}
+    if not title:
+        return {"error": "title is required."}
+    safe_title = _escape_applescript(title[:_NOTIFY_TITLE_MAX])
+    safe_body = _escape_applescript(body[:_NOTIFY_BODY_MAX])
+    sound_clause = ' sound name "Glass"' if sound else ""
+    script = (
+        f'display notification "{safe_body}" with title "{safe_title}"{sound_clause}'
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=8,
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": "osascript timed out."}
+    if proc.returncode != 0:
+        return {"error": proc.stderr.strip() or "osascript failed"}
+    return {"status": "delivered", "title": title, "body": body, "sound": bool(sound)}
+
+
+def do_not_disturb_status() -> dict:
+    """Return the current macOS Focus / Do-Not-Disturb state, best-effort.
+
+    Newer macOS versions expose this through the Focus subsystem rather than the
+    legacy NotificationCenter plist; we attempt both signal sources.
+    """
+    if not IS_MACOS:
+        return {"error": "do_not_disturb_status requires macOS."}
+    # Try `shortcuts run` style introspection via `defaults read` on the
+    # well-known assertions plist — fall back to a generic indicator.
+    candidates = [
+        ("focus_assertions",
+         ["defaults", "read",
+          str(pathlib.Path("~/Library/DoNotDisturb/DB/Assertions.json").expanduser()),
+         ]),
+        ("ncprefs",
+         ["defaults", "read", "com.apple.notificationcenterui"]),
+    ]
+    out: dict[str, object] = {"enabled": None, "source": None, "raw": {}}
+    for label, cmd in candidates:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        if proc.returncode != 0:
+            continue
+        text = proc.stdout
+        out["raw"][label] = text[:512]  # type: ignore[index]
+        lower = text.lower()
+        if "doNotDisturb = 1" in text or '"reason"' in text and '"enabled" = 1' in lower:
+            out["enabled"] = True
+            out["source"] = label
+            break
+        if "doNotDisturb = 0" in text:
+            out["enabled"] = False
+            out["source"] = label
+            break
+    return out
+
+
+def focus_mode_set(mode_name: str = "") -> dict:
+    """Switch macOS Focus mode by name via Shortcuts ("Set Focus" action).
+
+    The user must have a Shortcut named ``Set <mode> Focus`` (e.g. ``Set Work Focus``)
+    or the system Shortcuts entry ``Toggle Do Not Disturb`` configured.  When
+    *mode_name* is empty, this returns a hint listing common modes.
+    """
+    if not IS_MACOS:
+        return {"error": "focus_mode_set requires macOS."}
+    if not mode_name:
+        return {
+            "hint": (
+                "Pass a mode name (e.g. 'Work', 'Personal', 'Sleep'). "
+                "You must create a Shortcut named 'Set <Mode> Focus' that sets "
+                "the desired Focus, or use toggle_do_not_disturb for the legacy DND."
+            ),
+            "common_modes": ["Work", "Personal", "Sleep", "Do Not Disturb"],
+        }
+    shortcut_name = f"Set {mode_name} Focus"
+    safe = _escape_applescript(shortcut_name)
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", f'tell application "Shortcuts Events" to run shortcut "{safe}"'],
+            capture_output=True, text=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": "osascript timed out running the Shortcut."}
+    if proc.returncode != 0:
+        return {
+            "error": proc.stderr.strip() or "Shortcut not found",
+            "hint": f"Create a Shortcut named '{shortcut_name}' in the Shortcuts app.",
+        }
+    return {"status": "ok", "mode": mode_name, "shortcut": shortcut_name}
+
+
+def open_file_at_path(path: str, with_app: str = "") -> dict:
+    """Open *path* in the default app (or *with_app* via ``open -a``)."""
+    denied = _permission_check("allow_file_read", "open_file_at_path")
+    if denied:
+        return denied
+    if not path:
+        return {"error": "path is required."}
+    p = pathlib.Path(os.path.expanduser(path))
+    if not p.exists():
+        return {"error": f"path not found: {path}"}
+    cmd = ["open"]
+    if with_app:
+        cmd += ["-a", with_app]
+    cmd.append(str(p))
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+    except subprocess.TimeoutExpired:
+        return {"error": "open timed out."}
+    if proc.returncode != 0:
+        return {"error": proc.stderr.strip() or proc.stdout.strip()}
+    return {"status": "opened", "path": str(p), "with_app": with_app or None}
+
+
 # ── Tool self-extension ────────────────────────────────────────────────────────
 
 def list_user_tools() -> dict:
@@ -7658,6 +8238,204 @@ TOOLS: dict[str, ToolEntry] = {
         "fn": lambda args: _run_agent(
             args["agent_name"],
             args["task"],
+        ),
+    },
+    # ── Skills (user-extensible workflows) ────────────────────────────────────
+    "list_skills": {
+        "description": (
+            "List the user-installed skills (workflows) from "
+            "~/.syscontrol/skills. Each entry includes a description, tool "
+            "allowlist, and the optional sub-agent it runs inside."
+        ),
+        "parallel": True,
+        "inputSchema": _NO_ARGS_SCHEMA,
+        "fn": lambda _: list_skills(),
+    },
+    "run_skill": {
+        "description": (
+            "Fetch the playbook for a named skill and (optionally) a task to "
+            "perform.  Returns the skill body for the LLM to execute step-by-"
+            "step.  Use list_skills to see what's available."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Skill name (e.g. 'diag', 'morning')."},
+                "task": {"type": "string", "default": "", "description": "Optional freeform task to apply the skill to."},
+            },
+            "required": ["name"],
+        },
+        "fn": lambda args: run_skill(args.get("name", ""), args.get("task", "")),
+    },
+    # ── File / system housekeeping helpers ────────────────────────────────────
+    "tail_file": {
+        "description": (
+            "Tail the last N lines of any text file, optionally filtered by substring. "
+            "Caps reads at 50 MB and accepts up to 5000 lines. "
+            "Requires allow_file_read in ~/.syscontrol/config.json."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute or ~-prefixed file path."},
+                "lines": {"type": "integer", "default": 200, "minimum": 1, "maximum": 5000},
+                "filter_str": {"type": "string", "default": "", "description": "Optional case-insensitive substring filter."},
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: tail_file(
+            args.get("path", ""),
+            args.get("lines", 200),
+            args.get("filter_str", ""),
+        ),
+    },
+    "cleanup_downloads": {
+        "description": (
+            "Find or delete files in ~/Downloads older than N days. Defaults to dry_run "
+            "so nothing is removed without an explicit dry_run=false call. "
+            "Requires allow_file_write when dry_run is false."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "older_than_days": {"type": "integer", "default": 30, "minimum": 1, "maximum": 3650},
+                "dry_run": {"type": "boolean", "default": True},
+            },
+            "required": [],
+        },
+        "fn": lambda args: cleanup_downloads(
+            args.get("older_than_days", 30),
+            bool(args.get("dry_run", True)),
+        ),
+    },
+    "cleanup_caches": {
+        "description": (
+            "Report sizes of ~/Library/Caches (or /Library/Caches) and optionally purge "
+            "user-cache subdirectories. macOS only. Defaults to dry_run."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "enum": ["user", "system"], "default": "user"},
+                "dry_run": {"type": "boolean", "default": True},
+            },
+            "required": [],
+        },
+        "fn": lambda args: cleanup_caches(
+            args.get("target", "user"),
+            bool(args.get("dry_run", True)),
+        ),
+    },
+    "summarize_directory": {
+        "description": (
+            "Walk a directory tree up to a configurable depth and return per-subdirectory "
+            "sizes and file counts, plus a flat top-N list of the largest subdirs. "
+            "Saves many list_directory calls. Requires allow_file_read."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "default": "."},
+                "depth": {"type": "integer", "default": 3, "minimum": 1, "maximum": 6},
+                "top_n": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+            },
+            "required": [],
+        },
+        "fn": lambda args: summarize_directory(
+            args.get("path", "."),
+            args.get("depth", 3),
+            args.get("top_n", 20),
+        ),
+    },
+    "battery_health_report": {
+        "description": (
+            "Returns the macOS battery cycle count, condition, and capacity info "
+            "from system_profiler. Complements get_battery_status."
+        ),
+        "parallel": True,
+        "inputSchema": _NO_ARGS_SCHEMA,
+        "fn": lambda _: battery_health_report(),
+    },
+    "process_tree": {
+        "description": (
+            "Returns a process tree. With a pid, includes ancestors + descendants. "
+            "Without a pid, returns the system tree at the requested depth."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pid": {"type": "integer", "description": "Root PID. Omit for system tree."},
+                "depth": {"type": "integer", "default": 2, "minimum": 1, "maximum": 6},
+            },
+            "required": [],
+        },
+        "fn": lambda args: process_tree(args.get("pid"), args.get("depth", 2)),
+    },
+    "notify_user": {
+        "description": (
+            "Show a macOS banner notification immediately. Distinct from set_reminder, "
+            "which schedules a reminder. Use for skill completion alerts and the like."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "body": {"type": "string", "default": ""},
+                "sound": {"type": "boolean", "default": False},
+            },
+            "required": ["title"],
+        },
+        "fn": lambda args: notify_user(
+            args.get("title", ""),
+            args.get("body", ""),
+            bool(args.get("sound", False)),
+        ),
+    },
+    "do_not_disturb_status": {
+        "description": "Returns the current macOS Focus / Do-Not-Disturb state (best-effort).",
+        "parallel": True,
+        "inputSchema": _NO_ARGS_SCHEMA,
+        "fn": lambda _: do_not_disturb_status(),
+    },
+    "focus_mode_set": {
+        "description": (
+            "Activate a named macOS Focus mode via a user-defined Shortcut "
+            "(e.g. 'Set Work Focus'). Pass an empty mode_name to see usage hints."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mode_name": {"type": "string", "default": "", "description": "Focus mode name (e.g. 'Work', 'Personal')."},
+            },
+            "required": [],
+        },
+        "fn": lambda args: focus_mode_set(args.get("mode_name", "")),
+    },
+    "open_file_at_path": {
+        "description": (
+            "Open a file in the default macOS app, or in a specific app via 'open -a'. "
+            "Requires allow_file_read."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "with_app": {"type": "string", "default": ""},
+            },
+            "required": ["path"],
+        },
+        "fn": lambda args: open_file_at_path(
+            args.get("path", ""),
+            args.get("with_app", ""),
         ),
     },
     # ── User-Defined Tools (registry) ──────────────────────────────────────────

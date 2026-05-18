@@ -21,7 +21,7 @@ from mcp.server import (
 
 def test_tool_count_matches_documented() -> None:
     """Bumping a tool requires updating CLAUDE.md / README — keep in sync."""
-    expected = 92
+    expected = 104
     assert len(TOOLS) == expected, (
         f"TOOLS dict has {len(TOOLS)} entries; expected {expected}. "
         "If this change is intentional, update the constant here, "

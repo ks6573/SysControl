@@ -512,7 +512,7 @@ SysControl/
 │   ├── runner.py            # Sub-agent runner: isolated context, filtered tools
 │   └── paths.py             # Path resolution (repo root, user data dir, memory file)
 ├── mcp/
-│   ├── server.py            # MCP tool server (92 tools + self-extension)
+│   ├── server.py            # MCP tool server (104 tools + self-extension)
 │   └── prompt.json          # System prompt for the agent
 ├── deep_research/           # Deep research agent (iterative web research with citation verification)
 ├── swift/
@@ -541,7 +541,7 @@ SysControl/
 └────────┬─────────────┘
          │  JSON-RPC (stdio)
 ┌────────▼─────────────┐
-│    MCP Server        │   92 tools, self-extension, permission checks
+│    MCP Server        │   104 tools, self-extension, permission checks
 │  (mcp/server.py)     │   Concurrent tool execution via client pool
 └──────────────────────┘
 ```
