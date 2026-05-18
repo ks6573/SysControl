@@ -559,6 +559,9 @@ private struct ChatMessageListContent: View {
                             isStreaming: session.isStreaming
                                 && message.role == .assistant
                                 && message.id == session.messages.last?.id,
+                            isLastAssistant: message.role == .assistant
+                                && message.id == session.messages.last(where: { $0.role == .assistant })?.id
+                                && !session.isStreaming,
                             searchQuery: searchQuery,
                             isSearchMatch: matchingIDs.contains(message.id),
                             isFocusedSearchMatch: focusedMatchID == message.id
@@ -584,6 +587,7 @@ private struct ChatMessageListContent: View {
 private struct ChatMessageRow: View {
     let message: ChatMessage
     let isStreaming: Bool
+    let isLastAssistant: Bool
     let searchQuery: String
     let isSearchMatch: Bool
     let isFocusedSearchMatch: Bool
@@ -592,6 +596,7 @@ private struct ChatMessageRow: View {
         MessageBubble(
             message: message,
             isStreaming: isStreaming,
+            isLastAssistant: isLastAssistant,
             searchQuery: searchQuery,
             isSearchMatch: isSearchMatch,
             isFocusedSearchMatch: isFocusedSearchMatch
@@ -604,6 +609,8 @@ private struct ChatMessageRow: View {
 private struct ConnectionStatusBanner: View {
     let status: BackendStatus
     let onRetry: () -> Void
+    @Environment(AppState.self) private var appState
+    @State private var showingLogs = false
 
     var body: some View {
         HStack(spacing: 9) {
@@ -621,14 +628,23 @@ private struct ConnectionStatusBanner: View {
                 Text(statusText)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.primary.opacity(0.86))
+                    .accessibilityAddTraits(.isHeader)
                 Text(statusDetail)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
             Spacer()
             if case .failed = status {
-                Button("Retry") { onRetry() }
+                Button("Show Logs") { showingLogs = true }
                     .font(.system(size: 12))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                Link("Report Issue",
+                     destination: URL(string: "https://github.com/ks6573/SysControl/issues/new")!)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Button("Retry") { onRetry() }
+                    .font(.system(size: 12, weight: .semibold))
                     .buttonStyle(.plain)
                     .foregroundStyle(.red)
             }
@@ -640,6 +656,11 @@ private struct ConnectionStatusBanner: View {
             Rectangle()
                 .fill(bannerColor.opacity(0.18))
                 .frame(height: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Backend \(statusText)")
+        .sheet(isPresented: $showingLogs) {
+            BackendLogSheet(text: appState.backend?.recentStderr() ?? "(no stderr captured)")
         }
     }
 
@@ -706,6 +727,43 @@ private struct ConnectionStatusBanner: View {
     }
 }
 
+// MARK: - Backend Log Sheet
+
+private struct BackendLogSheet: View {
+    let text: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Backend stderr (last \(min(400, text.split(whereSeparator: \.isNewline).count)) lines)")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.escape, modifiers: [])
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            Divider()
+            ScrollView {
+                Text(text.isEmpty ? "(no stderr captured yet)" : text)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(14)
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+        }
+        .frame(minWidth: 720, minHeight: 480)
+    }
+}
+
 // MARK: - Typing Indicator
 
 private struct StarterPromptCard: View {
@@ -769,5 +827,8 @@ private struct ThinkingIndicator: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 6)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Assistant is responding")
+        .accessibilityAddTraits(.updatesFrequently)
     }
 }

@@ -9,18 +9,20 @@ struct SidebarView: View {
     @State private var savedChatToDelete: SavedChat?
     @State private var pinnedSessions: [ChatSession] = []
     @State private var recentSessionGroups: [SessionGroup] = []
+    @State private var archivedSessions: [ChatSession] = []
+    @State private var isArchivedExpanded: Bool = false
 
     private var markdownType: UTType {
         UTType(filenameExtension: "md") ?? .plainText
     }
 
     private static func computePinned(_ sessions: [ChatSession]) -> [ChatSession] {
-        sessions.filter(\.isPinned)
+        sessions.filter { $0.isPinned && !$0.isArchived }
     }
 
     private static func computeRecentGroups(_ sessions: [ChatSession]) -> [SessionGroup] {
         var grouped: [SessionBucket: [ChatSession]] = [:]
-        for session in sessions where !session.isPinned {
+        for session in sessions where !session.isPinned && !session.isArchived {
             let bucket = SessionBucket.bucket(for: session.createdAt)
             grouped[bucket, default: []].append(session)
         }
@@ -30,21 +32,29 @@ struct SidebarView: View {
         }
     }
 
+    private static func computeArchived(_ sessions: [ChatSession]) -> [ChatSession] {
+        sessions.filter(\.isArchived).sorted { $0.createdAt > $1.createdAt }
+    }
+
     private func refreshSessionGroups() {
         let sessions = appState.sessions
         pinnedSessions = Self.computePinned(sessions)
         recentSessionGroups = Self.computeRecentGroups(sessions)
+        archivedSessions = Self.computeArchived(sessions)
     }
 
     /// Equatable digest of every input the cached groupings depend on.  When
     /// this changes we recompute; otherwise body re-evaluations are cheap.
     private var sessionsFingerprint: [SessionFingerprint] {
-        appState.sessions.map { SessionFingerprint(id: $0.id, isPinned: $0.isPinned, createdAt: $0.createdAt) }
+        appState.sessions.map {
+            SessionFingerprint(id: $0.id, isPinned: $0.isPinned, isArchived: $0.isArchived, createdAt: $0.createdAt)
+        }
     }
 
     private struct SessionFingerprint: Equatable {
         let id: UUID
         let isPinned: Bool
+        let isArchived: Bool
         let createdAt: Date
     }
 
@@ -251,22 +261,37 @@ struct SidebarView: View {
         }
     }
 
+    /// Build a single session row.  Archived rows route the open action through
+    /// ``setSessionArchived(_:archived:false)`` so opening an archived chat
+    /// pulls it back into the main list automatically.
+    private func sessionRow(_ session: ChatSession, archived: Bool) -> some View {
+        SessionListRow(
+            session: session,
+            isSelected: appState.activeSessionID == session.id && appState.selectedSavedChat == nil,
+            onOpen: {
+                if archived {
+                    appState.setSessionArchived(session, archived: false)
+                }
+                appState.selectSession(session)
+            },
+            onTogglePin: {
+                appState.setSessionPinned(session, pinned: !session.isPinned)
+            },
+            onArchive: {
+                appState.setSessionArchived(session, archived: !archived)
+            },
+            onDelete: { sessionToDelete = session }
+        )
+        .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 8))
+        .listRowBackground(Color.clear)
+    }
+
     private var sidebarList: some View {
         List {
             if !pinnedSessions.isEmpty {
                 Section {
                     ForEach(pinnedSessions) { session in
-                        SessionListRow(
-                            session: session,
-                            isSelected: appState.activeSessionID == session.id && appState.selectedSavedChat == nil,
-                            onOpen: { appState.selectSession(session) },
-                            onTogglePin: {
-                                appState.setSessionPinned(session, pinned: !session.isPinned)
-                            },
-                            onDelete: { sessionToDelete = session }
-                        )
-                        .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 8))
-                        .listRowBackground(Color.clear)
+                        sessionRow(session, archived: false)
                     }
                 } header: {
                     sectionHeader("Pinned")
@@ -281,21 +306,34 @@ struct SidebarView: View {
                             .listRowBackground(Color.clear)
 
                         ForEach(group.sessions) { session in
-                            SessionListRow(
-                                session: session,
-                                isSelected: appState.activeSessionID == session.id && appState.selectedSavedChat == nil,
-                                onOpen: { appState.selectSession(session) },
-                                onTogglePin: {
-                                    appState.setSessionPinned(session, pinned: !session.isPinned)
-                                },
-                                onDelete: { sessionToDelete = session }
-                            )
-                            .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 8))
-                            .listRowBackground(Color.clear)
+                            sessionRow(session, archived: false)
                         }
                     }
                 } header: {
                     sectionHeader("Recent")
+                }
+            }
+
+            if !archivedSessions.isEmpty {
+                Section(isExpanded: $isArchivedExpanded) {
+                    if isArchivedExpanded {
+                        ForEach(archivedSessions) { session in
+                            sessionRow(session, archived: true)
+                        }
+                    }
+                } header: {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) { isArchivedExpanded.toggle() }
+                    } label: {
+                        HStack {
+                            sectionHeader("Archived \(archivedSessions.count)")
+                            Spacer()
+                            Image(systemName: isArchivedExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
             }
 
@@ -438,6 +476,7 @@ private struct SessionListRow: View {
     let isSelected: Bool
     let onOpen: () -> Void
     let onTogglePin: () -> Void
+    let onArchive: () -> Void
     let onDelete: () -> Void
 
     @State private var isHovering = false
@@ -456,11 +495,14 @@ private struct SessionListRow: View {
 
     private var rowIcon: String {
         if session.isStreaming { return "waveform.path.ecg" }
+        if session.isArchived { return "archivebox" }
         if session.isPinned { return "pin.fill" }
         if session.messages.isEmpty { return "plus.message" }
         return "bubble.left.and.bubble.right"
     }
 
+    /// One-line preview of the most recent user/assistant content if available,
+    /// else a contextual status string.
     private var detailText: String {
         if session.isStreaming {
             if let activeTool = session.activeToolNames.first {
@@ -471,7 +513,16 @@ private struct SessionListRow: View {
         if session.messages.isEmpty {
             return "Ready for diagnostics"
         }
+        let preview = session.lastMessagePreview
+        if !preview.isEmpty {
+            return preview
+        }
         return "\(session.messages.count) messages · \(session.createdAt.sidebarLabel)"
+    }
+
+    private var metaText: String {
+        if session.messages.isEmpty { return "" }
+        return "\(session.messages.count) msgs · \(session.createdAt.sidebarLabel)"
     }
 
     var body: some View {
@@ -497,6 +548,14 @@ private struct SessionListRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+
+                if !metaText.isEmpty {
+                    Text(metaText)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary.opacity(0.6))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -555,12 +614,20 @@ private struct SessionListRow: View {
             Button(session.isPinned ? "Unpin" : "Pin") {
                 onTogglePin()
             }
+            Button(session.isArchived ? "Unarchive" : "Archive") {
+                onArchive()
+            }
+            Divider()
             Button("Delete", role: .destructive) {
                 onDelete()
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Chat \(displayTitle)\(session.isPinned ? ", pinned" : "")")
+        .accessibilityLabel(
+            "Chat \(displayTitle)"
+                + (session.isPinned ? ", pinned" : "")
+                + (session.isArchived ? ", archived" : "")
+        )
         .accessibilityAction {
             onOpen()
         }

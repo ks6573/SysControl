@@ -9,6 +9,7 @@ final class ChatSession: Identifiable, Codable {
     var messages: [ChatMessage]
     let createdAt: Date
     var isPinned: Bool = false
+    var isArchived: Bool = false
     var isStreaming: Bool = false
     var activeToolNames: [String] = []
     var wasAutoSavedToHistory: Bool = false
@@ -16,6 +17,22 @@ final class ChatSession: Identifiable, Codable {
     // Transient streaming state (not persisted)
     private var _streamingMessageID: UUID?
     private var _streamingMessageIndex: Int?
+
+    /// Short preview of the most recent user-or-assistant message body.
+    /// Used by the sidebar to give context next to the title.
+    var lastMessagePreview: String {
+        for msg in messages.reversed() where msg.role == .user || msg.role == .assistant {
+            let trimmed = msg.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let firstLine = trimmed.split(whereSeparator: \.isNewline).first.map(String.init) ?? trimmed
+                if firstLine.count > 80 {
+                    return String(firstLine.prefix(80)) + "…"
+                }
+                return firstLine
+            }
+        }
+        return ""
+    }
 
     init(title: String = "New Chat") {
         self.id = UUID()
@@ -27,7 +44,7 @@ final class ChatSession: Identifiable, Codable {
     // MARK: - Codable
 
     enum CodingKeys: String, CodingKey {
-        case id, title, messages, createdAt, isPinned, wasAutoSavedToHistory
+        case id, title, messages, createdAt, isPinned, isArchived, wasAutoSavedToHistory
     }
 
     required init(from decoder: Decoder) throws {
@@ -37,6 +54,7 @@ final class ChatSession: Identifiable, Codable {
         messages = try c.decode([ChatMessage].self, forKey: .messages)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        isArchived = try c.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
         wasAutoSavedToHistory = try c.decodeIfPresent(Bool.self, forKey: .wasAutoSavedToHistory) ?? false
     }
 
@@ -47,6 +65,7 @@ final class ChatSession: Identifiable, Codable {
         try c.encode(messages, forKey: .messages)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(isPinned, forKey: .isPinned)
+        try c.encode(isArchived, forKey: .isArchived)
         try c.encode(wasAutoSavedToHistory, forKey: .wasAutoSavedToHistory)
     }
 

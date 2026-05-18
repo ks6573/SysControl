@@ -18,7 +18,33 @@ final class BackendService: @unchecked Sendable {
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
     private var readTask: Task<Void, Never>?
+    private var stderrReadTask: Task<Void, Never>?
     private let writeQueue = DispatchQueue(label: "com.syscontrol.backend.stdin")
+
+    // Ring buffer of recent stderr lines for the "Show Logs" sheet.
+    private let stderrLock = NSLock()
+    private var stderrRing: [String] = []
+    private static let stderrRingMax = 400
+
+    /// Snapshot the most recent stderr lines (newest last).
+    func recentStderr() -> String {
+        stderrLock.lock()
+        let copy = stderrRing
+        stderrLock.unlock()
+        return copy.joined(separator: "\n")
+    }
+
+    private func appendStderr(_ chunk: String) {
+        let lines = chunk.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        stderrLock.lock()
+        for line in lines {
+            stderrRing.append(String(line))
+            if stderrRing.count > Self.stderrRingMax {
+                stderrRing.removeFirst(stderrRing.count - Self.stderrRingMax)
+            }
+        }
+        stderrLock.unlock()
+    }
 
     init() {
         onToolFinished = { _, _ in }
@@ -116,6 +142,22 @@ final class BackendService: @unchecked Sendable {
         readTask = Task.detached { [weak self] in
             self?.readLoop(stdout)
         }
+
+        // Continuously drain stderr into the ring buffer so the UI can show
+        // it on demand without holding the entire stream in memory.
+        let stderrHandle = stderr.fileHandleForReading
+        stderrReadTask = Task.detached { [weak self] in
+            while !Task.isCancelled {
+                let data = stderrHandle.availableData
+                if data.isEmpty {
+                    // EOF or stream closed.
+                    return
+                }
+                if let text = String(data: data, encoding: .utf8) {
+                    self?.appendStderr(text)
+                }
+            }
+        }
     }
 
     func shutdown() {
@@ -132,6 +174,7 @@ final class BackendService: @unchecked Sendable {
             }
         }
         readTask?.cancel()
+        stderrReadTask?.cancel()
         process?.terminate()
         process = nil
     }

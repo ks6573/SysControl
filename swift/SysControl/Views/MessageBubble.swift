@@ -7,22 +7,26 @@ import SwiftUI
 struct MessageBubble: View {
     let message: ChatMessage
     let isStreaming: Bool
+    let isLastAssistant: Bool
     let searchQuery: String
     let isSearchMatch: Bool
     let isFocusedSearchMatch: Bool
 
+    @Environment(AppState.self) private var appState
     @State private var showCopied = false
     @State private var isHoveringAssistant = false
 
     init(
         message: ChatMessage,
         isStreaming: Bool,
+        isLastAssistant: Bool = false,
         searchQuery: String = "",
         isSearchMatch: Bool = false,
         isFocusedSearchMatch: Bool = false
     ) {
         self.message = message
         self.isStreaming = isStreaming
+        self.isLastAssistant = isLastAssistant
         self.searchQuery = searchQuery
         self.isSearchMatch = isSearchMatch
         self.isFocusedSearchMatch = isFocusedSearchMatch
@@ -210,6 +214,22 @@ struct MessageBubble: View {
             .foregroundStyle(showCopied ? Color.green : Color.secondary)
             .disabled(!hasResponseContent)
             .help(showCopied ? "Copied" : "Copy response")
+            .accessibilityLabel(showCopied ? "Response copied" : "Copy response to clipboard")
+
+            if isLastAssistant {
+                Button {
+                    appState.regenerateLast()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Regenerate response (⌘R)")
+                .accessibilityLabel("Regenerate last response")
+            }
 
             if hasSearchQuery && isSearchMatch {
                 Text(isFocusedSearchMatch ? "Current match" : "Match")
@@ -225,7 +245,7 @@ struct MessageBubble: View {
 
             Spacer(minLength: 0)
         }
-        .opacity(isHoveringAssistant || showCopied ? 1 : 0)
+        .opacity(isHoveringAssistant || showCopied || isLastAssistant ? 1 : 0)
         .animation(.easeInOut(duration: 0.12), value: isHoveringAssistant)
         .animation(.easeInOut(duration: 0.12), value: showCopied)
     }
@@ -282,20 +302,33 @@ private struct ToolCallCard: View {
 
     @State private var isExpanded = false
     @State private var copied = false
+    @State private var headerCopied = false
+    @State private var isHoveringHeader = false
 
     private var isPending: Bool { call.result == nil }
 
+    private var isErrorResult: Bool {
+        guard let result = call.result else { return false }
+        let prefix = result.prefix(64)
+        return prefix.contains("[tool error") || prefix.contains("[tool denied") || prefix.contains("\"error\"")
+    }
+
     private var statusIcon: String {
         if isPending { return "gear" }
+        if isErrorResult { return "xmark.circle.fill" }
         return "checkmark.circle.fill"
     }
 
     private var statusTint: Color {
-        isPending ? .orange : .green
+        if isPending { return .orange }
+        if isErrorResult { return .red }
+        return .green
     }
 
     private var statusText: String {
-        isPending ? "Running tool" : "Tool result ready"
+        if isPending { return "Running tool" }
+        if isErrorResult { return "Tool error" }
+        return "Tool result ready"
     }
 
     private var resultPreview: String {
@@ -349,6 +382,27 @@ private struct ToolCallCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     Spacer(minLength: 6)
+                    if !isPending, let result = call.result, !result.isEmpty {
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(result, forType: .string)
+                            headerCopied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                                headerCopied = false
+                            }
+                        } label: {
+                            Image(systemName: headerCopied ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 10))
+                                .foregroundStyle(headerCopied ? .green : .secondary)
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(isHoveringHeader || headerCopied ? 1 : 0)
+                        .allowsHitTesting(isHoveringHeader || headerCopied)
+                        .help("Copy result")
+                        .accessibilityLabel("Copy tool result")
+                    }
                     if !isPending {
                         Image(systemName: "chevron.down")
                             .font(.system(size: 9, weight: .semibold))
@@ -363,9 +417,11 @@ private struct ToolCallCard: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
                 .contentShape(Rectangle())
+                .onHover { isHoveringHeader = $0 }
             }
             .buttonStyle(.plain)
             .disabled(isPending)
+            .accessibilityLabel("Tool \(call.name), \(statusText)")
 
             if isExpanded, let result = call.result, !result.isEmpty {
                 Divider().opacity(0.3)

@@ -12,12 +12,16 @@ struct SettingsView: View {
     @State private var cloudModel: String = ProviderConfiguration.cloudDefaultModel
 
     @State private var localModels: [String] = []
+    @State private var cloudModels: [String] = []
+    @State private var isRefreshingCloudModels = false
+    @State private var cloudRefreshError: String?
     @State private var validationError: String?
     @State private var isRefreshingModels = false
     @State private var allowDeepResearch: Bool = false
     @State private var allowClipboard: Bool = false
     @State private var connectionTestResult: ConnectionTestResult?
     @State private var isTestingConnection = false
+    @State private var lastTestedEndpoint: String = ""
 
     private let permissionStore = PermissionConfigStore()
 
@@ -64,8 +68,44 @@ struct SettingsView: View {
             } else {
                 Section("Cloud Settings") {
                     SecureField("API Key", text: $cloudAPIKey)
+                        .onChange(of: cloudAPIKey) { _, _ in
+                            cloudModels = []
+                            cloudRefreshError = nil
+                        }
                     TextField("Base URL", text: $cloudBaseURL)
-                    TextField("Model", text: $cloudModel)
+                    HStack(alignment: .firstTextBaseline) {
+                        if cloudModels.isEmpty {
+                            TextField("Model", text: $cloudModel)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            Picker("Model", selection: $cloudModel) {
+                                ForEach(cloudModels, id: \.self) { model in
+                                    Text(model).tag(model)
+                                }
+                                if !cloudModels.contains(cloudModel) && !cloudModel.isEmpty {
+                                    Text("\(cloudModel) (custom)").tag(cloudModel)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        Button {
+                            Task { await refreshCloudModels() }
+                        } label: {
+                            if isRefreshingCloudModels {
+                                ProgressView().scaleEffect(0.55).frame(width: 12, height: 12)
+                            } else {
+                                Text("Fetch Models")
+                            }
+                        }
+                        .disabled(isRefreshingCloudModels || cloudAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    if let err = cloudRefreshError {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 }
             }
 
@@ -114,49 +154,58 @@ struct SettingsView: View {
             }
 
             Section {
-                HStack(spacing: 12) {
-                    Button("Test Connection") {
-                        Task { await testConnection() }
-                    }
-                    .disabled(isTestingConnection)
-
-                    if isTestingConnection {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                            .frame(width: 14, height: 14)
-                    } else if let result = connectionTestResult {
-                        switch result {
-                        case .success(let info):
-                            HStack(spacing: 4) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                                Text(info)
-                                    .foregroundStyle(.green)
-                            }
-                            .font(.caption)
-                        case .failure(let error):
-                            HStack(spacing: 4) {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.red)
-                                Text(error)
-                                    .foregroundStyle(.red)
-                            }
-                            .font(.caption)
-                            .lineLimit(2)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        Button("Test Connection") {
+                            Task { await testConnection() }
                         }
-                    }
+                        .disabled(isTestingConnection)
 
-                    Spacer()
+                        if isTestingConnection {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                                .frame(width: 14, height: 14)
+                        } else if let result = connectionTestResult {
+                            switch result {
+                            case .success(let info):
+                                HStack(spacing: 4) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.green)
+                                    Text(info)
+                                        .foregroundStyle(.green)
+                                }
+                                .font(.caption)
+                            case .failure(let error):
+                                HStack(spacing: 4) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.red)
+                                    Text(error)
+                                        .foregroundStyle(.red)
+                                }
+                                .font(.caption)
+                                .lineLimit(2)
+                            }
+                        }
 
-                    Button("Apply & Reconnect") {
-                        apply()
+                        Spacer()
+
+                        Button("Apply & Reconnect") {
+                            apply()
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
-                    .buttonStyle(.borderedProminent)
+                    if !lastTestedEndpoint.isEmpty {
+                        Text("Tested endpoint: \(lastTestedEndpoint)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                    }
                 }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 560)
+        .frame(minWidth: 580, idealWidth: 620, minHeight: 640, idealHeight: 740)
         .navigationTitle("Settings")
         .onAppear {
             loadCurrentConfiguration()
@@ -316,8 +365,10 @@ struct SettingsView: View {
 
         guard let url = URL(string: testURL) else {
             connectionTestResult = .failure("Invalid URL")
+            lastTestedEndpoint = testURL
             return
         }
+        lastTestedEndpoint = testURL
 
         do {
             var request = URLRequest(url: url)
@@ -337,6 +388,57 @@ struct SettingsView: View {
             }
         } catch {
             connectionTestResult = .failure(error.localizedDescription)
+        }
+    }
+
+    private func refreshCloudModels() async {
+        guard !isRefreshingCloudModels else { return }
+        let key = cloudAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            cloudRefreshError = "Enter your API key first."
+            return
+        }
+        isRefreshingCloudModels = true
+        cloudRefreshError = nil
+        defer { isRefreshingCloudModels = false }
+
+        let base = cloudBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let urlString = ProviderConfiguration.openAIModelsURL(
+            fromBaseURL: base.isEmpty ? ProviderConfiguration.cloudBaseURL : base
+        )
+        guard let url = URL(string: urlString) else {
+            cloudRefreshError = "Invalid base URL"
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                cloudRefreshError = "HTTP \(http.statusCode) from \(urlString)"
+                return
+            }
+            let decoded = try JSONDecoder().decode(OpenAIModelsResponse.self, from: data)
+            let names = decoded.data.map(\.id).sorted()
+            if names.isEmpty {
+                cloudRefreshError = "No models returned"
+                return
+            }
+            cloudModels = names
+            if !names.contains(cloudModel) {
+                cloudModel = names.first ?? cloudModel
+            }
+        } catch {
+            cloudRefreshError = error.localizedDescription
+        }
+    }
+
+    private struct OpenAIModelsResponse: Decodable {
+        let data: [Model]
+        struct Model: Decodable {
+            let id: String
         }
     }
 

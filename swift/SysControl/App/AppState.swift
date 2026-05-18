@@ -125,6 +125,99 @@ final class AppState {
         persistence.saveSessionList(sessions)
     }
 
+    func setSessionArchived(_ session: ChatSession, archived: Bool) {
+        guard let index = sessions.firstIndex(where: { $0.id == session.id }) else { return }
+        let target = sessions[index]
+        target.isArchived = archived
+        if archived, activeSessionID == session.id {
+            let nextActive = sessions.first(where: { !$0.isArchived && $0.id != session.id })
+            activeSessionID = nextActive?.id
+            if activeSessionID == nil {
+                createNewSession(autoSaveCurrent: false)
+            }
+        }
+        persistence.saveSession(target)
+        persistence.saveSessionList(sessions)
+    }
+
+    /// Activate the *index*'th session in the visible sidebar order
+    /// (1-based index from the keyboard shortcut: Cmd-1 → first row).
+    func selectSession(at index: Int) {
+        let visible = sessions.filter { !$0.isArchived }
+        let zeroIndex = index - 1
+        guard visible.indices.contains(zeroIndex) else { return }
+        selectSession(visible[zeroIndex])
+    }
+
+    /// Remove the most recent assistant turn (and any trailing tool messages),
+    /// then re-send the prior user message.  Used by Cmd-R / the "Regenerate"
+    /// action on the last assistant bubble.
+    func regenerateLast() {
+        guard let session = activeSession else { return }
+        guard !session.isStreaming else { return }
+        // Walk back to find the last user message, dropping everything after it.
+        guard let lastUserIdx = session.messages.lastIndex(where: { $0.role == .user }) else { return }
+        let userMessage = session.messages[lastUserIdx]
+        let preservedAttachment = userMessage.attachedFilePath
+        let userText = userMessage.content
+        session.messages = Array(session.messages.prefix(lastUserIdx))
+        // Re-send through the normal path so the backend re-runs the turn.
+        sendMessage(userText, attachedFilePath: preservedAttachment)
+    }
+
+    /// Export the active session's conversation to a markdown file at *url*.
+    /// Returns ``true`` on success.
+    @discardableResult
+    func exportActiveSession(to url: URL) -> Bool {
+        guard let session = activeSession else { return false }
+        let body = Self.sessionMarkdown(session, model: modelName)
+        do {
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            connectionError = "Export failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    private static func sessionMarkdown(_ session: ChatSession, model: String) -> String {
+        var lines: [String] = []
+        lines.append("# \(session.title)")
+        lines.append("")
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        lines.append("- created: \(formatter.string(from: session.createdAt))")
+        if !model.isEmpty {
+            lines.append("- model: `\(model)`")
+        }
+        lines.append("")
+        for msg in session.messages {
+            switch msg.role {
+            case .user:
+                lines.append("## User")
+                lines.append("")
+                lines.append(msg.content)
+                lines.append("")
+            case .assistant:
+                lines.append("## Assistant")
+                lines.append("")
+                lines.append(msg.content)
+                if let calls = msg.toolCalls, !calls.isEmpty {
+                    lines.append("")
+                    lines.append("### Tools used")
+                    lines.append("")
+                    for call in calls {
+                        lines.append("- `\(call.name)`")
+                    }
+                }
+                lines.append("")
+            default:
+                continue
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
     // MARK: - Saved Markdown Chats
 
     func refreshSavedChats() {
