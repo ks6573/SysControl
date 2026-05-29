@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -31,19 +31,9 @@ jobs:
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
-      - name: Set up Python backend
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          uv sync
-
-      - name: Verify venv Python
-        run: |
-          echo "Venv python3 symlink target:"
-          python3 -c "import os; print(os.path.realpath('.venv/bin/python3'))"
-          echo "File type:"
-          file "$(python3 -c "import os; print(os.path.realpath('.venv/bin/python3'))")"
-          .venv/bin/python3 -c "import psutil, openai; print('Venv deps OK')"
-
+      # build.sh provisions its own relocatable standalone CPython for the
+      # bundle and validates it (ssl + psutil + openai), so the dev venv no
+      # longer needs to be synced or inspected here.
       - name: Build DMG
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -55,7 +45,7 @@ jobs:
         run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: "SysControl v${{ steps.version.outputs.version }}"
           files: swift/.build/SysControl.dmg

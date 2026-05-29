@@ -29,14 +29,14 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from openai import OpenAI
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.formatted_text import FormattedText, StyleAndTextTuples
 from prompt_toolkit.formatted_text.utils import fragment_list_len
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
@@ -253,9 +253,9 @@ def _json_tool_result(raw: str) -> dict[str, Any] | None:
 
 
 def _as_float(value: object) -> float | None:
+    if not isinstance(value, (int, float, str)):
+        return None
     try:
-        if value is None:
-            return None
         return float(value)
     except (TypeError, ValueError):
         return None
@@ -2242,7 +2242,9 @@ class _InputBandProcessor(Processor):
             (f"{style} {self._style}".strip(), text, *rest)
             for style, text, *rest in ti.fragments
         ]
-        fragments = prefix + styled_fragments
+        fragments: StyleAndTextTuples = cast(
+            StyleAndTextTuples, prefix + styled_fragments
+        )
         visible = fragment_list_len(fragments)
         pad = max(0, ti.width - visible)
         if pad:

@@ -182,7 +182,7 @@ uv run agent.py                      # CLI
 3. Push a `v*` tag (e.g., `git tag v1.1.0 && git push origin v1.1.0`)
 4. GitHub Actions builds DMG and creates release automatically
 
-**Note:** `softprops/action-gh-release` has no v3 — use `@v2`. `actions/checkout@v5` is current.
+**Note:** Pinned actions: `softprops/action-gh-release@v3` and `actions/checkout@v6` (both on the Node 24 runtime). `release.yml` does not pre-sync the dev venv — `build.sh` provisions and validates its own relocatable standalone CPython for the bundle.
 
 ### Code quality
 ```bash
