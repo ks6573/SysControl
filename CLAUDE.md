@@ -121,13 +121,28 @@ Detection: `~/.syscontrol/build/.git` exists → source install.
 
 ### DMG build: relocatable venv
 
-`build.sh` copies `.venv` into the `.app` bundle and makes it relocatable:
-1. Replaces symlinked `python3` with the real binary (copied from the build machine)
-2. Copies Python stdlib into the venv (uv keeps it external)
-3. Patches `pyvenv.cfg` to point at the bundled `bin/`
-4. Validates imports (`psutil`, `openai`) at build time
+`build.sh` builds the bundled venv from a **uv-managed standalone CPython**
+(`astral-sh/python-build-standalone`), NOT framework Python. Framework Python
+(Homebrew/python.org) is not relocatable — its `bin/python3` launcher loads the
+interpreter from a framework dylib by absolute path (e.g.
+`/opt/homebrew/Cellar/python@3.14/3.14.4/.../Python`), so a copied bundle only
+runs where that exact path exists and dies with `dyld: Library not loaded` on
+any other Mac (or after `brew upgrade` bumps the patch version). Standalone
+CPython resolves `libpython` via `@rpath = @executable_path/../lib` and its
+C-extensions carry no external absolute paths, so it relocates by plain copy.
 
-`BackendService.swift` uses `isExecutableFile(atPath:)` to detect broken venvs and falls back to `/usr/bin/python3`. It also captures stderr to surface `ImportError`/`ModuleNotFoundError` to the UI.
+Steps (gated on `uv` being present; `SYSCONTROL_BUNDLE_PYTHON` overrides version, default 3.14):
+1. `uv python install` + `uv venv --managed-python`, then `uv pip install -r pyproject.toml`
+2. Replace the venv's symlinked `python3` with the real standalone binary
+3. **Copy `libpython*.dylib` into the venv `lib/`** so the binary's `@rpath` resolves in-bundle (the key step)
+4. Copy Python stdlib into the venv (uv keeps it external); patch `pyvenv.cfg` `home`
+5. Ad-hoc sign all Mach-O (incl. the interpreter + dylib); validate `import ssl, psutil, openai` at build time (release builds abort on failure)
+
+`BackendService.swift` chooses the interpreter via `interpreterRuns()` — it
+*launches* the bundled python (not just `isExecutableFile`, which can't catch a
+present-but-dyld-broken binary) and falls back to `/usr/bin/python3` only if it
+won't run. `startupFailureMessage()` surfaces dyld/library failures and
+`ImportError`/`ModuleNotFoundError` from the stderr ring buffer to the UI.
 
 ---
 

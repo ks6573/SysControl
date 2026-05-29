@@ -83,9 +83,15 @@ final class BackendService: @unchecked Sendable {
             return
         }
 
-        // Prefer bundled venv python; fall back to system python
+        // Prefer the bundled venv python, but only if it actually RUNS. A
+        // bundled interpreter can be present and executable yet still abort in
+        // dyld at launch (e.g. a non-relocatable build whose libpython path is
+        // missing, or a wrong-arch binary). isExecutableFile only checks the
+        // permission bit, so we probe by launching it. Fall back to system
+        // python otherwise.
         let actualPython: String
-        if FileManager.default.isExecutableFile(atPath: pythonPath) {
+        if FileManager.default.isExecutableFile(atPath: pythonPath),
+           BackendService.interpreterRuns(pythonPath) {
             actualPython = pythonPath
         } else {
             actualPython = "/usr/bin/python3"
@@ -109,21 +115,22 @@ final class BackendService: @unchecked Sendable {
         proc.standardError = stderr
 
         proc.terminationHandler = { [weak self] proc in
-            // Surface actionable errors from stderr when the bridge crashes
-            let stderrData = stderr.fileHandleForReading.availableData
-            if let stderrText = String(data: stderrData, encoding: .utf8),
-               !stderrText.isEmpty {
-                if stderrText.contains("ModuleNotFoundError") || stderrText.contains("ImportError") {
-                    let snippet = String(stderrText.prefix(300))
-                    DispatchQueue.main.async {
-                        self?.onError?("Startup",
-                            "Missing Python dependency. Please reinstall from the latest DMG or use the source installer: "
-                            + snippet)
-                    }
-                }
+            guard let self else { return }
+            // The continuous stderr drain (stderrReadTask) owns the pipe, so
+            // read captured output from the ring buffer rather than racing it on
+            // the FileHandle. Fall back to a direct read only if the ring is
+            // still empty (drain task hadn't run yet).
+            var stderrText = self.recentStderr()
+            if stderrText.isEmpty {
+                let data = stderr.fileHandleForReading.availableData
+                stderrText = String(data: data, encoding: .utf8) ?? ""
+            }
+            if let message = BackendService.startupFailureMessage(
+                exitCode: proc.terminationStatus, stderr: stderrText) {
+                DispatchQueue.main.async { self.onError?("Startup", message) }
             }
             DispatchQueue.main.async {
-                self?.onDisconnected?()
+                self.onDisconnected?()
             }
         }
 
@@ -310,6 +317,52 @@ final class BackendService: @unchecked Sendable {
         default:
             break
         }
+    }
+
+    /// Whether a Python interpreter can actually execute. A file may be present
+    /// with the execute bit set yet still abort in dyld at launch (missing
+    /// libpython, wrong architecture); `isExecutableFile` only checks the bit,
+    /// so we probe by running a trivial isolated program with a watchdog.
+    private static func interpreterRuns(_ path: String) -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: path)
+        proc.arguments = ["-I", "-c", ""]  // -I: ignore env/site — fastest probe
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+        } catch {
+            return false
+        }
+        // A trivial probe returns in milliseconds; guard against a hang anyway.
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 5) {
+            if proc.isRunning { proc.terminate() }
+        }
+        proc.waitUntilExit()
+        return proc.terminationStatus == 0
+    }
+
+    /// Map a bridge process that died to an actionable startup message, or nil
+    /// if the exit doesn't look like a known fatal cause (e.g. a clean exit or a
+    /// normal SIGTERM shutdown). Distinguishes dyld/library failures — the
+    /// hallmark of a broken or non-relocatable bundled runtime — from missing
+    /// Python dependencies.
+    static func startupFailureMessage(exitCode: Int32, stderr: String) -> String? {
+        guard exitCode != 0 else { return nil }
+        let snippet = String(stderr.suffix(400))
+        if stderr.contains("dyld")
+            || stderr.contains("Library not loaded")
+            || stderr.contains("Symbol not found")
+            || stderr.contains("image not found") {
+            return "The bundled Python runtime failed to load (dynamic library "
+                + "error). This usually means a broken install — please reinstall "
+                + "the latest SysControl DMG.\n\n" + snippet
+        }
+        if stderr.contains("ModuleNotFoundError") || stderr.contains("ImportError") {
+            return "Missing Python dependency. Please reinstall from the latest "
+                + "DMG or use the source installer.\n\n" + snippet
+        }
+        return nil
     }
 
     /// Reject inline-image paths that don't live in the temp dir under one of

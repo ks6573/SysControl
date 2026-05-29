@@ -106,52 +106,82 @@ echo "  Copying Python backend..."
 cp -r "$PROJECT_ROOT/agent" "$RESOURCES/agent"
 cp -r "$PROJECT_ROOT/mcp" "$RESOURCES/mcp"
 
-# Copy venv if it exists
-if [ -d "$PROJECT_ROOT/.venv" ]; then
-    echo "  Copying Python venv (this may take a moment)..."
-    rm -rf "$RESOURCES/.venv"
-    if command -v rsync >/dev/null 2>&1; then
-        rsync -a --delete \
-            --no-owner --no-group --no-perms --executability \
-            --exclude '__pycache__/' \
-            --exclude '*.pyc' \
-            "$PROJECT_ROOT/.venv/" "$RESOURCES/.venv/"
-    else
-        cp -R "$PROJECT_ROOT/.venv" "$RESOURCES/.venv"
+# ── Build a self-contained, relocatable Python runtime for the bundle ─────────
+# macOS framework Python (Homebrew / python.org) is NOT relocatable: its thin
+# bin/python3 launcher loads the interpreter from a Python framework dylib by
+# ABSOLUTE path (e.g. /opt/homebrew/Cellar/python@3.14/3.14.4/.../Python). A
+# copied bundle then runs only where that exact path exists on the build machine
+# — it breaks on every other Mac, and even on the build machine after a
+# `brew upgrade` bumps the patch version. Instead we build from a uv-managed
+# standalone CPython (astral-sh/python-build-standalone): its binary resolves
+# libpython via @rpath = @executable_path/../lib and its C-extensions carry no
+# external absolute paths, so it runs on any Mac once physically copied.
+BUNDLE_PYTHON_VERSION="${SYSCONTROL_BUNDLE_PYTHON:-3.14}"
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "  ⚠ 'uv' not found — cannot build a relocatable Python bundle."
+    echo "    Install uv (https://docs.astral.sh/uv/) and re-build, otherwise"
+    echo "    users will hit 'Library not loaded' dyld errors on launch."
+    if [ "$MODE" = "release" ]; then
+        echo "    Release build aborted: a working bundled runtime is required."
+        exit 1
+    fi
+else
+    VENV_DIR="$RESOURCES/.venv"
+    BUNDLE_VENV="$BUILD_DIR/bundle-venv"
+
+    echo "  Provisioning standalone CPython $BUNDLE_PYTHON_VERSION (uv)..."
+    uv python install "$BUNDLE_PYTHON_VERSION" 2>&1 | sed 's/^/    /'
+
+    echo "  Creating bundle venv from the standalone interpreter..."
+    rm -rf "$BUNDLE_VENV"
+    uv venv --python "$BUNDLE_PYTHON_VERSION" --managed-python --no-project "$BUNDLE_VENV" >/dev/null
+
+    echo "  Installing runtime dependencies into the bundle venv..."
+    uv pip install --quiet --python "$BUNDLE_VENV/bin/python3" -r "$PROJECT_ROOT/pyproject.toml"
+
+    echo "  Copying bundle venv into Resources..."
+    rm -rf "$VENV_DIR"
+    rsync -a --no-owner --no-group --no-perms --executability \
+        --exclude '__pycache__/' --exclude '*.pyc' \
+        "$BUNDLE_VENV/" "$VENV_DIR/"
+
+    # ── Materialize: make the venv physically self-contained ──────────────
+    echo "  Making venv relocatable..."
+
+    # 1. Resolve the real standalone binary the venv symlinks point at.
+    REAL_PYTHON="$(/usr/bin/python3 -c "import os; print(os.path.realpath('$VENV_DIR/bin/python3'))")"
+    if [ ! -f "$REAL_PYTHON" ]; then
+        echo "  ✗ Could not resolve standalone Python at: $REAL_PYTHON"
+        exit 1
+    fi
+    STANDALONE_ROOT="$(dirname "$(dirname "$REAL_PYTHON")")"
+
+    # 2. Replace the venv's interpreter symlinks with the real binary.
+    rm -f "$VENV_DIR/bin/python3" "$VENV_DIR/bin/python" "$VENV_DIR"/bin/python3.[0-9]*
+    cp "$REAL_PYTHON" "$VENV_DIR/bin/python3"
+    ln -s python3 "$VENV_DIR/bin/python"
+
+    # 3. Copy the interpreter dylib into lib/ so the binary's @rpath
+    #    (@executable_path/../lib) resolves INSIDE the bundle. This is the step
+    #    that makes a copied standalone Python actually run on another machine.
+    cp "$STANDALONE_ROOT/lib/libpython"*.dylib "$VENV_DIR/lib/"
+
+    # 4. Copy the standalone stdlib (incl. lib-dynload) — uv keeps it outside the
+    #    venv — while preserving the venv's own site-packages.
+    STD_LIB="$(find "$STANDALONE_ROOT/lib" -maxdepth 1 -name 'python3.*' -type d 2>/dev/null | head -1)"
+    VENV_LIB="$(find "$VENV_DIR/lib" -maxdepth 1 -name 'python3.*' -type d 2>/dev/null | head -1)"
+    if [ -n "$STD_LIB" ] && [ -n "$VENV_LIB" ]; then
+        echo "  Copying Python stdlib from $STD_LIB..."
+        rsync -a --copy-links \
+            --exclude 'site-packages/' --exclude '__pycache__/' --exclude '*.pyc' \
+            "$STD_LIB/" "$VENV_LIB/"
     fi
 
-    # ── Make venv relocatable ──────────────────────────────────────────
-    echo "  Making venv relocatable..."
-    VENV_DIR="$RESOURCES/.venv"
-
-    # 1. Resolve the real Python binary (follow all symlinks)
-    REAL_PYTHON="$(python3 -c "import os; print(os.path.realpath('$VENV_DIR/bin/python3'))")"
-
-    if [ -f "$REAL_PYTHON" ]; then
-        # 2. Replace symlinks with the actual binary
-        rm -f "$VENV_DIR/bin/python3" "$VENV_DIR/bin/python"
-        cp "$REAL_PYTHON" "$VENV_DIR/bin/python3"
-        ln -s python3 "$VENV_DIR/bin/python"
-
-        # 3. Copy Python stdlib — uv keeps it outside the venv
-        PYTHON_HOME="$(dirname "$REAL_PYTHON")/.."
-        PYTHON_LIB="$(find "$PYTHON_HOME/lib" -maxdepth 1 -name 'python3.*' -type d 2>/dev/null | head -1)"
-        VENV_LIB="$(find "$VENV_DIR/lib" -maxdepth 1 -name 'python3.*' -type d 2>/dev/null | head -1)"
-
-        if [ -n "$PYTHON_LIB" ] && [ -n "$VENV_LIB" ]; then
-            echo "  Copying Python stdlib from $PYTHON_LIB..."
-            rsync -a --copy-links \
-                --exclude 'site-packages/' \
-                --exclude '__pycache__/' \
-                --exclude '*.pyc' \
-                "$PYTHON_LIB/" "$VENV_LIB/"
-        fi
-
-        # 4. Patch pyvenv.cfg to point at the bundled bin/
-        # Use Python instead of sed to avoid corruption when $VENV_DIR contains
-        # characters that have special meaning to sed (|, &, \, etc.).
-        if [ -f "$VENV_DIR/pyvenv.cfg" ]; then
-            VENV_BIN_DIR="$VENV_DIR/bin" python3 - <<'PYCFG'
+    # 5. Patch pyvenv.cfg to point at the bundled bin/. Use Python, not sed, to
+    #    avoid corruption when the path contains sed-special characters.
+    if [ -f "$VENV_DIR/pyvenv.cfg" ]; then
+        VENV_BIN_DIR="$VENV_DIR/bin" /usr/bin/python3 - <<'PYCFG'
 import os, pathlib, re
 cfg = pathlib.Path(os.environ["VENV_BIN_DIR"]).parent / "pyvenv.cfg"
 new_home = os.environ["VENV_BIN_DIR"]
@@ -159,29 +189,47 @@ text = cfg.read_text()
 text = re.sub(r"(?m)^home\s*=.*$", f"home = {new_home}", text)
 cfg.write_text(text)
 PYCFG
-        fi
+    fi
+    echo "  ✓ Venv made relocatable"
 
-        echo "  ✓ Venv made relocatable"
+    # 6. Ad-hoc sign every Mach-O in the venv (incl. the interpreter binary and
+    #    libpython dylib we just copied) so macOS does not block them with
+    #    "library load disallowed by system policy".
+    echo "  Signing bundled Mach-O objects..."
+    SIGN_COUNT=0
+    while IFS= read -r -d '' obj; do
+        codesign --force --sign - "$obj" 2>/dev/null && SIGN_COUNT=$((SIGN_COUNT + 1))
+    done < <(find "$VENV_DIR" \( -name '*.so' -o -name '*.dylib' \) -print0)
+    codesign --force --sign - "$VENV_DIR/bin/python3" 2>/dev/null && SIGN_COUNT=$((SIGN_COUNT + 1))
+    echo "  ✓ Signed $SIGN_COUNT objects"
+
+    # 7. Guard against regressions: no bundled Mach-O may reference an absolute
+    #    external path (/opt, /Library, /usr/local) — that is exactly what makes
+    #    a bundle non-relocatable and breaks it on other Macs (the dyld error).
+    echo "  Checking bundle is relocatable (no external absolute dylib refs)..."
+    EXTERNAL_REFS="$(find "$VENV_DIR" \( -name '*.so' -o -name '*.dylib' -o -name 'python3' \) \
+        -exec otool -L {} \; 2>/dev/null | grep -E '^[[:space:]]+/(opt|Library|usr/local)' | sort -u || true)"
+    if [ -n "$EXTERNAL_REFS" ]; then
+        echo "  ✗ Bundle references external absolute paths (NOT relocatable):"
+        echo "$EXTERNAL_REFS" | sed 's/^/      /'
+        if [ "$MODE" = "release" ]; then
+            exit 1
+        fi
     else
-        echo "  ⚠ Warning: could not resolve real Python binary at $REAL_PYTHON"
+        echo "  ✓ No external absolute dylib refs — bundle is relocatable"
     fi
 
-    # 5. Ad-hoc sign all shared libraries in the venv so macOS
-    #    does not block them with "library load disallowed by system policy"
-    echo "  Signing bundled shared libraries..."
-    SIGN_COUNT=0
-    while IFS= read -r -d '' lib; do
-        codesign --force --sign - "$lib" 2>/dev/null && SIGN_COUNT=$((SIGN_COUNT + 1))
-    done < <(find "$VENV_DIR" \( -name '*.so' -o -name '*.dylib' \) -print0)
-    echo "  ✓ Signed $SIGN_COUNT shared libraries"
-
-    # 6. Validate the bundled venv
+    # 8. Validate: the bundled Python must RUN and import deps + TLS. The ssl
+    #    import proves the relocated crypto works, which the OpenAI client needs.
     echo "  Validating bundled Python..."
-    if "$VENV_DIR/bin/python3" -c "import psutil, openai; print('  ✓ Bundled Python validated (psutil, openai importable)')" 2>/dev/null; then
+    if "$VENV_DIR/bin/python3" -c "import ssl, psutil, openai; print('  ✓ Bundled Python validated (ssl + psutil + openai importable)')"; then
         :
     else
-        echo "  ⚠ Warning: Bundled Python cannot import required modules"
-        echo "    DMG users may experience 'Could not connect to backend' errors"
+        echo "  ✗ Bundled Python failed validation — DMG users would see"
+        echo "    'Could not connect to backend' errors."
+        if [ "$MODE" = "release" ]; then
+            exit 1
+        fi
     fi
 fi
 
