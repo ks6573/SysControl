@@ -6,16 +6,10 @@ on:
       - 'v*'
 
 jobs:
-  build-and-release:
-    runs-on: macos-15
-    permissions:
-      contents: write
-
+  version-check:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v6
 
       - name: Verify VERSION matches tag and pyproject
         run: |
@@ -28,48 +22,112 @@ jobs:
           fi
           echo "Versions in sync: $VFILE"
 
+  build-macos:
+    needs: version-check
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
       # build.sh provisions its own relocatable standalone CPython for the
-      # bundle and validates it (ssl + psutil + openai), so the dev venv no
-      # longer needs to be synced or inspected here.
+      # bundle and validates it (ssl + psutil + openai).
       - name: Build DMG
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           cd swift
           ./build.sh release
 
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: swift/.build/SysControl.dmg
+
+  build-windows:
+    needs: version-check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync --extra gui --extra build
+
+      - name: Build Windows bundle (PyInstaller)
+        run: uv run pyinstaller SysControl.spec --noconfirm
+
+      - name: Smoke-test the frozen bundle (deps + TLS import)
+        run: |
+          $p = Start-Process -FilePath dist/SysControl/SysControl.exe -ArgumentList '--selftest' -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { Write-Error "selftest failed ($($p.ExitCode))"; exit 1 }
+          echo "frozen bundle selftest OK"
+
+      - name: Zip bundle
+        run: Compress-Archive -Path dist/SysControl/* -DestinationPath SysControl-windows-x64.zip -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: SysControl-windows-x64.zip
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
       - name: Read version
         id: version
         run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           name: "SysControl v${{ steps.version.outputs.version }}"
-          files: swift/.build/SysControl.dmg
+          files: |
+            artifacts/macos-dmg/SysControl.dmg
+            artifacts/windows-zip/SysControl-windows-x64.zip
           body: |
             ## SysControl v${{ steps.version.outputs.version }}
 
-            ### Installation
+            Pick the installer for your operating system below.
 
-            1. Download `SysControl.dmg` below
-            2. Open the DMG and drag **SysControl.app** to your Applications folder
-            3. **First launch — Gatekeeper bypass** (required since the app is not notarized):
-               - Right-click the app icon → **Open**, then click **Open** in the dialog, **or**
+            ### macOS 14+ (`SysControl.dmg`)
+            1. Download `SysControl.dmg`
+            2. Open it and drag **SysControl.app** to your Applications folder
+            3. First launch — Gatekeeper bypass (the app is not notarized):
+               - Right-click the app icon → **Open**, then click **Open**, **or**
                - Run once in Terminal:
                  ```
                  xattr -r -d com.apple.quarantine /Applications/SysControl.app
                  ```
-               - Then double-click as normal
 
-            ### Install from source (alternative)
-            ```bash
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ks6573/SysControl/master/swift/install.sh)"
-            ```
+            ### Windows 11 (x64) (`SysControl-windows-x64.zip`)
+            1. Download `SysControl-windows-x64.zip`
+            2. Unzip anywhere (e.g. `%LOCALAPPDATA%\Programs\SysControl`)
+            3. Run **SysControl.exe**. On first launch, SmartScreen may warn
+               (the build is unsigned) → **More info → Run anyway**
 
             ### Requirements
-            - macOS 14 (Sonoma) or later
-            - For cloud providers: API key from your provider
-            - For local (Ollama): [Ollama](https://ollama.com) installed and running
+            - For local models: [Ollama](https://ollama.com) installed and running (`ollama pull qwen3:30b`)
+            - For cloud: an Ollama Cloud API key
+            - The cross-platform CLI is also available: `uv tool install syscontrol`

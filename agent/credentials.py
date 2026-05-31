@@ -36,7 +36,11 @@ def _write(data: dict) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")
-    os.chmod(CREDENTIALS_FILE, 0o600)
+    # Best-effort 0600 — meaningful on POSIX; on Windows os.chmod only toggles
+    # the read-only bit, so the key's confidentiality relies on per-user
+    # profile ACLs.  A perms quirk must never fail credential persistence.
+    with contextlib.suppress(OSError):
+        os.chmod(CREDENTIALS_FILE, 0o600)
 
 
 def load_cloud_api_key() -> str | None:

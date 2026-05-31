@@ -1,6 +1,7 @@
 """Tests for agent/credentials.py — load/save/clear round-trip + perms."""
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -25,12 +26,20 @@ def test_save_then_load_round_trip(_isolated_credentials_file: Path) -> None:
     assert credentials.load_cloud_api_key() == "sk-test-123"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file-mode bits; Windows confidentiality relies on per-user ACLs",
+)
 def test_save_writes_file_with_owner_only_perms(_isolated_credentials_file: Path) -> None:
     credentials.save_cloud_api_key("sk-test-perms")
     mode = _isolated_credentials_file.stat().st_mode & 0o777
     assert mode == 0o600, f"expected 0600 perms, got {oct(mode)}"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file-mode bits; Windows confidentiality relies on per-user ACLs",
+)
 def test_save_repairs_existing_permissive_file(_isolated_credentials_file: Path) -> None:
     _isolated_credentials_file.write_text("{}", encoding="utf-8")
     os.chmod(_isolated_credentials_file, 0o644)

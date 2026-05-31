@@ -61,7 +61,6 @@ from agent.core import (
     OLLAMA_CLOUD_BASE_URL,
     OLLAMA_CLOUD_MODEL,
     RESET,
-    SERVER_PATH,
     YELLOW,
     MCPClient,
     MCPClientPool,
@@ -82,7 +81,13 @@ from agent.credentials import (
     load_cloud_api_key,
     save_cloud_api_key,
 )
-from agent.paths import MEMORY_FILE, SKILLS_DIR, USER_DATA_DIR, ensure_user_data_dir
+from agent.paths import (
+    MEMORY_FILE,
+    SERVER_PATH,
+    SKILLS_DIR,
+    USER_DATA_DIR,
+    ensure_user_data_dir,
+)
 from agent.runner import close_subagent_pool, run_subagent
 from agent.skills import get_registry as get_skill_registry
 from agent.skills import scaffold_skill

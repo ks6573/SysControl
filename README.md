@@ -1,6 +1,6 @@
 # SysControl
 
-An AI agent for your Mac that answers questions about your system — and can extend itself with new tools on the fly.
+An AI agent for your Mac or Windows 11 PC that answers questions about your system — and can extend itself with new tools on the fly.
 
 92 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, email, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, Notes, Homebrew, media control, file management, Spotlight search, spreadsheets, Word documents, PDFs, image generation, deep web research, sub-agent orchestration, code editing, git integration, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
 
@@ -8,15 +8,16 @@ Three ways to run it — pick whichever fits your workflow:
 
 | | How | Best for |
 |---|---|---|
-| **App** | [Download the `.app`](#app-recommended) | One-click native macOS experience — no setup required |
-| **CLI** | `syscontrol` ([one-line install](#cli)) | Terminal-first workflow, scripting, SSH sessions |
+| **App (macOS)** | [Download the `.dmg`](#app-macos) | One-click native macOS (SwiftUI) experience — no setup required |
+| **App (Windows)** | [Download the `.zip`](#app-windows) | Native Windows 11 desktop app (Flet) — unzip and run |
+| **CLI** | `syscontrol` ([one-line install](#cli)) | Terminal-first workflow, scripting, SSH sessions (macOS · Windows · Linux) |
 | **Claude Desktop** | MCP server | Using SysControl tools inside Claude Desktop |
 
 All interfaces share the same agent, tools, and providers — they're interchangeable.
 
 ---
 
-## App (Recommended)
+## App (macOS)
 
 A native SwiftUI app with streaming chat, Markdown rendering, chat history sidebar, and auto-save — no Python, no terminal, no dependencies to install. Just download, open, and configure your provider in Settings.
 
@@ -73,6 +74,37 @@ On first launch an onboarding sheet appears automatically:
 To change providers later, open **Settings** (⌘,).
 
 > Chat history is saved as Markdown in `~/.syscontrol/chat_history/` — view, edit, or delete freely.
+
+---
+
+## App (Windows)
+
+A native Windows 11 desktop app (built with [Flet](https://flet.dev)) with streaming chat, Markdown rendering, expandable tool-call cards, inline charts, a session sidebar, and in-app settings. It runs the **same Python agent backend** as the macOS app and CLI, bundled into a standalone `.exe` — no separate Python install to manage.
+
+### Download
+
+1. Download the latest `SysControl-windows-x64.zip` from [GitHub Releases](https://github.com/ks6573/SysControl/releases)
+2. Unzip it anywhere (e.g. `%LOCALAPPDATA%\Programs\SysControl`)
+3. Run **`SysControl.exe`**
+
+> **First launch:** the build is not code-signed, so Windows SmartScreen may warn you. Click **More info → Run anyway**.
+
+> **Requires:** Windows 11 (x64). For local models, install [Ollama for Windows](https://ollama.com/download/windows) and pull a model (`ollama pull qwen3:30b`); for cloud, enter your Ollama Cloud API key during onboarding.
+
+### Build from source
+
+```powershell
+git clone https://github.com/ks6573/SysControl.git
+cd SysControl
+uv sync --extra gui --extra build
+uv run pyinstaller SysControl.spec     # -> dist\SysControl\SysControl.exe
+```
+
+Or run it directly without bundling: `uv run syscontrol-gui`.
+
+### Platform notes
+
+The Windows app exposes the same agent and tools as macOS. System tools — CPU, RAM, GPU, disk, network, processes, battery, files, clipboard, screenshots, volume, Wi-Fi, system logs (Event Log), shell (PowerShell/cmd), web research, charts, spreadsheets/Word/PDF, sub-agents — work natively. macOS-only integrations (iMessage, Apple Mail, Calendar/Contacts, Notes, Time Machine, Homebrew) report that they're unavailable on Windows rather than failing.
 
 ---
 

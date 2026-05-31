@@ -2,9 +2,11 @@
 
 ## What is SysControl?
 
-An AI agent for macOS that answers questions about your system using 104 MCP tools. Three interfaces share the same backend: native SwiftUI app, CLI, and Claude Desktop (MCP server).
+An AI agent for macOS and Windows 11 that answers questions about your system using 104 MCP tools. Four interfaces share the same Python backend: native SwiftUI app (macOS), Flet desktop app (Windows, `flet_app/`), CLI (cross-platform), and Claude Desktop (MCP server).
 
 **Repo:** `ks6573/SysControl` on GitHub.
+
+**Cross-platform:** the Python backend (`agent/`, `mcp/`, `deep_research/`, `flet_app/`) and the CLI run on macOS, Windows, and Linux. `mcp/server.py` branches on `IS_MACOS`/`IS_LINUX`/`IS_WIN` (see the `get_startup_items()` dispatcher pattern); macOS-only tools (AppleScript: iMessage/Mail/Calendar/Contacts/Notes, Homebrew, Time Machine) return a clean "not supported" dict off macOS rather than failing. The SwiftUI app is macOS-only; the Flet app is the Windows GUI (both drive the same backend).
 
 ---
 
@@ -27,6 +29,11 @@ agent/slash.py         ← SlashCommand dataclass + SlashRegistry consumed by cl
 agent/agents.py        ← Sub-agent specs: AgentSpec, AgentRegistry, 5 built-in agents
 agent/runner.py        ← Sub-agent runner: run_subagent() with isolated context + filtered tools
 deep_research/         ← Deep research agent: iterative web research with claim verification
+flet_app/              ← Native Windows desktop GUI (Flet, Python) — Windows counterpart to swift/
+  main.py              ← Entry + frozen-bundle argv sentinel (--run-mcp-server / --selftest)
+  app.py, controller.py← Page assembly + central orchestration; runs the backend in-process
+  backend.py           ← run_streaming_turn() on a worker thread (no subprocess bridge needed)
+  callbacks via controller; views/ (chat, sidebar, settings, onboarding), store/ (~/.syscontrol JSON)
 scripts/make_icon.py   ← Generates .icns app icon from source image
 swift/                 ← Native SwiftUI macOS app (macOS 14+)
   SysControl/
@@ -171,10 +178,28 @@ won't run. `startupFailureMessage()` surfaces dyld/library failures and
 
 ### Building
 ```bash
-cd swift && swift build              # debug
-cd swift && ./build.sh release       # release .app + .dmg
-uv run agent.py                      # CLI
+cd swift && swift build              # debug (macOS GUI)
+cd swift && ./build.sh release       # release .app + .dmg (macOS)
+uv run agent.py                      # CLI (any OS)
+uv run syscontrol-gui                # Windows GUI, dev mode (any OS with a display)
+uv run --extra gui --extra build pyinstaller SysControl.spec   # Windows .exe -> dist/SysControl/
 ```
+
+### Windows packaging (`SysControl.spec`)
+`flet_app/` is bundled by PyInstaller into a one-folder `dist/SysControl/` (zipped
+for release as `SysControl-windows-x64.zip`). The frozen `SysControl.exe` doubles as
+the MCP server: `agent/core.py:MCPClient` spawns `server_spawn_cmd()` which, when
+frozen (`agent/paths.py:IS_FROZEN`), re-execs the exe with `--run-mcp-server`;
+`flet_app/main.py` intercepts that sentinel and runs `mcp.server.main()` before
+importing Flet. `SysControl.spec` collects Flet's Flutter client, matplotlib (Agg
+fonts), certifi (TLS), `mcp/prompt.json`, and `agent/skills_builtin`, and lists
+`mcp.server` as a hidden import. `--selftest` validates deps in CI.
+
+### Adding a new Flet GUI file
+Just create it under `flet_app/` and import it — there's no explicit sources list
+(unlike `swift/Package.swift`). The GUI uses Flet 0.85 APIs (`ft.run`, `ft.Colors`,
+`ft.Padding`/`ft.Border`/`ft.Margin`, `ft.BoxFit`, `page.show_dialog`/`pop_dialog`,
+`page.run_thread` for thread→UI marshaling).
 
 ### Releasing
 1. Update `VERSION` file
