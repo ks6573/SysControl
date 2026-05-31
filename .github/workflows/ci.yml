@@ -85,6 +85,24 @@ jobs:
       - name: Run tests
         run: uv run pytest --tb=short -q
 
+  test-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv sync --extra dev
+
+      - name: Run tests (exercises the macOS tool code paths / module load)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run pytest --tb=short -q
+
   swift-build:
     runs-on: macos-15
     steps:

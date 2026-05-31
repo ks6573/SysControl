@@ -84,6 +84,11 @@ jobs:
 
   release:
     needs: [build-macos, build-windows]
+    # Publish whatever built: a failure on one platform must NOT block the
+    # other's installer from shipping (e.g. a broken Windows PyInstaller build
+    # must never hold back the macOS DMG, and vice versa). Waits for both jobs
+    # to finish, then runs as long as at least one produced an artifact.
+    if: ${{ !cancelled() && (needs.build-macos.result == 'success' || needs.build-windows.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -103,6 +108,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           name: "SysControl v${{ steps.version.outputs.version }}"
+          fail_on_unmatched_files: false   # attach whichever installer(s) built
           files: |
             artifacts/macos-dmg/SysControl.dmg
             artifacts/windows-zip/SysControl-windows-x64.zip
