@@ -7,13 +7,38 @@ The user-data directory is *not* created at import time — call
 that handle creation themselves) when persistence is actually needed.
 """
 
+import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent.parent
+# When frozen by PyInstaller, bundled resources live under ``sys._MEIPASS``
+# (the onedir/extraction root), not next to this source file.  Resolve
+# read-only resource paths against that root when frozen, and against the repo
+# layout for normal source/venv runs.  Writable user data (below) always lives
+# in the user's home directory regardless of how the app was launched.
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+if IS_FROZEN:
+    BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+else:
+    BASE_DIR = Path(__file__).parent.parent
 
 # ── MCP server / prompt ──────────────────────────────────────────────────────
 SERVER_PATH = BASE_DIR / "mcp" / "server.py"
 PROMPT_PATH = BASE_DIR / "mcp" / "prompt.json"
+
+
+def server_spawn_cmd() -> list[str]:
+    """Return the argv to launch the MCP server as a child process.
+
+    Source/venv installs run the server script with the current interpreter.
+    In a PyInstaller bundle ``sys.executable`` is the frozen app (not a Python
+    interpreter), so we re-exec the same executable with a sentinel flag that
+    ``flet_app/main.py`` intercepts to run ``mcp.server.main()`` instead of
+    launching the GUI — letting one bundled binary serve as both the GUI and
+    the spawned MCP server.
+    """
+    if IS_FROZEN:
+        return [sys.executable, "--run-mcp-server"]
+    return [sys.executable, str(SERVER_PATH)]
 
 # ── Writable user data ───────────────────────────────────────────────────────
 USER_DATA_DIR = Path.home() / ".syscontrol"

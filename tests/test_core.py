@@ -306,8 +306,10 @@ class TestPaths:
     """Ensure ``import agent.paths`` does not create directories on disk."""
 
     def test_import_does_not_create_user_data_dir(self, tmp_path, monkeypatch) -> None:
-        # Point HOME at an empty tmpdir, then re-import paths cleanly.
+        # Point the user's home at an empty tmpdir — HOME on POSIX, USERPROFILE
+        # on Windows (where Path.home() ignores HOME) — then re-import paths.
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         import importlib
 
         import agent.paths as paths_mod

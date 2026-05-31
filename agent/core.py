@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 import re
-import select
 import subprocess
 import sys
 import tempfile
@@ -39,7 +38,7 @@ import openai
 from openai import OpenAI, Stream  # noqa: F401 — re-exported for downstream imports
 from openai.types.chat import ChatCompletionChunk
 
-from agent.paths import MEMORY_FILE, PROMPT_PATH, SERVER_PATH  # frozen-app-aware paths
+from agent.paths import MEMORY_FILE, PROMPT_PATH, server_spawn_cmd  # frozen-app-aware paths
 
 # ── Shared constants ─────────────────────────────────────────────────────────
 
@@ -326,7 +325,7 @@ class MCPClient:
             RuntimeError: If the subprocess fails to start or the handshake
                 times out / returns an unexpected response.
         """
-        cmd = [sys.executable, str(SERVER_PATH)]
+        cmd = server_spawn_cmd()
 
         proc_env = dict(extra_env) if extra_env is not None else None
 
@@ -426,22 +425,20 @@ class MCPClient:
                     f"{(' Server error: ' + err) if err else ''}"
                 ) from exc
 
-            # Gate the blocking readline() behind select() when a timeout is
-            # requested, so callers (e.g. _initialize) cannot hang forever.
+            # Read the response line.  When a deadline is requested (the
+            # handshake), bound the otherwise-unbounded readline() with a
+            # background reader thread: select() cannot gate a subprocess pipe
+            # on Windows, so a thread + join(timeout) is the portable
+            # equivalent that behaves identically on every platform.
             if _read_timeout is not None:
-                try:
-                    ready, _, _ = select.select(
-                        [self._stdout], [], [], _read_timeout,
-                    )
-                except (ValueError, OSError):
-                    ready = []
-                if not ready:
+                raw = self._readline_timeout(_read_timeout)
+                if raw is None:
                     raise TimeoutError(
                         f"MCP server did not respond to '{method}' within "
                         f"{_read_timeout:.1f}s — is mcp/server.py healthy?"
                     )
-
-            raw = self._stdout.readline()
+            else:
+                raw = self._stdout.readline()
             if not raw:
                 err = self._last_stderr()
                 raise RuntimeError(
@@ -455,6 +452,32 @@ class MCPClient:
                 raise RuntimeError(
                     f"MCP server sent malformed JSON: {raw[:200]!r}"
                 ) from exc
+
+    def _readline_timeout(self, timeout: float) -> str | None:
+        """Read one line from the server's stdout, bounded by *timeout*.
+
+        A blocking ``readline()`` on a subprocess pipe cannot be interrupted
+        portably — ``select`` only accepts sockets on Windows — so the read
+        runs on a short-lived daemon thread that we wait for with
+        ``join(timeout)``.  Returns the line on success, ``""`` on EOF, or
+        ``None`` if the deadline elapses.  A timed-out reader thread unblocks
+        itself once the pipe closes (the caller tears the subprocess down on
+        ``TimeoutError``), so it never leaks.
+        """
+        box: list[str] = []
+
+        def _read() -> None:
+            with contextlib.suppress(OSError, ValueError):
+                box.append(self._stdout.readline())
+
+        reader = threading.Thread(
+            target=_read, daemon=True, name=f"mcp-init-read-{self.proc.pid}",
+        )
+        reader.start()
+        reader.join(timeout)
+        if reader.is_alive():
+            return None  # timed out
+        return box[0] if box else ""
 
     def _notify(self, method: str) -> None:
         with self._lock:
@@ -488,8 +511,8 @@ class MCPClient:
                 f"{(' Server error: ' + err) if err else ''}"
             )
 
-        # _read_timeout gates the blocking readline() inside _send with
-        # select(), so this call cannot hang beyond the deadline.
+        # _read_timeout bounds the blocking readline() inside _send with a
+        # background reader thread, so this call cannot hang beyond the deadline.
         self._send("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities":    {},

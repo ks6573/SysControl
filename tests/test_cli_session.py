@@ -1,6 +1,7 @@
 """Tests for agent/cli_session.py — JSON round-trip, atomic write, pruning."""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,10 @@ def test_save_uses_existing_path(_isolated_sessions_dir: Path) -> None:
     assert len(payload["messages"]) == 2
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file-mode bits; Windows confidentiality relies on per-user ACLs",
+)
 def test_save_writes_with_owner_only_perms(_isolated_sessions_dir: Path) -> None:
     path = cli_session.save(
         messages=[], model="m", provider_label="p", cli_mode="system",

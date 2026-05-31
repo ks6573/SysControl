@@ -186,12 +186,22 @@ _REMINDER_FILE = _USER_DATA_DIR / "reminders.json"
 _ensure_user_data_dir()
 
 _SERVER_FILE = pathlib.Path(__file__)
-_PROMPT_FILE = pathlib.Path(__file__).parent / "prompt.json"
+_FROZEN = bool(getattr(sys, "frozen", False))
+if _FROZEN:
+    # PyInstaller bundle: read-only resources live under sys._MEIPASS (the
+    # onedir/extraction root), not next to this module's synthetic __file__.
+    _PROMPT_FILE = (
+        pathlib.Path(getattr(sys, "_MEIPASS", pathlib.Path(sys.executable).parent))
+        / "mcp" / "prompt.json"
+    )
+else:
+    _PROMPT_FILE = pathlib.Path(__file__).parent / "prompt.json"
 
-# Detect when this server is running from inside the SysControl.app bundle —
-# the bundle's contents are read-only on next install, so create_tool /
-# self-extension features must refuse to write there.
-_BUNDLED = ".app/Contents/" in str(_SERVER_FILE)
+# Detect when this server runs from inside a read-only app bundle — the macOS
+# .app or a frozen PyInstaller (Windows) bundle.  The bundle's contents are
+# read-only / overwritten on next install, so create_tool / self-extension
+# features must refuse to write there.
+_BUNDLED = _FROZEN or ".app/Contents/" in str(_SERVER_FILE)
 
 _MEMORY_LOCK = threading.Lock()
 # Marker prepended to each user-defined function block in this file.
@@ -2215,15 +2225,31 @@ def network_latency_check() -> dict:
     Async: YES — all pings run in parallel via threading.
     """
     gateway: str | None = None
-    try:
-        nr = subprocess.run(["netstat", "-nr"], capture_output=True, text=True, timeout=5)
-        for line in nr.stdout.splitlines():
-            parts = line.split()
-            if parts and parts[0] in ("default", "0.0.0.0") and len(parts) >= 2:
-                gateway = parts[1]
-                break
-    except (subprocess.TimeoutExpired, OSError):
-        pass  # gateway is optional — fall through to DNS-only ping
+    if IS_WIN:
+        # On Windows, netstat -nr column 1 is the netmask, not the gateway —
+        # query the default route's NextHop directly instead.
+        try:
+            nr = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | "
+                 "Sort-Object RouteMetric | Select-Object -First 1).NextHop"],
+                capture_output=True, text=True, timeout=5,
+            )
+            gw = nr.stdout.strip()
+            if gw:
+                gateway = gw
+        except (subprocess.TimeoutExpired, OSError):
+            pass  # gateway is optional — fall through to DNS-only ping
+    else:
+        try:
+            nr = subprocess.run(["netstat", "-nr"], capture_output=True, text=True, timeout=5)
+            for line in nr.stdout.splitlines():
+                parts = line.split()
+                if parts and parts[0] in ("default", "0.0.0.0") and len(parts) >= 2:
+                    gateway = parts[1]
+                    break
+        except (subprocess.TimeoutExpired, OSError):
+            pass  # gateway is optional — fall through to DNS-only ping
 
     targets: dict[str, str] = {}
     if gateway:
@@ -2492,8 +2518,41 @@ def _tail_linux_log(lines: int, filter_str: str) -> dict:
     return {"error": "No supported log source found (journalctl or /var/log/syslog)."}
 
 
+def _tail_windows_log(lines: int, filter_str: str) -> dict:
+    """Tail the Windows System event log via Get-WinEvent (newest first)."""
+    ps_cmd = (
+        f"Get-WinEvent -LogName System -MaxEvents {lines} -ErrorAction SilentlyContinue "
+        '| ForEach-Object { "$($_.TimeCreated) [$($_.LevelDisplayName)] '
+        '$($_.ProviderName): $($_.Message)" }'
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=20,
+        )
+        all_lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        out = [
+            ln for ln in all_lines
+            if not filter_str or filter_str.lower() in ln.lower()
+        ][:lines]
+        return {
+            "platform": "Windows",
+            "source": "Get-WinEvent (System)",
+            "filter": filter_str or None,
+            "line_count": len(out),
+            "lines": out,
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Log command timed out — try reducing lines or adding a filter."}
+    except (subprocess.CalledProcessError, OSError) as exc:
+        return {"error": f"Failed to read Windows event log: {exc}"}
+
+
 def tail_system_logs(lines: int = 50, filter_str: str = "") -> dict:
-    """Tail recent system logs. macOS: unified log (last 5 min). Linux: journalctl."""
+    """Tail recent system logs. macOS: unified log (last 5 min). Linux: journalctl.
+
+    Windows: System event log via Get-WinEvent (newest first).
+    """
     lines = max(10, min(lines, 500))
 
     # Sanitise filter_str: cap length and strip control characters.
@@ -2502,6 +2561,8 @@ def tail_system_logs(lines: int = 50, filter_str: str = "") -> dict:
 
     if IS_MACOS:
         return _tail_macos_log(lines, filter_str)
+    if IS_WIN:
+        return _tail_windows_log(lines, filter_str)
     if IS_LINUX:
         return _tail_linux_log(lines, filter_str)
     return {"error": f"tail_system_logs is not supported on {_SYSTEM}."}
@@ -3214,18 +3275,23 @@ def get_clipboard() -> dict:
     denied = _permission_check("allow_clipboard", "get_clipboard")
     if denied:
         return denied
-    if not IS_MACOS:
-        return {"error": "get_clipboard is currently macOS only (uses pbpaste)."}
     try:
-        result = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=5)
-        text = result.stdout
-        return {
-            "text": text,
-            "length": len(text),
-            "has_content": bool(text.strip()),
-        }
+        if IS_MACOS:
+            text = subprocess.run(
+                ["pbpaste"], capture_output=True, text=True, timeout=5,
+            ).stdout
+        else:
+            import pyperclip
+            text = pyperclip.paste()
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"clipboard unavailable: {e}"}
+    return {
+        "text": text,
+        "length": len(text),
+        "has_content": bool(text.strip()),
+    }
 
 
 def set_clipboard(text: str) -> dict:
@@ -3236,73 +3302,90 @@ def set_clipboard(text: str) -> dict:
     denied = _permission_check("allow_clipboard", "set_clipboard")
     if denied:
         return denied
-    if not IS_MACOS:
-        return {"error": "set_clipboard is currently macOS only (uses pbcopy)."}
     try:
-        subprocess.run(
-            ["pbcopy"],
-            input=text, text=True, timeout=5, check=True,
-        )
-        return {"status": "ok", "length": len(text)}
+        if IS_MACOS:
+            subprocess.run(
+                ["pbcopy"],
+                input=text, text=True, timeout=5, check=True,
+            )
+        else:
+            import pyperclip
+            pyperclip.copy(text)
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError) as e:
         return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"clipboard unavailable: {e}"}
+    return {"status": "ok", "length": len(text)}
 
 
 # ── Screenshot tool ───────────────────────────────────────────────────────────
+
+def _capture_screen_macos() -> bytes:
+    """Capture the full screen on macOS via ``screencapture``; return PNG bytes."""
+    import tempfile as _tempfile
+    with _tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        proc = subprocess.run(  # -x = silent (no shutter sound)
+            ["screencapture", "-x", tmp_path], capture_output=True, timeout=10,
+        )
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"screencapture failed: {stderr or 'unknown error'}")
+        img_file = pathlib.Path(tmp_path)
+        if not img_file.exists() or img_file.stat().st_size == 0:
+            return b""
+        return img_file.read_bytes()
+    finally:
+        with contextlib.suppress(Exception):
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+
+def _capture_screen_pillow() -> bytes:
+    """Capture the full screen via Pillow's ImageGrab (Windows/Linux); return PNG bytes."""
+    import io
+
+    from PIL import ImageGrab
+    img = ImageGrab.grab()
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
 
 def take_screenshot(path: str = "") -> tuple:
     """
     Capture the entire screen. Always returns a 2-tuple (metadata_dict, base64_png_string).
     On error, returns ({"error": ...}, "").
     Optionally saves the image to `path` if provided.
+
+    macOS uses ``screencapture``; Windows/Linux use Pillow's ``ImageGrab``.
     """
     denied = _permission_check("allow_screenshot", "take_screenshot")
     if denied:
         return denied, ""
-    import tempfile as _tempfile
-
-    if not IS_MACOS:
-        return {"error": "take_screenshot requires macOS (uses screencapture)."}, ""
-
-    with _tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        tmp_path = tmp.name
 
     try:
-        # -x = no sound, -C = capture cursor
-        proc = subprocess.run(
-            ["screencapture", "-x", tmp_path],
-            capture_output=True, timeout=10,
-        )
-        if proc.returncode != 0:
-            stderr = proc.stderr.decode(errors="replace").strip()
-            return {"error": f"screencapture failed: {stderr or 'unknown error'}"}, ""
-
-        img_file = pathlib.Path(tmp_path)
-        if not img_file.exists() or img_file.stat().st_size == 0:
-            return {"error": "screencapture produced no output (screen may not be accessible)."}, ""
-
-        img_bytes = img_file.read_bytes()
-        img_b64 = base64.b64encode(img_bytes).decode()
-
-        saved_to = None
-        if path:
-            dest = pathlib.Path(path).expanduser().resolve()
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(img_bytes)
-            saved_to = str(dest)
-
-        meta = {
-            "size_bytes": len(img_bytes),
-            "saved_to": saved_to,
-        }
-        return meta, img_b64
+        img_bytes = _capture_screen_macos() if IS_MACOS else _capture_screen_pillow()
     except subprocess.TimeoutExpired:
         return {"error": "screencapture timed out."}, ""
     except Exception as e:
         return {"error": str(e)}, ""
-    finally:
-        with contextlib.suppress(Exception):
-            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    if not img_bytes:
+        return {"error": "screen capture produced no output (screen may not be accessible)."}, ""
+
+    img_b64 = base64.b64encode(img_bytes).decode()
+    saved_to = None
+    if path:
+        try:
+            dest = pathlib.Path(path).expanduser().resolve()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(img_bytes)
+            saved_to = str(dest)
+        except OSError as e:
+            return {"error": f"failed to save screenshot to {path}: {e}"}, ""
+
+    return {"size_bytes": len(img_bytes), "saved_to": saved_to}, img_b64
 
 
 # ── Visual artifact tools ─────────────────────────────────────────────────────
@@ -3390,11 +3473,28 @@ def generate_image(
 # ── App control tools ─────────────────────────────────────────────────────────
 
 def open_app(name: str) -> dict:
-    """Open an application by name using macOS `open -a`."""
-    if not IS_MACOS:
-        return {"error": "open_app requires macOS."}
+    """Open an application by name (macOS `open -a`, Windows `start`)."""
     if not name:
         return {"error": "app name is required."}
+    if IS_WIN:
+        try:
+            target = pathlib.Path(name).expanduser()
+            if target.exists():
+                # os.startfile exists only on Windows — getattr avoids a
+                # mypy attr-defined error when type-checked on other platforms.
+                getattr(os, "startfile")(str(target))  # noqa: B009
+            else:
+                # Empty "" arg is the window title — required so `start` does not
+                # treat a quoted name as the title.
+                subprocess.Popen(
+                    ["cmd", "/c", "start", "", name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            return {"status": "ok", "app": name}
+        except Exception as e:
+            return {"error": str(e)}
+    if not IS_MACOS:
+        return {"error": "open_app requires macOS or Windows."}
     try:
         proc = subprocess.run(
             ["open", "-a", name],
@@ -3408,11 +3508,29 @@ def open_app(name: str) -> dict:
 
 
 def quit_app(name: str, force: bool = False) -> dict:
-    """Gracefully quit an application by name using AppleScript."""
-    if not IS_MACOS:
-        return {"error": "quit_app requires macOS."}
+    """Quit an application by name (macOS AppleScript/kill, Windows taskkill)."""
     if not name:
         return {"error": "app name is required."}
+    if IS_WIN:
+        image = name if name.lower().endswith(".exe") else name + ".exe"
+        cmd = ["taskkill", "/IM", image]
+        if force:
+            cmd.append("/F")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if proc.returncode != 0:
+                return {"error": proc.stderr.strip() or proc.stdout.strip()
+                        or f"Could not quit '{name}'."}
+            return {
+                "status": "force-killed" if force else "quit",
+                "app": name,
+            }
+        except subprocess.TimeoutExpired:
+            return {"error": f"taskkill timed out quitting '{name}'."}
+        except Exception as e:
+            return {"error": str(e)}
+    if not IS_MACOS:
+        return {"error": "quit_app requires macOS or Windows."}
     try:
         if force:
             # Force-quit via kill
@@ -3453,10 +3571,44 @@ def quit_app(name: str, force: bool = False) -> dict:
 
 # ── Volume tools ──────────────────────────────────────────────────────────────
 
+def _windows_endpoint_volume() -> object:
+    """Return a pycaw IAudioEndpointVolume interface for the default speakers.
+
+    Raises ImportError if pycaw/comtypes are unavailable, or any other
+    exception if the audio endpoint cannot be activated.
+    """
+    from pycaw.pycaw import AudioUtilities
+    speakers = AudioUtilities.GetSpeakers()
+    # Newer pycaw returns an AudioDevice wrapper that exposes the endpoint
+    # volume interface directly; older pycaw returns a raw IMMDevice that must
+    # be Activate()'d.  Support both so the tool survives pycaw version drift.
+    endpoint = getattr(speakers, "EndpointVolume", None)
+    if endpoint is not None:
+        return endpoint
+    from ctypes import POINTER, cast
+
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import IAudioEndpointVolume
+    interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+    return cast(interface, POINTER(IAudioEndpointVolume))
+
+
 def get_volume() -> dict:
     """Return the current output volume and mute state."""
+    if IS_WIN:
+        try:
+            vol = _windows_endpoint_volume()
+            level = round(vol.GetMasterVolumeLevelScalar() * 100)  # type: ignore[attr-defined]
+            return {
+                "output_volume": level,
+                "output_muted": bool(vol.GetMute()),  # type: ignore[attr-defined]
+            }
+        except ImportError:
+            return {"error": "pycaw not available"}
+        except Exception as e:
+            return {"error": str(e)}
     if not IS_MACOS:
-        return {"error": "get_volume requires macOS."}
+        return {"error": "get_volume requires macOS or Windows."}
     try:
         proc = subprocess.run(
             ["osascript", "-e", "get volume settings"],
@@ -3486,9 +3638,18 @@ def get_volume() -> dict:
 
 def set_volume(level: int) -> dict:
     """Set the system output volume (0–100)."""
-    if not IS_MACOS:
-        return {"error": "set_volume requires macOS."}
     level = max(0, min(100, int(level)))
+    if IS_WIN:
+        try:
+            vol = _windows_endpoint_volume()
+            vol.SetMasterVolumeLevelScalar(level / 100, None)  # type: ignore[attr-defined]
+            return {"status": "ok", "output_volume": level}
+        except ImportError:
+            return {"error": "pycaw not available"}
+        except Exception as e:
+            return {"error": str(e)}
+    if not IS_MACOS:
+        return {"error": "set_volume requires macOS or Windows."}
     try:
         proc = subprocess.run(
             ["osascript", "-e", f"set volume output volume {level}"],
@@ -3734,14 +3895,52 @@ def _scan_wifi_system_profiler() -> dict:
     return {"source": "system_profiler", "networks": networks, "count": len(networks)}
 
 
+def _scan_wifi_netsh() -> dict:
+    """Scan visible Wi-Fi networks on Windows via ``netsh wlan show networks``."""
+    proc = subprocess.run(
+        ["netsh", "wlan", "show", "networks", "mode=bssid"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if proc.returncode != 0:
+        return {"error": proc.stderr.strip() or proc.stdout.strip() or "netsh failed."}
+
+    networks: list[dict] = []
+    current: dict | None = None
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if not line or ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip()
+        val = val.strip()
+        if key.startswith("SSID") and not key.startswith("BSSID"):
+            current = {"ssid": val, "security": "", "encryption": "", "signal": ""}
+            networks.append(current)
+        elif current is not None:
+            if key == "Authentication":
+                current["security"] = val
+            elif key == "Encryption":
+                current["encryption"] = val
+            elif key == "Signal":
+                current["signal"] = val
+    return {"source": "netsh", "networks": networks, "count": len(networks)}
+
+
 def get_wifi_networks() -> dict:
     """
     Return information about nearby / available Wi-Fi networks.
-    Uses the `airport` CLI when available (macOS ≤13), otherwise falls back to
-    `system_profiler SPAirPortDataType` which works on macOS 14+.
+    macOS uses the `airport` CLI when available (≤13), otherwise falls back to
+    `system_profiler SPAirPortDataType` (macOS 14+). Windows uses `netsh`.
     """
+    if IS_WIN:
+        try:
+            return _scan_wifi_netsh()
+        except subprocess.TimeoutExpired:
+            return {"error": "Wi-Fi scan timed out (15s). Enable Wi-Fi and try again."}
+        except OSError as e:
+            return {"error": str(e)}
     if not IS_MACOS:
-        return {"error": "get_wifi_networks requires macOS."}
+        return {"error": "get_wifi_networks requires macOS or Windows."}
 
     # ── Try airport (macOS ≤13) ──────────────────────────────────────────────
     airport = pathlib.Path(_AIRPORT_PATH)
@@ -4659,11 +4858,11 @@ def copy_file(src: str, dst: str, overwrite: bool = False) -> dict:
 
 
 def delete_file(path: str, permanent: bool = False) -> dict:
-    """Delete a file or directory, defaulting to Trash on macOS.
+    """Delete a file or directory, defaulting to Trash / Recycle Bin.
 
-    On macOS, ``permanent=False`` (default) moves the item to the Trash via
-    Finder so it can be recovered.  Pass ``permanent=True`` to permanently
-    remove it.  On non-macOS systems the item is always permanently removed.
+    With ``permanent=False`` (default) the item is moved to the Trash so it can
+    be recovered — via Finder on macOS, via ``send2trash`` (Recycle Bin) on
+    Windows and Linux.  Pass ``permanent=True`` to permanently remove it.
 
     Safety: refuses to delete anything outside the user's home directory.
 
@@ -4693,17 +4892,26 @@ def delete_file(path: str, permanent: bool = False) -> dict:
             ),
         }
     try:
-        if IS_MACOS and not permanent:
-            safe_path = _escape_applescript(str(target))
-            script = f'tell application "Finder" to delete POSIX file "{safe_path}"'
-            proc = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=10,
-            )
-            if proc.returncode != 0:
-                return {"error": proc.stderr.strip() or "Finder could not move item to Trash."}
-            return {"status": "ok", "path": str(target), "method": "trash"}
-        # Permanent deletion (or non-macOS).
+        if not permanent:
+            if IS_MACOS:
+                safe_path = _escape_applescript(str(target))
+                script = f'tell application "Finder" to delete POSIX file "{safe_path}"'
+                proc = subprocess.run(
+                    ["osascript", "-e", script],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if proc.returncode != 0:
+                    return {"error": proc.stderr.strip()
+                            or "Finder could not move item to Trash."}
+                return {"status": "ok", "path": str(target), "method": "trash"}
+            # Windows / Linux: move to Recycle Bin / Trash via send2trash.
+            try:
+                from send2trash import send2trash
+                send2trash(str(target))
+                return {"status": "ok", "path": str(target), "method": "trash"}
+            except ImportError:
+                return {"error": "send2trash not available; pass permanent=True to delete."}
+        # Permanent deletion.
         if target.is_dir():
             shutil.rmtree(str(target))
         else:
@@ -4757,6 +4965,42 @@ _SPOTLIGHT_KIND_MAP: dict[str, str] = {
 }
 
 
+_GLOB_WALK_CAP = 1000  # bound the recursive walk on non-Spotlight platforms
+
+
+def _search_files_glob(query: str, scope_path: str, kind: str, limit: int) -> dict:
+    """Fallback file search via bounded recursive ``pathlib`` glob (non-macOS).
+
+    Matches the file name case-insensitively against *query*. Walks at most
+    ``_GLOB_WALK_CAP`` entries to avoid runaway traversal of huge trees.
+    """
+    needle = query.lower()
+    results: list[dict] = []
+    scanned = 0
+    try:
+        for entry in pathlib.Path(scope_path).rglob("*"):
+            scanned += 1
+            if scanned > _GLOB_WALK_CAP:
+                break
+            try:
+                if needle in entry.name.lower():
+                    results.append({"path": str(entry), "name": entry.name})
+                    if len(results) >= limit:
+                        break
+            except OSError:
+                continue
+    except OSError as e:
+        if not results:
+            return {"error": str(e)}
+    return {
+        "query":   query,
+        "scope":   scope_path,
+        "kind":    kind or "any",
+        "count":   len(results),
+        "results": results,
+    }
+
+
 def search_files(
     query: str,
     scope: str = "~",
@@ -4776,9 +5020,10 @@ def search_files(
     Returns:
         ``{"query", "scope", "kind", "count", "results"}`` — each result has
         ``path`` and ``name``.
+
+    On non-macOS platforms, falls back to a bounded recursive ``pathlib`` glob
+    matching file names case-insensitively (the ``kind`` filter is ignored).
     """
-    if not IS_MACOS:
-        return {"error": "search_files uses Spotlight (mdfind) which requires macOS."}
     if not query:
         return {"error": "query is required."}
     try:
@@ -4786,6 +5031,8 @@ def search_files(
     except (TypeError, ValueError):
         limit = 50
     scope_path = str(pathlib.Path(scope).expanduser().resolve())
+    if not IS_MACOS:
+        return _search_files_glob(query, scope_path, kind.lower().strip(), limit)
     # Build the mdfind query string.
     kind = kind.lower().strip()
     if kind and kind in _SPOTLIGHT_KIND_MAP:
@@ -4962,7 +5209,12 @@ def _load_config() -> dict:
         if now - _CONFIG_CACHE_TIME < _CONFIG_TTL:
             return _CONFIG_CACHE
         try:
-            _CONFIG_CACHE = json.loads(_SYSCONTROL_CONFIG_FILE.read_text())
+            # utf-8-sig transparently strips a UTF-8 BOM if present — Windows
+            # editors (Notepad, PowerShell) routinely add one, and a BOM would
+            # otherwise break json.loads and silently disable every permission.
+            _CONFIG_CACHE = json.loads(
+                _SYSCONTROL_CONFIG_FILE.read_text(encoding="utf-8-sig")
+            )
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             _CONFIG_CACHE = {}
         _CONFIG_CACHE_TIME = now
@@ -4997,9 +5249,10 @@ def run_shell_command(command: str, timeout: int = 30) -> dict:
     if not command:
         return {"error": "command is required."}
     timeout = max(1, min(timeout, 120))
+    shell_cmd = ["cmd", "/c", command] if IS_WIN else ["bash", "-c", command]
     try:
         proc = subprocess.run(
-            ["bash", "-c", command],
+            shell_cmd,
             capture_output=True, text=True,
             timeout=timeout,
         )
@@ -5408,8 +5661,27 @@ def get_frontmost_app() -> dict:
     denied = _permission_check("allow_accessibility", "get_frontmost_app")
     if denied:
         return denied
+    if IS_WIN:
+        try:
+            import ctypes
+            # ctypes.windll exists only on Windows — getattr avoids a mypy
+            # attr-defined error when type-checked on other platforms.
+            user32 = getattr(ctypes, "windll").user32  # noqa: B009
+            hwnd = user32.GetForegroundWindow()
+            length = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            app_name = ""
+            with contextlib.suppress(Exception):
+                app_name = psutil.Process(pid.value).name()
+            return {"app": app_name, "title": title, "bundle_id": None}
+        except Exception as e:
+            return {"error": str(e)}
     if not IS_MACOS:
-        return {"error": "get_frontmost_app requires macOS."}
+        return {"error": "get_frontmost_app requires macOS or Windows."}
     script = 'tell application "System Events" to get name of first process whose frontmost is true'
     try:
         proc = subprocess.run(
@@ -5850,14 +6122,90 @@ def summarize_directory(path: str = ".", depth: int = 3, top_n: int = 20) -> dic
     }
 
 
-def battery_health_report() -> dict:
-    """Return macOS battery cycle count, condition, and design vs current capacity.
+_BATTERY_XML_NS = "{http://schemas.microsoft.com/battery/2012}"
 
-    Parses ``system_profiler SPPowerDataType`` and complements
-    ``get_battery_status`` (which reports the live charge level).
+
+def _battery_add_psutil_status(report: dict[str, object]) -> None:
+    """Merge live percent/plugged state from ``psutil.sensors_battery`` into *report*."""
+    with contextlib.suppress(Exception):
+        batt = psutil.sensors_battery()
+        if batt is not None:
+            report["percent"] = round(batt.percent, 1)
+            report["plugged_in"] = bool(batt.power_plugged)
+
+
+def _battery_health_windows() -> dict:
+    """Return Windows battery health via ``powercfg /batteryreport`` XML parsing.
+
+    Computes a health percentage from design vs full-charge capacity and falls
+    back to ``psutil.sensors_battery`` for live percent/plugged state.
     """
+    import tempfile as _tempfile
+    import xml.etree.ElementTree as ET
+
+    with _tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tmp:
+        xml_path = tmp.name
+    try:
+        try:
+            subprocess.run(
+                ["powercfg", "/batteryreport", "/xml", "/output", xml_path],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return {"error": "powercfg timed out."}
+        except FileNotFoundError:
+            return {"error": "powercfg not found."}
+
+        report: dict[str, object] = {"platform": "Windows"}
+        parsed = False
+        try:
+            # powercfg output contains no DTD/entities; reject any to avoid
+            # XXE / entity-expansion if the file were ever tampered with.
+            xml_text = pathlib.Path(xml_path).read_text(errors="replace")
+            if "<!DOCTYPE" in xml_text or "<!ENTITY" in xml_text:
+                return {"error": "Unexpected DOCTYPE/ENTITY in battery report XML."}
+            root = ET.fromstring(xml_text)
+            battery = root.find(f".//{_BATTERY_XML_NS}Battery")
+            if battery is not None:
+                parsed = True
+                design_el = battery.find(f"{_BATTERY_XML_NS}DesignCapacity")
+                full_el = battery.find(f"{_BATTERY_XML_NS}FullChargeCapacity")
+                cycle_el = battery.find(f"{_BATTERY_XML_NS}CycleCount")
+                design = int(design_el.text) if design_el is not None and design_el.text else 0
+                full = int(full_el.text) if full_el is not None and full_el.text else 0
+                if design > 0:
+                    report["design_capacity_mwh"] = design
+                if full > 0:
+                    report["full_charge_capacity_mwh"] = full
+                if design > 0 and full > 0:
+                    report["health_pct"] = round(full / design * 100, 1)
+                if cycle_el is not None and cycle_el.text:
+                    with contextlib.suppress(ValueError):
+                        report["cycle_count"] = int(cycle_el.text)
+        except (ET.ParseError, OSError, ValueError):
+            parsed = False
+
+        _battery_add_psutil_status(report)
+
+        if not parsed and "percent" not in report:
+            return {"error": "No battery detected or powercfg report could not be parsed."}
+        return report
+    finally:
+        with contextlib.suppress(Exception):
+            pathlib.Path(xml_path).unlink(missing_ok=True)
+
+
+def battery_health_report() -> dict:
+    """Return battery cycle count, condition, and design vs current capacity.
+
+    macOS parses ``system_profiler SPPowerDataType``; Windows parses a
+    ``powercfg /batteryreport`` XML. Complements ``get_battery_status`` (which
+    reports the live charge level).
+    """
+    if IS_WIN:
+        return _battery_health_windows()
     if not IS_MACOS:
-        return {"error": "battery_health_report requires macOS."}
+        return {"error": "battery_health_report requires macOS or Windows."}
     try:
         proc = subprocess.run(
             ["system_profiler", "SPPowerDataType"],

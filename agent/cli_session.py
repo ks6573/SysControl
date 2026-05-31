@@ -56,7 +56,11 @@ def _atomic_write(path: Path, payload: dict) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, sort_keys=False)
             f.write("\n")
-        os.chmod(tmp_path, 0o600)
+        # Best-effort 0600 — meaningful on POSIX; on Windows os.chmod only
+        # toggles the read-only bit, so confidentiality relies on per-user
+        # profile ACLs.  A perms quirk must never fail the session write.
+        with contextlib.suppress(OSError):
+            os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, path)
     except (OSError, json.JSONDecodeError):
         with contextlib.suppress(OSError):
