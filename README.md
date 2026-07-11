@@ -2,7 +2,7 @@
 
 An AI agent for your Mac or Windows 11 PC that answers questions about your system — and can extend itself with new tools on the fly.
 
-92 real-time tools covering CPU, RAM, GPU, disk, network, processes, iMessage, email, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, Notes, Homebrew, media control, file management, Spotlight search, spreadsheets, Word documents, PDFs, image generation, deep web research, sub-agent orchestration, code editing, git integration, and more. The agent picks the right tools automatically, runs them in parallel, and answers in plain English.
+116 built-in tools covering CPU, RAM, GPU, disk, network, processes, iMessage, email, clipboard, browser, weather, reminders, Docker, Time Machine, Wi-Fi, calendar, contacts, Notes, Homebrew, media control, file management, Spotlight search, spreadsheets, Word documents, PDFs, image generation, deep web research, sub-agent orchestration, code editing, git integration, and more. Each platform receives only the tools it can execute; the agent picks the right ones automatically, runs them in parallel, and answers in plain English.
 
 Three ways to run it — pick whichever fits your workflow:
 
@@ -136,7 +136,7 @@ uv run agent.py
 
 ### Requirements
 
-- macOS or Linux
+- macOS, Windows 11, or Linux
 - Python **3.11+** (uv will fetch one if your system Python is older)
 - [Ollama](https://ollama.com) for local mode, **or** an Ollama Cloud API key for cloud mode
 
@@ -147,6 +147,7 @@ syscontrol                                          # interactive
 syscontrol --provider local --model qwen3:30b      # local, skip prompt
 syscontrol --provider cloud --api-key sk-...       # cloud, skip prompt (key is remembered)
 syscontrol --provider cloud --no-save-key          # cloud, prompt every time
+syscontrol --provider custom --base-url https://example.com/v1 --model my-model --api-key sk-...
 syscontrol --continue                              # resume the most recent session
 syscontrol --resume                                # pick a previous session from a list
 syscontrol --coding --approval normal              # coding agent, ask before edits/shell
@@ -243,6 +244,10 @@ syscontrol --provider cloud
 
 Get a key at [ollama.com/settings/keys](https://ollama.com/settings/keys). Default cloud model: `gpt-oss:120b`.
 
+Any service that implements the OpenAI-compatible chat-completions and tool-calling APIs can be
+used with `--provider custom`, `--base-url`, `--model`, and `--api-key`. Custom-provider keys are
+used for the current session and are not written to the Ollama credential entry.
+
 ### Ending a Session
 
 Say any natural goodbye (`bye`, `exit`, `quit`, `done`, `farewell`, `cya`, `goodnight`, …) or press **Ctrl-C**. The agent will offer to save your session before exiting.
@@ -277,7 +282,9 @@ Sensitive tools are **disabled by default**. Enable them in `~/.syscontrol/confi
   "allow_email":           true,
   "allow_notes":           true,
   "allow_brew":            true,
-  "allow_agents":          true
+  "allow_agents":          true,
+  "allow_automations":     true,
+  "allow_connectors":      true
 }
 ```
 
@@ -336,7 +343,7 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 
 ---
 
-## Tools (92 total)
+## Tools (116 total)
 
 ### Monitoring
 
@@ -412,15 +419,15 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 |---|---|
 | `get_clipboard` | Return current clipboard text |
 | `set_clipboard` | Write text to the clipboard |
-| `take_screenshot` | Full-screen PNG returned inline. Optionally save to file. macOS only. |
+| `take_screenshot` | Full-screen PNG returned inline. Optionally save to file. macOS and Windows. |
 | `generate_image` | Generate an inline visual image artifact from a prompt. Requires an OpenAI image API key. |
 
 ### App Control & System
 
 | Tool | What it does |
 |---|---|
-| `open_app` | Open an app by name (`open -a`). macOS only. |
-| `quit_app` | Gracefully quit (AppleScript) or force-kill an app. macOS only. |
+| `open_app` | Open an app by name on macOS or Windows. |
+| `quit_app` | Gracefully quit or force-kill an app on macOS or Windows. |
 | `get_volume` | Output, input, and alert volume; mute state |
 | `set_volume` | Set system output volume (0–100) |
 | `get_now_playing` | Currently playing track in Music.app or Spotify (title, artist, album, position). macOS only. |
@@ -464,11 +471,11 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 
 | Tool | What it does |
 |---|---|
-| `set_reminder` | Schedule a macOS notification. Accepts `"in 2 hours"`, `"tomorrow at 9am"`, etc. |
+| `set_reminder` | Schedule a native desktop notification. Accepts `"in 2 hours"`, `"tomorrow at 9am"`, etc. |
 | `list_reminders` | All pending reminders with IDs and fire times |
 | `cancel_reminder` | Cancel a reminder by ID |
 | `get_weather` | Current weather + clothing recommendations. Auto-detects location from IP. |
-| `check_app_updates` | Homebrew, Mac App Store, and system software updates. macOS only. |
+| `check_app_updates` | Available app/package and operating-system updates on macOS, Windows, or Linux |
 | `brew_list` | List all installed Homebrew formulae and casks. Requires `allow_brew`. |
 | `brew_install` | Install a Homebrew formula or cask. Requires `allow_brew`. |
 | `brew_upgrade` | Upgrade one or all Homebrew packages. Requires `allow_brew`. |
@@ -514,6 +521,53 @@ The agent writes a Python function, validates syntax, scans for dangerous patter
 |---|---|
 | `create_tool` | Write, validate, and install a new MCP tool into `server.py`. Requires `allow_tool_creation`. |
 | `list_user_tools` | List all tools installed via `create_tool` |
+
+### Skills & Housekeeping
+
+| Tool | What it does |
+|---|---|
+| `list_skills` | List built-in and user-installed workflow skills |
+| `run_skill` | Load a skill playbook for the agent to execute |
+| `tail_file` | Read the tail of a large text file with optional filtering |
+| `cleanup_downloads` | Preview or remove old files from Downloads |
+| `cleanup_caches` | Inspect or clean supported application cache directories |
+| `summarize_directory` | Summarize a directory tree and its largest contents |
+| `battery_health_report` | Report battery capacity, cycle count, and condition |
+| `process_tree` | Show a process and its parent/child relationships |
+| `notify_user` | Display an immediate system notification on macOS, Windows, or Linux |
+| `do_not_disturb_status` | Report the current Focus / Do Not Disturb state |
+| `focus_mode_set` | Activate or deactivate a named Focus mode |
+| `open_file_at_path` | Open a local file in its default or selected application |
+
+### Scheduled Automations
+
+| Tool | What it does |
+|---|---|
+| `create_automation` | Schedule a recurring read-only tool call at a bounded interval |
+| `list_automations` | List configured automations and their next run times |
+| `update_automation` | Enable or pause an automation |
+| `delete_automation` | Delete an automation |
+| `run_automation_now` | Run a configured automation immediately |
+| `list_automation_runs` | Inspect recent results and failures |
+| `get_health_trends` | Summarize CPU, RAM, disk, and alert history from scheduled checks |
+| `get_audit_log` | Review local tool actions without storing argument or result values |
+
+Automations are local, disabled by default, and limited to read-only tools. Enable them with
+`allow_automations`; mutating or destructive tools cannot be scheduled.
+
+### External MCP Connectors
+
+| Tool | What it does |
+|---|---|
+| `list_connectors` | List configured external MCP servers and connection state |
+| `add_connector` | Add a stdio MCP server without invoking a shell |
+| `remove_connector` | Remove a configured connector and stop its process |
+| `refresh_connectors` | Restart connectors and rediscover their tools |
+
+External connector tools are namespaced as `<connector>__<tool>`, so a GitHub connector named
+`github` might expose `github__list_issues`. Connector processes receive a minimal environment;
+secret values are passed only through explicitly named environment variables and are never written
+to `connectors.json`. Connector execution is disabled until `allow_connectors` is enabled.
 
 ---
 

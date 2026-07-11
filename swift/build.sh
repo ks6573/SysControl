@@ -18,6 +18,12 @@ VERSION=$(cat "$PROJECT_ROOT/VERSION" 2>/dev/null || echo "1.0.0")
 VERSION="${VERSION//[$'\t\r\n ']}"
 
 MODE="${1:-debug}"
+SIGN_IDENTITY="${SYSCONTROL_CODESIGN_IDENTITY:--}"
+if [ "$SIGN_IDENTITY" = "-" ]; then
+    CODESIGN_ARGS=(--force --sign "$SIGN_IDENTITY")
+else
+    CODESIGN_ARGS=(--force --timestamp --options runtime --sign "$SIGN_IDENTITY")
+fi
 
 echo "══════════════════════════════════════════"
 echo " SysControl Build Script"
@@ -198,9 +204,9 @@ PYCFG
     echo "  Signing bundled Mach-O objects..."
     SIGN_COUNT=0
     while IFS= read -r -d '' obj; do
-        codesign --force --sign - "$obj" 2>/dev/null && SIGN_COUNT=$((SIGN_COUNT + 1))
+        codesign "${CODESIGN_ARGS[@]}" "$obj" 2>/dev/null && SIGN_COUNT=$((SIGN_COUNT + 1))
     done < <(find "$VENV_DIR" \( -name '*.so' -o -name '*.dylib' \) -print0)
-    codesign --force --sign - "$VENV_DIR/bin/python3" 2>/dev/null && SIGN_COUNT=$((SIGN_COUNT + 1))
+    codesign "${CODESIGN_ARGS[@]}" "$VENV_DIR/bin/python3" 2>/dev/null && SIGN_COUNT=$((SIGN_COUNT + 1))
     echo "  ✓ Signed $SIGN_COUNT objects"
 
     # 7. Guard against regressions: no bundled Mach-O may reference an absolute
@@ -233,9 +239,10 @@ PYCFG
     fi
 fi
 
-# Ad-hoc code sign the entire app bundle
+# Sign the entire app bundle. Defaults to ad-hoc; release automation can set
+# SYSCONTROL_CODESIGN_IDENTITY to a Developer ID Application identity.
 echo "  Code signing app bundle..."
-if codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1; then
+if codesign --deep "${CODESIGN_ARGS[@]}" "$APP_DIR" >/dev/null 2>&1; then
     echo "  ✓ App bundle signed"
 else
     echo "  ✗ Code signing failed"
@@ -287,6 +294,17 @@ if [ "$MODE" = "release" ]; then
         -srcfolder "$DMG_DIR" \
         -ov -format UDZO \
         "$DMG_PATH" 2>/dev/null
+
+    # Optional notarization hook. CI or a release workstation can prepare a
+    # notarytool keychain profile and pass its name without changing this script.
+    if [ -n "${SYSCONTROL_NOTARY_PROFILE:-}" ]; then
+        echo "► Submitting DMG for notarization..."
+        xcrun notarytool submit "$DMG_PATH" \
+            --keychain-profile "$SYSCONTROL_NOTARY_PROFILE" --wait
+        xcrun stapler staple "$DMG_PATH"
+        xcrun stapler validate "$DMG_PATH"
+        echo "  ✓ DMG notarized and stapled"
+    fi
 
     rm -rf "$DMG_DIR"
     echo "✓ DMG: $DMG_PATH"

@@ -14,6 +14,7 @@ def _isolated_credentials_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     target = tmp_path / "cli_credentials.json"
     monkeypatch.setattr(credentials, "CREDENTIALS_FILE", target)
     monkeypatch.setattr(credentials, "ensure_user_data_dir", lambda: tmp_path.mkdir(exist_ok=True))
+    monkeypatch.setattr(credentials, "_keyring", None)
     return target
 
 
@@ -78,3 +79,42 @@ def test_clear_preserves_other_keys(_isolated_credentials_file: Path) -> None:
     assert credentials.clear_cloud_api_key() is True
     assert _isolated_credentials_file.exists()
     assert "other" in _isolated_credentials_file.read_text()
+
+
+class _FakeKeyring:
+    def __init__(self) -> None:
+        self.value: str | None = None
+
+    def get_password(self, _service: str, _account: str) -> str | None:
+        return self.value
+
+    def set_password(self, _service: str, _account: str, value: str) -> None:
+        self.value = value
+
+    def delete_password(self, _service: str, _account: str) -> None:
+        self.value = None
+
+
+def test_native_keyring_avoids_plaintext_file(
+    _isolated_credentials_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeKeyring()
+    monkeypatch.setattr(credentials, "_keyring", fake)
+
+    credentials.save_cloud_api_key("sk-native")
+
+    assert credentials.load_cloud_api_key() == "sk-native"
+    assert not _isolated_credentials_file.exists()
+
+
+def test_legacy_file_is_migrated_to_native_keyring(
+    _isolated_credentials_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credentials.save_cloud_api_key("sk-legacy")
+    assert _isolated_credentials_file.exists()
+    fake = _FakeKeyring()
+    monkeypatch.setattr(credentials, "_keyring", fake)
+
+    assert credentials.load_cloud_api_key() == "sk-legacy"
+    assert fake.value == "sk-legacy"
+    assert not _isolated_credentials_file.exists()

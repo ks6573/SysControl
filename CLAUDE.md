@@ -2,7 +2,7 @@
 
 ## What is SysControl?
 
-An AI agent for macOS and Windows 11 that answers questions about your system using 104 MCP tools. Four interfaces share the same Python backend: native SwiftUI app (macOS), Flet desktop app (Windows, `flet_app/`), CLI (cross-platform), and Claude Desktop (MCP server).
+An AI agent for macOS and Windows 11 that answers questions about your system using 116 MCP tools. Four interfaces share the same Python backend: native SwiftUI app (macOS), Flet desktop app (Windows, `flet_app/`), CLI (cross-platform), and Claude Desktop (MCP server).
 
 **Repo:** `ks6573/SysControl` on GitHub.
 
@@ -14,7 +14,9 @@ An AI agent for macOS and Windows 11 that answers questions about your system us
 
 ```
 agent.py               ← CLI entry shim → agent.cli:main()
-mcp/server.py          ← MCP server (~8200 lines, all 104 tools, JSON-RPC over stdio)
+mcp/server.py          ← MCP server (~9200 lines, all 116 built-in tools, JSON-RPC over stdio)
+mcp/connectors.py      ← External stdio MCP manager; minimal env + namespaced tool routing
+mcp/tool_capabilities.py ← Platform, permission, category, and risk metadata for every tool
 mcp/prompt.json        ← System prompt injected into all LLM requests
 agent/core.py          ← Shared: MCPClient, MCPClientPool, run_streaming_turn(), TurnCallbacks
 agent/bridge.py        ← JSON-over-stdio bridge for the Swift frontend
@@ -23,7 +25,9 @@ agent/cli_keys.py      ← KeyBindings (Enter/Ctrl-D submit semantics) + SIGINT 
 agent/cli_completers.py← _SlashCompleter merge target + AtFileCompleter; submit-time @file expansion
 agent/cli_session.py   ← Atomic JSON session store at ~/.syscontrol/cli_sessions/
 agent/cli_compact.py   ← Synchronous /compact summarization with undo snapshot
-agent/credentials.py   ← Persisted Ollama Cloud API key cache (0600, ~/.syscontrol/cli_credentials.json)
+agent/credentials.py   ← Native Keychain/Credential Manager storage with protected-file fallback
+agent/automations.py   ← Persistent bounded scheduler + run history for read-only tool automations
+agent/audit.py         ← Privacy-preserving JSONL audit log (argument names, never values)
 agent/updater.py       ← `syscontrol --update` / `/update` self-update via uv tool install
 agent/slash.py         ← SlashCommand dataclass + SlashRegistry consumed by cli.py
 agent/agents.py        ← Sub-agent specs: AgentSpec, AgentRegistry, 5 built-in agents

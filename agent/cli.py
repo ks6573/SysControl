@@ -7,7 +7,7 @@ then runs a streaming agentic loop so you can ask natural-language questions
 about your system and the model will call the right tools autonomously.
 
 Usage:
-    uv run agent.py [--provider {cloud,local}] [--model MODEL] [--api-key KEY]
+    uv run agent.py [--provider {cloud,local,custom}] [--model MODEL] [--api-key KEY]
     python agent.py
 
 When selecting the cloud provider you will be prompted to enter your
@@ -872,8 +872,12 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--provider", choices=["cloud", "local"],
+        "--provider", choices=["cloud", "local", "custom"],
         help="Skip the interactive provider prompt and use this provider directly.",
+    )
+    parser.add_argument(
+        "--base-url",
+        help="OpenAI-compatible API base URL. Required with --provider custom.",
     )
     parser.add_argument(
         "--model",
@@ -881,7 +885,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--api-key",
-        help="Ollama API key for the cloud provider (skips the getpass prompt).",
+        help="API key for the cloud or custom provider (skips the getpass prompt).",
     )
     parser.add_argument(
         "--mode",
@@ -984,6 +988,34 @@ def _local_selection(args: argparse.Namespace) -> ProviderSelection:
     return ProviderSelection(LOCAL_API_KEY, LOCAL_BASE_URL, model, "⚙  Local (Ollama)")
 
 
+def _prompt_custom_value(label: str, secret: bool = False) -> str:
+    """Prompt for one custom-provider field and return a stripped value."""
+    try:
+        value = getpass.getpass(f"{BOLD}{label}:{RESET} ") if secret else input(f"{BOLD}{label}:{RESET} ")
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n{DIM}Goodbye!{RESET}")
+        raise SystemExit(0) from None
+    return value.strip()
+
+
+def _custom_selection(args: argparse.Namespace) -> ProviderSelection:
+    """Build a selection for any OpenAI-compatible chat-completions endpoint."""
+    base_url = str(args.base_url or _prompt_custom_value("Base URL")).rstrip("/")
+    model = str(args.model or _prompt_custom_value("Model"))
+    api_key = (
+        str(args.api_key)
+        if args.api_key is not None
+        else _prompt_custom_value("API key (blank if unused)", secret=True)
+    )
+    if not base_url.startswith(("http://", "https://")):
+        print(f"{YELLOW}⚠  Custom base URL must start with http:// or https://.{RESET}")
+        raise SystemExit(1)
+    if not model:
+        print(f"{YELLOW}⚠  Custom provider model cannot be empty.{RESET}")
+        raise SystemExit(1)
+    return ProviderSelection(api_key or "not-required", base_url, model, "◆  Custom compatible")
+
+
 def select_provider(args: argparse.Namespace) -> ProviderSelection:
     """Resolve the LLM provider from CLI flags or interactive prompts.
 
@@ -997,10 +1029,13 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
         return _cloud_selection(args, _resolve_cloud_api_key(args))
     if args.provider == "local":
         return _local_selection(args)
+    if args.provider == "custom":
+        return _custom_selection(args)
 
     prompt = (
         f"\n{BOLD}Select AI model "
-        f"(type {CYAN}cloud{RESET}{BOLD} or {CYAN}local{RESET}{BOLD}):{RESET} "
+        f"(type {CYAN}cloud{RESET}{BOLD}, {CYAN}local{RESET}{BOLD}, or "
+        f"{CYAN}custom{RESET}{BOLD}):{RESET} "
     )
     print(prompt, end="", flush=True)
     while True:
@@ -1014,7 +1049,9 @@ def select_provider(args: argparse.Namespace) -> ProviderSelection:
             return _cloud_selection(args, _resolve_cloud_api_key(args))
         if choice == "local":
             return _local_selection(args)
-        print(f"{YELLOW}Please type 'cloud' or 'local':{RESET} ", end="", flush=True)
+        if choice == "custom":
+            return _custom_selection(args)
+        print(f"{YELLOW}Please type 'cloud', 'local', or 'custom':{RESET} ", end="", flush=True)
 
 
 # ── Main REPL ─────────────────────────────────────────────────────────────────
@@ -1549,6 +1586,7 @@ _PERMISSION_FLAGS: tuple[str, ...] = (
     "allow_file_read", "allow_file_write", "allow_calendar", "allow_contacts",
     "allow_accessibility", "allow_tool_creation", "allow_deep_research",
     "allow_email", "allow_notes", "allow_brew", "allow_agents", "allow_clipboard",
+    "allow_automations", "allow_connectors",
 )
 
 

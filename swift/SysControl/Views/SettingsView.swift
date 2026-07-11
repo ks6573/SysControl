@@ -19,6 +19,8 @@ struct SettingsView: View {
     @State private var isRefreshingModels = false
     @State private var allowDeepResearch: Bool = false
     @State private var allowClipboard: Bool = false
+    @State private var allowAutomations: Bool = false
+    @State private var allowConnectors: Bool = false
     @State private var connectionTestResult: ConnectionTestResult?
     @State private var isTestingConnection = false
     @State private var lastTestedEndpoint: String = ""
@@ -40,7 +42,7 @@ struct SettingsView: View {
             Section("Provider") {
                 Picker("Provider", selection: $provider) {
                     Text("Local (Ollama)").tag(ProviderKind.local)
-                    Text("Ollama Cloud").tag(ProviderKind.cloud)
+                    Text("Cloud / Compatible").tag(ProviderKind.cloud)
                 }
                 .pickerStyle(.segmented)
             }
@@ -140,6 +142,30 @@ struct SettingsView: View {
                 }
                 .onChange(of: allowClipboard) { _, newValue in
                     permissionStore.set("allow_clipboard", newValue)
+                }
+
+                Toggle(isOn: $allowAutomations) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Scheduled Automations")
+                        Text("Allow recurring read-only system checks and keep a local run history.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: allowAutomations) { _, newValue in
+                    permissionStore.set("allow_automations", newValue)
+                }
+
+                Toggle(isOn: $allowConnectors) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("External MCP Connectors")
+                        Text("Allow explicitly configured MCP servers to add namespaced tools.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: allowConnectors) { _, newValue in
+                    permissionStore.set("allow_connectors", newValue)
                 }
             }
 
@@ -306,6 +332,8 @@ struct SettingsView: View {
         let permissions = permissionStore.load()
         allowDeepResearch = permissions["allow_deep_research"] ?? false
         allowClipboard = permissions["allow_clipboard"] ?? false
+        allowAutomations = permissions["allow_automations"] ?? false
+        allowConnectors = permissions["allow_connectors"] ?? false
     }
 
     private func apply() {

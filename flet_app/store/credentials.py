@@ -1,9 +1,7 @@
-"""Cloud API-key storage for the GUI.
+"""Cloud API-key storage shared by the GUI and CLI.
 
-Thin re-export of :mod:`agent.credentials` so the GUI and CLI share one cloud
-key cache (``~/.syscontrol/cli_credentials.json``).  Kept as a separate module
-so a future Windows Credential Manager (``keyring``) backend can slot in here
-without touching call sites.
+The underlying implementation uses macOS Keychain or Windows Credential
+Manager when available and falls back to a protected local file on Linux.
 """
 
 from __future__ import annotations

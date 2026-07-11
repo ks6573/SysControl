@@ -22,6 +22,9 @@ jobs:
           fi
           echo "Versions in sync: $VFILE"
 
+      - name: Derived tool metadata is synchronized
+        run: python3 scripts/sync_project_metadata.py
+
   lint-and-type-check:
     runs-on: ubuntu-latest
     steps:
@@ -40,11 +43,10 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           uv run ruff check .
 
-      - name: Mypy type check (informational)
-        continue-on-error: true
+      - name: Mypy type check
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          uv run mypy agent/ mcp/
+          uv run mypy agent/ mcp/ deep_research/ flet_app/
 
   test:
     runs-on: ubuntu-latest
@@ -63,6 +65,16 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           uv run pytest --tb=short -q
+
+      - name: Critical foundation coverage
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run pytest \
+            tests/test_automations.py tests/test_audit_and_health.py \
+            tests/test_connectors.py tests/test_credentials.py tests/test_tool_capabilities.py \
+            --cov=agent.automations --cov=agent.audit --cov=agent.credentials \
+            --cov=mcp.connectors --cov=mcp.tool_capabilities \
+            --cov-report=term --cov-fail-under=80 -q
 
   test-windows:
     runs-on: windows-latest

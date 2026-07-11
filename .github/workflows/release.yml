@@ -136,4 +136,5 @@ jobs:
             ### Requirements
             - For local models: [Ollama](https://ollama.com) installed and running (`ollama pull qwen3:30b`)
             - For cloud: an Ollama Cloud API key
-            - The cross-platform CLI is also available: `uv tool install syscontrol`
+            - The cross-platform CLI is also available directly from GitHub:
+              `uv tool install git+https://github.com/ks6573/SysControl.git`

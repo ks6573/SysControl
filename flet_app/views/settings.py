@@ -32,6 +32,8 @@ _FLAG_LABELS = {
     "allow_brew": "Homebrew (macOS)",
     "allow_agents": "Sub-agents",
     "allow_clipboard": "Clipboard",
+    "allow_automations": "Scheduled automations",
+    "allow_connectors": "External MCP connectors",
 }
 
 
@@ -47,7 +49,7 @@ def build_settings_dialog(controller: AppController) -> ft.AlertDialog:
         selected={"cloud" if is_cloud else "local"},
         segments=[
             ft.Segment(value="local", label=ft.Text("Local (Ollama)")),
-            ft.Segment(value="cloud", label=ft.Text("Cloud")),
+            ft.Segment(value="cloud", label=ft.Text("Cloud / Compatible")),
         ],
     )
     base_url = ft.TextField(

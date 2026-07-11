@@ -35,6 +35,13 @@ for _pkg in ("flet", "flet_desktop"):
     binaries += _b
     hiddenimports += _h
 
+# Keyring backends are discovered dynamically through package metadata; collect
+# them explicitly so the frozen Windows app can use Credential Manager.
+_d, _b, _h = collect_all("keyring")
+datas += _d
+binaries += _b
+hiddenimports += _h
+
 # Runtime data for heavy deps.
 datas += collect_data_files("matplotlib")   # Agg fonts / mpl-data
 datas += collect_data_files("certifi")       # TLS CA bundle (HTTPS to providers)

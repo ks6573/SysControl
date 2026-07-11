@@ -43,6 +43,10 @@ def server_spawn_cmd() -> list[str]:
 # ── Writable user data ───────────────────────────────────────────────────────
 USER_DATA_DIR = Path.home() / ".syscontrol"
 MEMORY_FILE = USER_DATA_DIR / "SysControl_Memory.md"
+AUTOMATIONS_FILE = USER_DATA_DIR / "automations.json"
+AUTOMATION_RUNS_FILE = USER_DATA_DIR / "automation_runs.json"
+CONNECTORS_FILE = USER_DATA_DIR / "connectors.json"
+AUDIT_LOG_FILE = USER_DATA_DIR / "audit.jsonl"
 
 # Skill / user-command / user-agent definition directories.  Each holds a
 # collection of ``*.md`` files with YAML-style frontmatter.  See

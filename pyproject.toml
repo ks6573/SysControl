@@ -1,6 +1,6 @@
 [project]
 name = "syscontrol"
-version = "1.15.3"
+version = "1.16.0"
 description = "All-In-One AI agent with MCP tool server; Ultron but slightly weaker and nicer 😉"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -31,6 +31,9 @@ dependencies = [
     "python-docx>=1.2,<2",
     "pypdf>=6.12,<7",
     "prompt-toolkit>=3.0.52",
+    # Native macOS Keychain / Windows Credential Manager with a file fallback
+    # for headless Linux environments that do not provide a keyring backend.
+    "keyring>=25.7,<26",
     # Cross-platform tool backends (clipboard, recycle-bin delete).
     "pyperclip>=1.9",
     "send2trash>=1.8",

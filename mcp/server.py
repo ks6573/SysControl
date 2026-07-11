@@ -14,6 +14,7 @@ import ipaddress
 import json
 import os
 import pathlib
+from importlib import metadata as importlib_metadata
 
 try:
     import fcntl as _fcntl
@@ -96,6 +97,10 @@ IS_WIN   = _SYSTEM == "Windows"
 DEFAULT_API_KEY = "ollama"
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_LOCAL_MODEL = "qwen3:30b"
+try:
+    SERVER_VERSION = importlib_metadata.version("syscontrol")
+except importlib_metadata.PackageNotFoundError:
+    SERVER_VERSION = "0+unknown"
 
 # ── Shared thread pool for parallel metric collection ─────────────────────────
 # Reused across calls — avoids per-call thread creation/teardown overhead.
@@ -176,9 +181,13 @@ def _get_nvml_handles() -> list:
 # Single source of truth for ~/.syscontrol/* lives in agent.paths so import-time
 # side-effects are localised and the tests/test_paths contract holds globally.
 
+from agent import audit as _audit  # noqa: E402
+from agent import automations as _automations  # noqa: E402
 from agent.paths import MEMORY_FILE as _MEMORY_FILE  # noqa: E402
 from agent.paths import USER_DATA_DIR as _USER_DATA_DIR  # noqa: E402
 from agent.paths import ensure_user_data_dir as _ensure_user_data_dir  # noqa: E402
+from mcp import connectors as _connectors  # noqa: E402
+from mcp.tool_capabilities import capability_for  # noqa: E402
 
 _REMINDER_LOCK = threading.Lock()
 _REMINDER_FILE = _USER_DATA_DIR / "reminders.json"
@@ -242,7 +251,7 @@ def _save_reminders(reminders: list) -> None:
 
 
 class ReminderChecker:
-    """Background daemon thread that fires due reminders via macOS notifications."""
+    """Background daemon thread that fires due native desktop notifications."""
 
     def __init__(self) -> None:
         self._stop = threading.Event()
@@ -301,21 +310,14 @@ class ReminderChecker:
 
     @staticmethod
     def _fire(message: str) -> None:
-        script = (
-            f'display notification {json.dumps(message)} '
-            f'with title "SysControl Reminder" sound name "default"'
-        )
         log_path = _USER_DATA_DIR / "reminder_log.txt"
         try:
-            proc = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=5,
-            )
-            if proc.returncode != 0:
+            result = _deliver_notification("SysControl Reminder", message, sound=True)
+            if "error" in result:
                 _ensure_user_data_dir()
                 with log_path.open("a") as f:
                     ts = datetime.datetime.now().isoformat(timespec="seconds")
-                    f.write(f"[{ts}] osascript failed (rc={proc.returncode}): {proc.stderr.strip()}\n")
+                    f.write(f"[{ts}] notification failed: {result['error']}\n")
         except Exception as exc:
             try:
                 _ensure_user_data_dir()
@@ -1778,10 +1780,96 @@ def _check_softwareupdate(results: dict, lock: threading.Lock) -> None:
             results["errors"].append(f"softwareupdate error: {exc}")
 
 
+def _check_windows_updates() -> dict:
+    """Return available winget packages and Windows Update entries."""
+    results: dict[str, Any] = {
+        "platform": "windows", "packages": [], "system_updates": [], "errors": [],
+    }
+    winget = shutil.which("winget")
+    if winget:
+        try:
+            proc = subprocess.run(
+                [winget, "upgrade", "--accept-source-agreements", "--disable-interactivity"],
+                capture_output=True, text=True, timeout=90,
+            )
+            for line in proc.stdout.splitlines():
+                columns = re.split(r"\s{2,}", line.strip())
+                if len(columns) >= 4 and columns[0] not in {"Name", "-"}:
+                    results["packages"].append({
+                        "name": columns[0], "id": columns[1],
+                        "installed": columns[2], "available": columns[3],
+                    })
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            results["errors"].append(f"winget: {exc}")
+    else:
+        results["errors"].append("winget is not installed")
+
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell:
+        script = (
+            "$s=New-Object -ComObject Microsoft.Update.Session;"
+            "$r=$s.CreateUpdateSearcher().Search(\"IsInstalled=0 and Type='Software'\");"
+            "@($r.Updates | ForEach-Object {[pscustomobject]@{Title=$_.Title;KB=@($_.KBArticleIDs)}})"
+            "| ConvertTo-Json -Compress"
+        )
+        try:
+            proc = subprocess.run(
+                [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=90,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                parsed = json.loads(proc.stdout)
+                results["system_updates"] = parsed if isinstance(parsed, list) else [parsed]
+            elif proc.returncode != 0:
+                results["errors"].append(proc.stderr.strip() or "Windows Update query failed")
+        except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired) as exc:
+            results["errors"].append(f"Windows Update: {exc}")
+    return results
+
+
+def _check_linux_updates() -> dict:
+    """Return available updates from the detected Linux package manager."""
+    results: dict[str, Any] = {"platform": "linux", "manager": None, "packages": [], "errors": []}
+    commands = (
+        ("apt", ["apt", "list", "--upgradable"]),
+        ("dnf", ["dnf", "check-update", "--quiet"]),
+        ("checkupdates", ["checkupdates"]),
+    )
+    for manager, command in commands:
+        if not shutil.which(command[0]):
+            continue
+        results["manager"] = manager
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=90)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            results["errors"].append(str(exc))
+            return results
+        for line in proc.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.lower().startswith(("listing", "last metadata")):
+                continue
+            results["packages"].append(stripped[:500])
+        return results
+    results["errors"].append("no supported package manager found (apt, dnf, or checkupdates)")
+    return results
+
+
 def check_app_updates() -> dict:
-    """Check for outdated Homebrew, Mac App Store, and macOS system updates."""
+    """Check for available application and operating-system updates."""
+    if IS_WIN:
+        platform_results = _check_windows_updates()
+        total = len(platform_results["packages"]) + len(platform_results["system_updates"])
+        platform_results["summary"] = f"{total} update{'s' if total != 1 else ''} available."
+        return platform_results
+    if IS_LINUX:
+        platform_results = _check_linux_updates()
+        total = len(platform_results["packages"])
+        platform_results["summary"] = (
+            f"{total} package update{'s' if total != 1 else ''} available."
+        )
+        return platform_results
     if not IS_MACOS:
-        return {"error": "check_app_updates is currently macOS-only."}
+        return {"error": f"update checks are not supported on {_SYSTEM}."}
 
     results: dict = {
         "brew_formulae":  [],
@@ -6308,17 +6396,41 @@ _NOTIFY_TITLE_MAX = 128
 _NOTIFY_BODY_MAX = 256
 
 
-def notify_user(title: str, body: str = "", sound: bool = False) -> dict:
-    """Show a macOS banner notification immediately (not a scheduled reminder).
-
-    Distinct from ``set_reminder`` which writes to ``reminders.json``.
-    """
-    if not IS_MACOS:
-        return {"error": "notify_user currently supports macOS only."}
+def _deliver_notification(title: str, body: str = "", sound: bool = False) -> dict:
+    """Deliver a native notification on macOS, Windows, or Linux."""
     if not title:
         return {"error": "title is required."}
-    safe_title = _escape_applescript(title[:_NOTIFY_TITLE_MAX])
-    safe_body = _escape_applescript(body[:_NOTIFY_BODY_MAX])
+    title = title[:_NOTIFY_TITLE_MAX]
+    body = body[:_NOTIFY_BODY_MAX]
+    if IS_WIN:
+        try:
+            from winotify import Notification, audio
+
+            toast = Notification(app_id="SysControl", title=title, msg=body)
+            if sound:
+                toast.set_audio(audio.Default, loop=False)
+            toast.show()
+        except (ImportError, OSError) as exc:
+            return {"error": f"Windows notification failed: {exc}"}
+        return {"status": "delivered", "platform": "windows"}
+    if IS_LINUX:
+        binary = shutil.which("notify-send")
+        if binary is None:
+            return {"error": "notify-send is not installed or no desktop session is available."}
+        try:
+            proc = subprocess.run(
+                [binary, "--app-name=SysControl", title, body],
+                capture_output=True, text=True, timeout=8,
+            )
+        except subprocess.TimeoutExpired:
+            return {"error": "notify-send timed out."}
+        if proc.returncode != 0:
+            return {"error": proc.stderr.strip() or "notify-send failed"}
+        return {"status": "delivered", "platform": "linux"}
+    if not IS_MACOS:
+        return {"error": f"notifications are not supported on {_SYSTEM}."}
+    safe_title = _escape_applescript(title)
+    safe_body = _escape_applescript(body)
     sound_clause = ' sound name "Glass"' if sound else ""
     script = (
         f'display notification "{safe_body}" with title "{safe_title}"{sound_clause}'
@@ -6332,7 +6444,20 @@ def notify_user(title: str, body: str = "", sound: bool = False) -> dict:
         return {"error": "osascript timed out."}
     if proc.returncode != 0:
         return {"error": proc.stderr.strip() or "osascript failed"}
-    return {"status": "delivered", "title": title, "body": body, "sound": bool(sound)}
+    return {"status": "delivered", "platform": "macos"}
+
+
+def notify_user(title: str, body: str = "", sound: bool = False) -> dict:
+    """Show a native banner notification immediately."""
+    result = _deliver_notification(title, body, sound)
+    if "error" in result:
+        return result
+    return {
+        **result,
+        "title": title[:_NOTIFY_TITLE_MAX],
+        "body": body[:_NOTIFY_BODY_MAX],
+        "sound": bool(sound),
+    }
 
 
 def do_not_disturb_status() -> dict:
@@ -6411,7 +6536,7 @@ def focus_mode_set(mode_name: str = "") -> dict:
 
 
 def open_file_at_path(path: str, with_app: str = "") -> dict:
-    """Open *path* in the default app (or *with_app* via ``open -a``)."""
+    """Open *path* in the default or selected desktop application."""
     denied = _permission_check("allow_file_read", "open_file_at_path")
     if denied:
         return denied
@@ -6420,10 +6545,24 @@ def open_file_at_path(path: str, with_app: str = "") -> dict:
     p = pathlib.Path(os.path.expanduser(path))
     if not p.exists():
         return {"error": f"path not found: {path}"}
-    cmd = ["open"]
-    if with_app:
-        cmd += ["-a", with_app]
-    cmd.append(str(p))
+    if IS_WIN and not with_app:
+        try:
+            startfile = getattr(os, "startfile")  # noqa: B009
+            startfile(str(p))
+        except (AttributeError, OSError) as exc:
+            return {"error": f"could not open file: {exc}"}
+        return {"status": "opened", "path": str(p), "with_app": None}
+    if IS_MACOS:
+        cmd = ["open"]
+        if with_app:
+            cmd += ["-a", with_app]
+        cmd.append(str(p))
+    elif IS_LINUX:
+        cmd = [with_app, str(p)] if with_app else ["xdg-open", str(p)]
+    elif IS_WIN:
+        cmd = [with_app, str(p)]
+    else:
+        return {"error": f"opening files is not supported on {_SYSTEM}."}
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
     except subprocess.TimeoutExpired:
@@ -6431,6 +6570,261 @@ def open_file_at_path(path: str, with_app: str = "") -> dict:
     if proc.returncode != 0:
         return {"error": proc.stderr.strip() or proc.stdout.strip()}
     return {"status": "opened", "path": str(p), "with_app": with_app or None}
+
+
+# ── Scheduled automations ─────────────────────────────────────────────────────
+
+_AUTOMATION_SCHEDULER: _automations.AutomationScheduler | None = None
+_AUTOMATION_START_LOCK = threading.Lock()
+_AUTOMATION_STARTED = False
+
+
+def _automation_execute(tool_name: str, arguments: dict[str, Any]) -> Any:
+    """Execute a scheduler-approved tool through the local dispatch registry."""
+    if tool_name not in TOOLS:
+        return {"error": f"automation tool is no longer installed: {tool_name}"}
+    capability = capability_for(tool_name)
+    if capability["risk"] != "read" or capability["category"] in {"automation", "extensions"}:
+        return {"error": f"automation policy no longer allows tool: {tool_name}"}
+    if not capability["available"]:
+        return {"error": f"tool {tool_name} is not available on {_SYSTEM}"}
+    result = TOOLS[tool_name]["fn"](arguments)
+    # Scheduled history should retain structured measurements, not multi-MB
+    # inline chart payloads.
+    structured = result[0] if isinstance(result, tuple) else result
+    _audit.record_tool_call(
+        tool_name, arguments, structured,
+        risk=capability["risk"], source="automation",
+    )
+    return structured
+
+
+def _automation_failure(automation: _automations.Automation, message: str) -> None:
+    """Surface failed scheduled runs without interrupting the scheduler."""
+    notify_user(
+        "SysControl automation failed",
+        f"{automation['name']}: {message}"[:_NOTIFY_BODY_MAX],
+    )
+
+
+def _automation_scheduler() -> _automations.AutomationScheduler:
+    global _AUTOMATION_SCHEDULER
+    with _AUTOMATION_START_LOCK:
+        if _AUTOMATION_SCHEDULER is None:
+            _AUTOMATION_SCHEDULER = _automations.AutomationScheduler(
+                _automation_execute, _automation_failure,
+            )
+        return _AUTOMATION_SCHEDULER
+
+
+def _start_automation_scheduler_once() -> None:
+    """Start the scheduler once for the MCP server process."""
+    global _AUTOMATION_SCHEDULER, _AUTOMATION_STARTED
+    with _AUTOMATION_START_LOCK:
+        if _AUTOMATION_STARTED:
+            return
+        if _AUTOMATION_SCHEDULER is None:
+            scheduler = _automations.AutomationScheduler(
+                _automation_execute, _automation_failure,
+            )
+        else:
+            scheduler = _AUTOMATION_SCHEDULER
+        scheduler.start()
+        _AUTOMATION_SCHEDULER = scheduler
+        _AUTOMATION_STARTED = True
+
+
+def create_scheduled_automation(
+    name: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    interval_minutes: int,
+) -> dict:
+    """Create a recurring read-only tool automation after policy validation."""
+    denied = _permission_check("allow_automations", "create_automation")
+    if denied:
+        return denied
+    if tool_name not in TOOLS:
+        return {"error": f"unknown tool: {tool_name}"}
+    capability = capability_for(tool_name)
+    if capability["risk"] != "read":
+        return {"error": "scheduled automations currently support read-only tools only."}
+    if capability["category"] in {"automation", "extensions"}:
+        return {"error": "automation and extension tools cannot schedule themselves."}
+    if not capability["available"]:
+        return {"error": f"{tool_name} is not available on {_SYSTEM}."}
+    try:
+        automation = _automations.create_automation(
+            name, tool_name, arguments, interval_minutes,
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {"status": "created", "automation": automation}
+
+
+def list_scheduled_automations() -> dict:
+    """List persisted scheduled automations."""
+    values = _automations.list_automations()
+    return {"count": len(values), "automations": values}
+
+
+def update_scheduled_automation(automation_id: str, enabled: bool) -> dict:
+    """Enable or pause a scheduled automation."""
+    denied = _permission_check("allow_automations", "update_automation")
+    if denied:
+        return denied
+    updated = _automations.set_automation_enabled(automation_id, enabled)
+    if updated is None:
+        return {"error": f"automation not found: {automation_id}"}
+    return {"status": "updated", "automation": updated}
+
+
+def delete_scheduled_automation(automation_id: str) -> dict:
+    """Delete a scheduled automation."""
+    denied = _permission_check("allow_automations", "delete_automation")
+    if denied:
+        return denied
+    if not _automations.delete_automation(automation_id):
+        return {"error": f"automation not found: {automation_id}"}
+    return {"status": "deleted", "automation_id": automation_id}
+
+
+def run_scheduled_automation_now(automation_id: str) -> dict:
+    """Execute one configured automation immediately and record the run."""
+    denied = _permission_check("allow_automations", "run_automation_now")
+    if denied:
+        return denied
+    automation = next(
+        (item for item in _automations.list_automations() if item["id"] == automation_id),
+        None,
+    )
+    if automation is None:
+        return {"error": f"automation not found: {automation_id}"}
+    run = _automation_scheduler().run(automation)
+    return {"status": run["status"], "run": run}
+
+
+def list_automation_runs(limit: int = 50) -> dict:
+    """Return recent scheduled-automation results."""
+    runs = _automations.list_runs(limit)
+    return {"count": len(runs), "runs": runs}
+
+
+def get_health_trends(limit: int = 200) -> dict:
+    """Summarize health metrics captured by scheduled full snapshots."""
+    runs = _automations.list_runs(limit)
+    samples: list[dict[str, Any]] = []
+    for run in reversed(runs):
+        if run["tool"] not in {"get_full_snapshot", "get_system_alerts"}:
+            continue
+        result = run.get("result")
+        if not isinstance(result, dict):
+            continue
+        sample: dict[str, Any] = {"timestamp": run["finished_at"], "tool": run["tool"]}
+        if run["tool"] == "get_full_snapshot":
+            cpu = result.get("cpu", {})
+            ram = result.get("ram", {}).get("ram", {})
+            disks = result.get("disk", {}).get("partitions", [])
+            sample["cpu_percent"] = cpu.get("total_percent")
+            sample["ram_percent"] = ram.get("percent_used")
+            sample["max_disk_percent"] = max(
+                (float(item.get("percent_used", 0)) for item in disks), default=0.0,
+            )
+        else:
+            sample["alert_count"] = result.get("alert_count", 0)
+            sample["has_critical"] = result.get("has_critical", False)
+        samples.append(sample)
+
+    def summary(key: str) -> dict[str, float] | None:
+        values = [float(item[key]) for item in samples if isinstance(item.get(key), (int, float))]
+        if not values:
+            return None
+        return {
+            "latest": round(values[-1], 2),
+            "average": round(sum(values) / len(values), 2),
+            "minimum": round(min(values), 2),
+            "maximum": round(max(values), 2),
+        }
+
+    return {
+        "sample_count": len(samples),
+        "summary": {
+            "cpu_percent": summary("cpu_percent"),
+            "ram_percent": summary("ram_percent"),
+            "max_disk_percent": summary("max_disk_percent"),
+            "alert_count": summary("alert_count"),
+        },
+        "samples": samples,
+        "hint": (
+            "Schedule get_full_snapshot or get_system_alerts with create_automation "
+            "to build a local trend history."
+        ) if not samples else None,
+    }
+
+
+def get_audit_log(limit: int = 100, tool: str = "") -> dict:
+    """Return privacy-preserving local tool execution events."""
+    events = _audit.list_events(limit, tool)
+    return {"count": len(events), "events": events}
+
+
+# ── External MCP connectors ───────────────────────────────────────────────────
+
+_CONNECTOR_MANAGER = _connectors.ConnectorManager()
+
+
+def list_external_connectors() -> dict:
+    """Return configured external MCP connectors and their connection state."""
+    values = _CONNECTOR_MANAGER.status()
+    return {"count": len(values), "connectors": values}
+
+
+def add_external_connector(
+    name: str,
+    command: str,
+    args: list[str],
+    inherit_env: list[str],
+    enabled: bool = True,
+) -> dict:
+    """Validate and persist an external stdio MCP connector."""
+    denied = _permission_check("allow_connectors", "add_connector")
+    if denied:
+        return denied
+    try:
+        config = _connectors.validate_config(
+            name, command, args, inherit_env, enabled=enabled,
+        )
+        _connectors.add_config(config)
+    except (OSError, ValueError) as exc:
+        return {"error": str(exc)}
+    _CONNECTOR_MANAGER.refresh()
+    return {
+        "status": "configured",
+        "connector": config,
+        "tool_namespace": f"{config['name']}__",
+        "note": "Environment values are inherited by name and are never written to connectors.json.",
+    }
+
+
+def remove_external_connector(name: str) -> dict:
+    """Remove an external connector and stop all connector processes."""
+    denied = _permission_check("allow_connectors", "remove_connector")
+    if denied:
+        return denied
+    if not _connectors.remove_config(name):
+        return {"error": f"connector not found: {name}"}
+    _CONNECTOR_MANAGER.refresh()
+    return {"status": "removed", "connector": name}
+
+
+def refresh_external_connectors() -> dict:
+    """Restart connector discovery and report the resulting tool names."""
+    denied = _permission_check("allow_connectors", "refresh_connectors")
+    if denied:
+        return denied
+    _CONNECTOR_MANAGER.refresh()
+    tools = _CONNECTOR_MANAGER.tool_catalog()
+    return {"status": "refreshed", "tool_count": len(tools), "tools": [t["name"] for t in tools]}
 
 
 # ── Tool self-extension ────────────────────────────────────────────────────────
@@ -8727,7 +9121,7 @@ TOOLS: dict[str, ToolEntry] = {
     },
     "notify_user": {
         "description": (
-            "Show a macOS banner notification immediately. Distinct from set_reminder, "
+            "Show a native desktop notification immediately. Distinct from set_reminder, "
             "which schedules a reminder. Use for skill completion alerts and the like."
         ),
         "parallel": True,
@@ -8769,7 +9163,8 @@ TOOLS: dict[str, ToolEntry] = {
     },
     "open_file_at_path": {
         "description": (
-            "Open a file in the default macOS app, or in a specific app via 'open -a'. "
+            "Open a file in the default application on macOS, Windows, or Linux, "
+            "or in a specific desktop application. "
             "Requires allow_file_read."
         ),
         "parallel": True,
@@ -8786,6 +9181,172 @@ TOOLS: dict[str, ToolEntry] = {
             args.get("with_app", ""),
         ),
     },
+    # ── Scheduled automations ─────────────────────────────────────────────────
+    "create_automation": {
+        "description": (
+            "Create a recurring local automation that runs a read-only SysControl tool. "
+            "Requires allow_automations. Mutating, destructive, extension, and automation tools "
+            "cannot be scheduled."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Human-readable automation name."},
+                "tool": {"type": "string", "description": "Read-only SysControl tool name."},
+                "arguments": {"type": "object", "default": {}},
+                "interval_minutes": {
+                    "type": "integer", "minimum": 1, "maximum": 10080,
+                    "description": "Recurring interval from 1 minute to 7 days.",
+                },
+            },
+            "required": ["name", "tool", "interval_minutes"],
+        },
+        "fn": lambda args: create_scheduled_automation(
+            args.get("name", ""), args.get("tool", ""),
+            args.get("arguments", {}), args.get("interval_minutes", 60),
+        ),
+    },
+    "list_automations": {
+        "description": "List all persisted scheduled automations and their next run times.",
+        "parallel": True,
+        "inputSchema": _NO_ARGS_SCHEMA,
+        "fn": lambda _: list_scheduled_automations(),
+    },
+    "update_automation": {
+        "description": "Enable or pause a scheduled automation. Requires allow_automations.",
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "enabled": {"type": "boolean"},
+            },
+            "required": ["id", "enabled"],
+        },
+        "fn": lambda args: update_scheduled_automation(
+            args.get("id", ""), bool(args.get("enabled", False)),
+        ),
+    },
+    "delete_automation": {
+        "description": "Delete a scheduled automation. Requires allow_automations.",
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+        "fn": lambda args: delete_scheduled_automation(args.get("id", "")),
+    },
+    "run_automation_now": {
+        "description": (
+            "Run a configured automation immediately and record the result. "
+            "Requires allow_automations."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+        "fn": lambda args: run_scheduled_automation_now(args.get("id", "")),
+    },
+    "list_automation_runs": {
+        "description": "Return recent scheduled automation results for audit and diagnosis.",
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
+            },
+            "required": [],
+        },
+        "fn": lambda args: list_automation_runs(args.get("limit", 50)),
+    },
+    "get_health_trends": {
+        "description": (
+            "Summarize CPU, RAM, disk, and alert trends captured by scheduled "
+            "get_full_snapshot or get_system_alerts automations."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 200, "minimum": 1, "maximum": 200},
+            },
+            "required": [],
+        },
+        "fn": lambda args: get_health_trends(args.get("limit", 200)),
+    },
+    "get_audit_log": {
+        "description": (
+            "Return the local privacy-preserving tool audit log. Argument names, risk, status, "
+            "and errors are recorded; argument and result values are not persisted."
+        ),
+        "parallel": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 100, "minimum": 1, "maximum": 500},
+                "tool": {"type": "string", "default": ""},
+            },
+            "required": [],
+        },
+        "fn": lambda args: get_audit_log(args.get("limit", 100), args.get("tool", "")),
+    },
+    # ── External MCP connectors ───────────────────────────────────────────────
+    "list_connectors": {
+        "description": "List configured external MCP connectors and their latest connection state.",
+        "parallel": True,
+        "inputSchema": _NO_ARGS_SCHEMA,
+        "fn": lambda _: list_external_connectors(),
+    },
+    "add_connector": {
+        "description": (
+            "Configure an external stdio MCP server. Requires allow_connectors. "
+            "The process is launched without a shell, receives a minimal environment, and its tools "
+            "are namespaced as <connector>__<tool>."
+        ),
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "command": {"type": "string", "description": "Executable path or name; no shell syntax."},
+                "args": {"type": "array", "items": {"type": "string"}, "default": []},
+                "inherit_env": {
+                    "type": "array", "items": {"type": "string"}, "default": [],
+                    "description": "Environment variable names to pass through without persisting values.",
+                },
+                "enabled": {"type": "boolean", "default": True},
+            },
+            "required": ["name", "command"],
+        },
+        "fn": lambda args: add_external_connector(
+            args.get("name", ""), args.get("command", ""),
+            args.get("args", []), args.get("inherit_env", []),
+            bool(args.get("enabled", True)),
+        ),
+    },
+    "remove_connector": {
+        "description": "Remove an external MCP connector. Requires allow_connectors.",
+        "parallel": False,
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+        "fn": lambda args: remove_external_connector(args.get("name", "")),
+    },
+    "refresh_connectors": {
+        "description": (
+            "Restart external MCP connector processes and rediscover their namespaced tools. "
+            "Requires allow_connectors."
+        ),
+        "parallel": False,
+        "inputSchema": _NO_ARGS_SCHEMA,
+        "fn": lambda _: refresh_external_connectors(),
+    },
     # ── User-Defined Tools (registry) ──────────────────────────────────────────
     # (entries inserted here by create_tool — do not remove this comment)
 }
@@ -8793,14 +9354,49 @@ TOOLS: dict[str, ToolEntry] = {
 
 # ── MCP request dispatcher ────────────────────────────────────────────────────
 
+def _tool_descriptor(name: str, meta: ToolEntry) -> dict[str, Any]:
+    """Return an MCP tool descriptor enriched with SysControl capabilities."""
+    capability = capability_for(name)
+    return {
+        "name": name,
+        "description": meta["description"],
+        "parallel": meta.get("parallel", True),
+        "inputSchema": meta["inputSchema"],
+        "annotations": {
+            "readOnlyHint": capability["risk"] == "read",
+            "destructiveHint": capability["risk"] == "destructive",
+            "idempotentHint": capability["risk"] == "read",
+            "openWorldHint": capability["category"] in {"browser", "research"},
+        },
+        "_meta": {"syscontrol": capability},
+    }
+
+
 def _handle_tools_call(id_: int | None, params: dict) -> dict:
     """Execute a ``tools/call`` request and return the JSON-RPC response."""
     tool_name = params.get("name")
     args = params.get("arguments", {})
     if tool_name not in TOOLS:
-        return make_error(id_, -32601, f"Unknown tool: {tool_name}")
+        denied = _permission_check("allow_connectors", str(tool_name))
+        if denied:
+            return make_error(id_, -32601, f"Unknown tool: {tool_name}")
+        try:
+            content = _CONNECTOR_MANAGER.call_tool(str(tool_name), args)
+        except (KeyError, RuntimeError, TimeoutError, OSError) as exc:
+            _audit.record_tool_call(
+                str(tool_name), args, {"error": str(exc)}, risk="write", source="connector",
+            )
+            return make_error(id_, -32603, f"Connector tool failed: {exc}")
+        _audit.record_tool_call(
+            str(tool_name), args, content, risk="write", source="connector",
+        )
+        return {"jsonrpc": "2.0", "id": id_, "result": {"content": content}}
     try:
         result = TOOLS[tool_name]["fn"](args)
+        _audit.record_tool_call(
+            str(tool_name), args, result,
+            risk=capability_for(str(tool_name))["risk"],
+        )
         if isinstance(result, tuple):
             data, img_b64 = result
             content = [
@@ -8811,6 +9407,10 @@ def _handle_tools_call(id_: int | None, params: dict) -> dict:
             content = [{"type": "text", "text": json.dumps(result, indent=2)}]
         return {"jsonrpc": "2.0", "id": id_, "result": {"content": content}}
     except Exception as e:
+        _audit.record_tool_call(
+            str(tool_name), args, {"error": str(e)},
+            risk=capability_for(str(tool_name))["risk"],
+        )
         return make_error(id_, -32603, str(e))
 
 
@@ -8835,20 +9435,18 @@ def handle_request(request: dict) -> dict | None:
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "system-monitor", "version": "1.0.0"},
+                "serverInfo": {"name": "syscontrol", "version": SERVER_VERSION},
             }
         }
 
     if method == "tools/list":
         tools_list = [
-            {
-                "name": name,
-                "description": meta["description"],
-                "parallel": meta.get("parallel", True),
-                "inputSchema": meta["inputSchema"],
-            }
+            _tool_descriptor(name, meta)
             for name, meta in TOOLS.items()
+            if capability_for(name)["available"]
         ]
+        if _permission_check("allow_connectors", "tools/list") is None:
+            tools_list.extend(_CONNECTOR_MANAGER.tool_catalog())
         return {"jsonrpc": "2.0", "id": id_, "result": {"tools": tools_list}}
 
     if method == "tools/call":
@@ -8865,6 +9463,7 @@ def handle_request(request: dict) -> dict | None:
 def main() -> None:
     """MCP stdio transport loop — read JSON-RPC requests from stdin, write responses to stdout."""
     _start_reminder_checker_once()
+    _start_automation_scheduler_once()
     for line in sys.stdin:
         line = line.strip()
         if not line:
